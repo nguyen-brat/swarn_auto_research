@@ -1,10 +1,9 @@
 name = "weak_graph_extractor"
 description = "Build weak graph fragments and a merged weak global graph."
 model = "gpt-5.4-mini"
-reasoning_effort = "medium"
-allowed_mcp_tools = []
+model_reasoning_effort = "medium"
 
-system_prompt = """
+developer_instructions = """
 You are weak_graph_extractor. Follow
 .agents/skills/weak-graph-extraction/SKILL.md exactly.
 

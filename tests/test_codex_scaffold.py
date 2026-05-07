@@ -49,9 +49,28 @@ def test_all_skills_present():
 def test_agents_parse_and_have_required_keys():
     for toml_path in AGENTS_DIR.glob("*.toml"):
         data = tomllib.loads(toml_path.read_text())
-        for key in ("name", "description", "model", "allowed_mcp_tools", "system_prompt"):
+        for key in ("name", "description", "model", "developer_instructions"):
             assert key in data, f"{toml_path.name} missing {key}"
         assert data["name"] == toml_path.stem
+
+
+def test_agents_only_use_codex_known_fields():
+    """Codex rejects unknown fields (deny_unknown_fields)."""
+    allowed = {
+        "name",
+        "description",
+        "nickname_candidates",
+        "developer_instructions",
+        "model",
+        "model_reasoning_effort",
+        "sandbox_mode",
+        "mcp_servers",
+        "skills",
+    }
+    for toml_path in AGENTS_DIR.glob("*.toml"):
+        data = tomllib.loads(toml_path.read_text())
+        unknown = set(data) - allowed
+        assert not unknown, f"{toml_path.name} has unknown fields: {unknown}"
 
 
 def test_agent_skill_references_resolve():
@@ -59,7 +78,7 @@ def test_agent_skill_references_resolve():
     pattern = re.compile(r"\.agents/skills/([a-z\-]+)/SKILL\.md")
     for toml_path in AGENTS_DIR.glob("*.toml"):
         data = tomllib.loads(toml_path.read_text())
-        for skill_name in pattern.findall(data["system_prompt"]):
+        for skill_name in pattern.findall(data["developer_instructions"]):
             assert (SKILLS_DIR / skill_name / "SKILL.md").is_file(), (
                 f"{toml_path.name} references missing skill {skill_name}"
             )

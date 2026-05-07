@@ -1,10 +1,9 @@
 name = "weak_evidence_extractor"
 description = "Cheap first-pass extraction of paper structure with reader_needed_concepts."
 model = "gpt-5.4-mini"
-reasoning_effort = "medium"
-allowed_mcp_tools = ["get_alphaxiv_overview", "get_paper_metadata"]
+model_reasoning_effort = "medium"
 
-system_prompt = """
+developer_instructions = """
 You are weak_evidence_extractor. Follow
 .agents/skills/weak-evidence-extraction/SKILL.md exactly.
 

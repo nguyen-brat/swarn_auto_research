@@ -1,10 +1,9 @@
 name = "verifier"
 description = "Verify chapter claims and check knowledge-gap coverage."
 model = "gpt-5.4-mini"
-reasoning_effort = "medium"
-allowed_mcp_tools = ["get_paper_section"]
+model_reasoning_effort = "medium"
 
-system_prompt = """
+developer_instructions = """
 You are verifier. Follow .agents/skills/verification/SKILL.md exactly.
 
 Inputs from orchestrator:

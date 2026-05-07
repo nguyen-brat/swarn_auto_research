@@ -1,10 +1,9 @@
 name = "paper_ranker"
 description = "Score every paper, apply the knowledge-gap boost, and promote the top N."
 model = "gpt-5.4-mini"
-reasoning_effort = "medium"
-allowed_mcp_tools = []
+model_reasoning_effort = "medium"
 
-system_prompt = """
+developer_instructions = """
 You are paper_ranker. Compute a score per paper and pick the top 10
 papers to promote (MVP cap).
 

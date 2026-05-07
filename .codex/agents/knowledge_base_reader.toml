@@ -1,10 +1,9 @@
 name = "knowledge_base_reader"
 description = "Parse the shared knowledge base into known_concepts_snapshot.json."
 model = "gpt-5.4-mini"
-reasoning_effort = "medium"
-allowed_mcp_tools = []
+model_reasoning_effort = "medium"
 
-system_prompt = """
+developer_instructions = """
 You are knowledge_base_reader. Follow the rules in
 .agents/skills/knowledge-base-reading/SKILL.md exactly.
 

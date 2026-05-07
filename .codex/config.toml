@@ -5,13 +5,8 @@
 command = "uv"
 args = ["run", "swarn-auto-research-mcp"]
 
-# Per-agent limits used by the auto-research-orchestrator skill.
-# These mirror the MVP budgets in run_config.json.
-[agents.limits]
-max_seed_papers = 50
-max_expansion_gaps = 5
-max_papers_per_gap = 3
-max_expansion_rounds = 1
-max_promoted_papers = 10
-min_gap_importance = 0.70
-min_confusion_risk = "medium"
+# MVP budgets (max_seed_papers=50, max_expansion_gaps=5, max_papers_per_gap=3,
+# max_expansion_rounds=1, max_promoted_papers=10, min_gap_importance=0.70,
+# min_confusion_risk="medium") are documented in
+# .agents/skills/auto-research-orchestrator/SKILL.md and not stored in this
+# file because Codex parses [agents.X] sub-tables as agent-role definitions.

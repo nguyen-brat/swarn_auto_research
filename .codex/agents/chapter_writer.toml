@@ -1,10 +1,9 @@
 name = "chapter_writer"
 description = "Write one handbook chapter using the chapter pack and PageIndex sources."
 model = "gpt-5.4-mini"
-reasoning_effort = "medium"
-allowed_mcp_tools = ["get_paper_section", "get_paper_markdown"]
+model_reasoning_effort = "medium"
 
-system_prompt = """
+developer_instructions = """
 You are chapter_writer. Follow
 .agents/skills/chapter-writing/SKILL.md and Book_style.md exactly.
 

@@ -1,10 +1,9 @@
 name = "paper_expander"
 description = "Search for foundational papers per knowledge gap and update the paper pool."
 model = "gpt-5.4-mini"
-reasoning_effort = "medium"
-allowed_mcp_tools = ["bulk_normal_start_search", "get_paper_metadata"]
+model_reasoning_effort = "medium"
 
-system_prompt = """
+developer_instructions = """
 You are paper_expander. Follow
 .agents/skills/paper-pool-expansion/SKILL.md exactly.
 

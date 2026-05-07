@@ -1,10 +1,9 @@
 name = "knowledge_gap_detector"
 description = "Detect important unknown concepts that warrant paper-pool expansion."
 model = "gpt-5.4-mini"
-reasoning_effort = "medium"
-allowed_mcp_tools = []
+model_reasoning_effort = "medium"
 
-system_prompt = """
+developer_instructions = """
 You are knowledge_gap_detector. Follow
 .agents/skills/knowledge-gap-detection/SKILL.md exactly.
 
