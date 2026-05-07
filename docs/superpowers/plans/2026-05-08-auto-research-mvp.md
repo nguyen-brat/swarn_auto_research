@@ -496,7 +496,8 @@ Parse `.agents/knowledge_base.md` into `06_expansion/known_concepts_snapshot.jso
 ```toml
 name = "knowledge_base_reader"
 description = "Parse the shared knowledge base into known_concepts_snapshot.json."
-model = "gpt-5.4"
+model = "gpt-5.4-mini"
+reasoning_effort = "medium"
 allowed_mcp_tools = []
 
 system_prompt = """
@@ -601,7 +602,8 @@ Produce one weak-evidence card per paper without reading full Markdown.
 ```toml
 name = "weak_evidence_extractor"
 description = "Cheap first-pass extraction of paper structure with reader_needed_concepts."
-model = "gpt-5.4"
+model = "gpt-5.4-mini"
+reasoning_effort = "medium"
 allowed_mcp_tools = ["get_alphaxiv_overview", "get_paper_metadata"]
 
 system_prompt = """
@@ -695,7 +697,8 @@ INTRODUCES, USES, USES_DATASET, EVALUATES_ON, MEASURES_WITH, COMPARES_TO, IMPROV
 ```toml
 name = "weak_graph_extractor"
 description = "Build weak graph fragments and a merged weak global graph."
-model = "gpt-5.4"
+model = "gpt-5.4-mini"
+reasoning_effort = "medium"
 allowed_mcp_tools = []
 
 system_prompt = """
@@ -800,7 +803,8 @@ Decide which unknown concepts are important enough to drive paper-pool expansion
 ```toml
 name = "knowledge_gap_detector"
 description = "Detect important unknown concepts that warrant paper-pool expansion."
-model = "gpt-5.4"
+model = "gpt-5.4-mini"
+reasoning_effort = "medium"
 allowed_mcp_tools = []
 
 system_prompt = """
@@ -904,7 +908,8 @@ arxiv_id,gap_id,unknown_concept,title,candidate_role,score,why_needed
 ```toml
 name = "paper_expander"
 description = "Search for foundational papers per knowledge gap and update the paper pool."
-model = "gpt-5.4"
+model = "gpt-5.4-mini"
+reasoning_effort = "medium"
 allowed_mcp_tools = ["bulk_normal_start_search", "get_paper_metadata"]
 
 system_prompt = """
@@ -956,7 +961,8 @@ Ranking is purely arithmetic over fields the other agents already produced; we p
 ```toml
 name = "paper_ranker"
 description = "Score every paper, apply the knowledge-gap boost, and promote the top N."
-model = "gpt-5.4"
+model = "gpt-5.4-mini"
+reasoning_effort = "medium"
 allowed_mcp_tools = []
 
 system_prompt = """
@@ -1081,7 +1087,8 @@ Let downstream agents find sections by ID without scanning the whole paper.
 ```toml
 name = "paper_indexer"
 description = "Build PageIndex trees and node maps from full paper Markdown."
-model = "gpt-5.4"
+model = "gpt-5.4-mini"
+reasoning_effort = "medium"
 allowed_mcp_tools = []
 
 system_prompt = """
@@ -1164,7 +1171,8 @@ Produce one chapter that explains a topic clearly, assuming KB-known concepts an
 ```toml
 name = "chapter_writer"
 description = "Write one handbook chapter using the chapter pack and PageIndex sources."
-model = "gpt-5.4"
+model = "gpt-5.4-mini"
+reasoning_effort = "medium"
 allowed_mcp_tools = ["get_paper_section", "get_paper_markdown"]
 
 system_prompt = """
@@ -1270,7 +1278,8 @@ Catch unsupported claims, overstated results, missing background, and over-expla
 ```toml
 name = "verifier"
 description = "Verify chapter claims and check knowledge-gap coverage."
-model = "gpt-5.4"
+model = "gpt-5.4-mini"
+reasoning_effort = "medium"
 allowed_mcp_tools = ["get_paper_section"]
 
 system_prompt = """
