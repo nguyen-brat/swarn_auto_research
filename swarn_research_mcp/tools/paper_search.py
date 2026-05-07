@@ -10,8 +10,9 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from swarn_research_mcp.services.semantic_scholar import (
-    paper_relevance_search, 
-    recommendations_multi
+    paper_batch,
+    paper_relevance_search,
+    recommendations_multi,
 )
 from swarn_research_mcp.tools.select_paper import select_papers
 from swarn_research_mcp.services.huggingface import search_huggingface_papers, collect_huggingface_trending_papers
@@ -338,6 +339,21 @@ async def get_paper_section(arxiv_id: str, section: str) -> str:
     """Return a single Markdown section from an arXiv paper."""
     markdown = await get_arxiv_markdown(arxiv_id, remove_toc=False)
     return extract_markdown_section(markdown, section)
+
+
+async def get_paper_metadata(arxiv_id: str) -> dict:
+    """Fetch Semantic Scholar metadata for one arXiv paper.
+
+    Returns a flat dict with abstract, citation/reference counts, and
+    linked arxiv IDs. Returns {"arxiv_id": ..., "found": False} when
+    Semantic Scholar has no record for the ID.
+    """
+    rows = await paper_batch([arxiv_id])
+    if not rows:
+        return {"arxiv_id": arxiv_id, "found": False}
+    row = rows[0]
+    row.setdefault("arxiv_id", arxiv_id)
+    return row
 
 
 async def get_alphaxiv_overview(arxiv_id: str) -> dict[str, str]:

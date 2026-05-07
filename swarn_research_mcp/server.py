@@ -14,6 +14,7 @@ from swarn_research_mcp.tools.paper_search import (
     bulk_normal_start_search,
     get_alphaxiv_overview,
     get_paper_markdown,
+    get_paper_metadata,
     get_paper_section,
 )
 
@@ -61,6 +62,15 @@ MCP_TOOL_SPECS: tuple[MCPToolSpec, ...] = (
             "Fetch the alphaXiv overview Markdown for an arXiv paper by arXiv ID. "
             "Returns a dict with arxiv_id and markdown. Use during cheap enrichment "
             "before fetching the full paper."
+        ),
+    ),
+    MCPToolSpec(
+        function=get_paper_metadata,
+        description=(
+            "Fetch Semantic Scholar metadata for one arXiv paper by arXiv ID. "
+            "Returns abstract, citationCount, referenceCount, and arxiv IDs of "
+            "direct citations and references. Returns {arxiv_id, found: false} "
+            "when the paper is not in Semantic Scholar."
         ),
     ),
 )
