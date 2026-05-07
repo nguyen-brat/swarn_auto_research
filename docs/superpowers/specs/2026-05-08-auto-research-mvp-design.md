@@ -235,16 +235,16 @@ The orchestrator skill executes stages in order. Each stage has a single success
 
 ---
 
-## 9. Open question — alphaXiv / S2 metadata access
+## 9. MCP tool additions (decided)
 
-The MCP server registers only three tools today: `bulk_normal_start_search`, `get_paper_markdown`, `get_paper_section`. AlphaXiv overview and Semantic Scholar paper detail are present as **service helpers** but not exposed as MCP tools. For Stage 2 (overview/report enrichment), the orchestrator has two choices:
+The MCP server registers only three tools today: `bulk_normal_start_search`, `get_paper_markdown`, `get_paper_section`. AlphaXiv overview and Semantic Scholar paper detail exist as service helpers but are not exposed.
 
-- **(a)** rely solely on the abstracts already returned by `bulk_normal_start_search` — cheapest, weak-evidence quality is lower.
-- **(b)** add two new MCP tools: `get_alphaxiv_overview(arxiv_id)` and `get_paper_metadata(arxiv_id)`. ~30 lines in `swarn_research_mcp/server.py`, wraps existing service helpers.
+**Decision:** add two new MCP tools in `swarn_research_mcp/server.py`:
 
-**Recommendation:** **(b)**. The plan explicitly relies on overviews/reports; without them `weak_evidence_extractor` is barely better than reading abstracts. Implementation cost is small.
+- `get_alphaxiv_overview(arxiv_id)` → wraps `services/alphaxiv.py` overview helper.
+- `get_paper_metadata(arxiv_id)` → wraps `services/semantic_scholar.py` paper-detail helper.
 
-This is the only deviation from "no new Python code." If you reject (b), MVP downgrades to (a) and the chapter quality drops.
+Both inherit the existing retry wrapper. Estimated diff: ~30 lines. This is the only Python change in MVP.
 
 ---
 
