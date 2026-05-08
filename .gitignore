@@ -11,3 +11,13 @@ wheels/
 
 research_runs/*/
 !research_runs/.gitkeep
+
+# Secrets and local state
+.env
+.claude/
+
+# Debug dumps and ad-hoc data
+.tmp/
+data/
+graphify-out/
+semantic_scholar_debug.json
