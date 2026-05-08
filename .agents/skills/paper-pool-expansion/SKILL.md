@@ -20,16 +20,19 @@ For each item in the expansion queue, find a small number of foundational papers
 
 ## Rules
 - Run exactly ONE expansion round in MVP.
-- For each queue item, run `bulk_normal_start_search` with the item's `search_queries`.
+- **If `expansion_need_queue.json.items` is non-empty, you MUST run a search for every queue item.** Skipping the round is not an option at this stage. The decision to skip Stage 6 entirely is the orchestrator's, and it only applies when the queue is empty.
+- **"Seed papers mention the concept" is NOT a reason to skip.** Papers that USE a concept assume the reader already knows it; expansion adds papers that EXPLAIN the concept (foundational/survey/canonical). These are different sets. Confusing them defeats the purpose of expansion.
+- For each queue item, run `bulk_normal_start_search` with the item's `search_queries`. Even if every result gets rejected, write the search results to `expansion_round_01.json` so the audit trail shows the round actually ran.
 - Accept a candidate only if ALL hold:
   - directly explains the unknown concept (foundational paper, survey, or canonical reference)
   - has an arXiv ID
   - is not already in the pool
   - is needed to understand a key paper in the run
-- Reject if loosely related, application-specific, duplicate, or low relevance.
+- Reject if loosely related, application-specific, duplicate, or low relevance. Record every rejection in `rejected_candidates.csv` with a `why_rejected`.
 - Cap: at most `max_papers_to_add` papers per gap (default 3). Stop early when reached.
 - Total cap across the round: ≤ 15 new papers (5 gaps × 3 papers).
 - Every accepted paper record must include `added_for_gap` and `why_needed`.
+- `expansion_round_01.json` `status` must be `"completed"` whenever the queue had items, even if zero candidates were accepted. `"skipped"` is only permitted when the queue itself was empty (and in that case the orchestrator should never have dispatched you).
 
 ## Accepted CSV columns
 ```

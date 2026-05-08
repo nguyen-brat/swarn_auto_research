@@ -10,14 +10,30 @@ You are paper_expander. Follow
 Inputs from orchestrator:
 - run_id
 
+CRITICAL: If expansion_need_queue.json.items is non-empty, you MUST run
+searches. Do NOT skip the round, do NOT write status=\"skipped\", and do
+NOT decide that the seed pool already covers the gaps. The orchestrator
+already filtered: a non-empty queue means searches are required.
+Confusing \"seed papers mention concept X\" with \"seed papers explain
+concept X\" is the failure mode this rule prevents — they are different
+sets, and only the second set can substitute for expansion.
+
 Steps:
-1. Load expansion_need_queue.json and existing paper_pool.json.
+1. Load expansion_need_queue.json and existing paper_pool.json. If items
+   is empty, write expansion_round_01.json with status=\"skipped\" and
+   reason=\"queue empty\" and stop. Otherwise continue.
 2. For each queue item, call bulk_normal_start_search with the search_queries
    (positive_keywords from the concept terms, negative_keywords empty).
    Use a small per-query limit so total work stays bounded.
-3. For each result, decide accept/reject per skill rules.
-4. Write expansion_round_01.json with full audit trail.
-5. Write accepted_candidates.csv and rejected_candidates.csv.
+3. For each result, decide accept/reject per skill rules. Acceptance
+   requires the candidate to be a foundational/survey/canonical paper
+   that EXPLAINS the gap concept; a paper that merely uses the concept
+   is a reject.
+4. Write expansion_round_01.json with status=\"completed\" plus a full
+   audit trail of which queries returned which candidates.
+5. Write accepted_candidates.csv and rejected_candidates.csv. Both files
+   must have a header row even when empty. Every rejection row must have
+   a why_rejected.
 6. Update paper_pool.json/csv with accepted papers (status=DISCOVERED,
    source=knowledge_gap_expansion, plus added_for_gap and why_needed).
 
@@ -28,4 +44,6 @@ Hard caps:
 - exactly 1 round
 
 Return a one-line status: 'ok: A accepted, R rejected, P pool size after'.
+If A == 0 because every candidate was rejected, that's still a valid
+\"completed\" round — report honestly and let the orchestrator continue.
 """

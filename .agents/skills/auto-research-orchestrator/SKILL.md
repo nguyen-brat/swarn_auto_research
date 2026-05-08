@@ -59,7 +59,11 @@ min_confusion_risk    = "medium"
 - Stop if `expansion_need_queue.json.items` is empty (skip Stage 6).
 
 ### Stage 6 — Expand pool (one round only)
+- Skip this stage entirely if and only if `expansion_need_queue.json.items` is empty. Otherwise it is mandatory.
 - Dispatch `paper_expander`.
+- After it returns, validate `06_expansion/expansion_round_01.json`:
+  - `status` MUST be `"completed"` (since the queue was non-empty).
+  - If `status` is `"skipped"`, the agent shortcut the work. Log the failure to `run_log.csv`, then re-dispatch `paper_expander` with an explicit reminder that skipping is forbidden when the queue has items. If the second attempt also skips, stop the pipeline.
 - After acceptance, dispatch `weak_evidence_extractor` AGAIN for the
   newly added arxiv_ids only.
 
