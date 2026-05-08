@@ -30,15 +30,46 @@ Catch unsupported claims, overstated results, missing background, and over-expla
 
 These catch a chapter that is technically grounded but structurally thin.
 
-- **word_count** below 1200.
-- **comparison_table_missing** if the chapter discusses ≥ 3 methods and contains no Markdown table.
-- **how_it_works_thin** if the chapter discusses ≥ 2 methods and "How it works" (or equivalent) has fewer paragraphs than methods.
-- **strengths_not_list** if Strengths is one paragraph instead of bullets (≥ 3 bullets).
-- **limitations_not_list** if Limitations is one paragraph instead of bullets (≥ 3 bullets).
-- **worked_example_abstract** if the worked example contains no concrete number AND no step-by-step walkthrough naming input → intermediate state → output.
-- **implementation_notes_empty** if Implementation notes does not name ≥ 2 concrete artifacts (libraries, model releases, frameworks, repos), unless the chapter explicitly states none were available.
+### Section detection (do this FIRST, before any form check)
 
-Each form failure is recorded with the offending excerpt and listed in `summary.form_issues`.
+Headings vary in casing and synonyms across chapters. Before reporting any
+section as "missing", scan all `##` and `###` headings in the chapter and
+match them case-insensitively against this synonym table. Use the FIRST
+match. Only report a section missing if NO synonym matches.
+
+| Logical section       | Accepted heading synonyms (case-insensitive, trim whitespace) |
+|-----------------------|---------------------------------------------------------------|
+| `how_it_works`        | "how it works", "mechanism", "how the methods work", "method details", "technical details", "algorithm" |
+| `worked_example`      | "worked example", "example", "concrete example", "case study", "walkthrough" |
+| `strengths`           | "strengths", "when it works well", "advantages" |
+| `limitations`         | "limitations", "weaknesses", "failure modes", "caveats", "tradeoffs" |
+| `comparison`          | "comparison table", "comparison", "method comparison", "side by side" |
+| `implementation_notes`| "implementation notes", "tools", "libraries", "implementation", "tools and implementation", "implementation and tools" |
+| `practical_guidance`  | "practical guidance", "when to use", "when to use and when not to use", "guidance" |
+
+If a check's section is not found via this table, the issue is
+**`<section>_section_missing`**, NOT the depth-related issue. Do not record
+`how_it_works_thin` when the section is genuinely absent — record
+`how_it_works_section_missing` instead. The two are different problems and
+the chapter writer needs different feedback for each.
+
+### Depth checks (only after the section is located)
+
+For each check, parse the chapter's section bounded by the matched heading
+and the next `##` heading (or end of file). Then evaluate:
+
+- **word_count** below 1200, computed across the whole chapter.
+- **comparison_table_missing** if the chapter discusses ≥ 3 methods and contains no Markdown table anywhere (table = at least one line starting with `|` followed by a `| --- |` separator).
+- **how_it_works_thin** if `how_it_works` is found AND the chapter discusses ≥ 2 methods AND the section's paragraph count is fewer than the number of methods. A "paragraph" is a run of non-blank lines separated by blank lines; bold-prefixed paragraphs like `**Mamba.** ...` count as one paragraph each.
+- **strengths_not_list** if `strengths` is found AND the section contains zero Markdown bullet lines (`- ` or `* `) OR fewer than 3 bullets.
+- **limitations_not_list** same check on `limitations`.
+- **worked_example_abstract** if `worked_example` is found AND the section contains NEITHER a digit run of length ≥ 1 (e.g. "8K", "32x", "0.9") NOR all three of the substrings `input`, `state`, `output` (case-insensitive).
+- **implementation_notes_empty** if `implementation_notes` is found AND fewer than 2 backtick-quoted artifacts (`` `vllm` ``, `` `transformers` ``, etc.) OR proper-noun artifacts (capitalized library/model/repo names) are mentioned, UNLESS the section contains the literal phrase "no concrete artifacts" or "none were available".
+
+Each form failure is recorded as a `form_issues` entry with `check`,
+`detail`, and an `excerpt` field showing up to 240 chars of the matched
+text (or "section not found" when the section is genuinely missing). Both
+section-missing and depth issues count toward `summary.form_issue_count`.
 
 ## Output schema
 ```json
@@ -54,7 +85,16 @@ Each form failure is recorded with the offending excerpt and listed in `summary.
     {"concept": "Transformer", "reason": "Two paragraphs of explanation; KB lists it as known."}
   ],
   "form_issues": [
-    {"check": "comparison_table_missing", "detail": "Discusses 5 methods (Mamba, Samba, Transformer-XL, Longformer, PagedAttention) with no comparison table."}
+    {
+      "check": "comparison_table_missing",
+      "detail": "Discusses 5 methods (Mamba, Samba, Transformer-XL, Longformer, PagedAttention) with no comparison table.",
+      "excerpt": ""
+    },
+    {
+      "check": "how_it_works_section_missing",
+      "detail": "No heading matched any synonym for 'How it works'.",
+      "excerpt": "section not found"
+    }
   ],
   "summary": {
     "claims_total": 0,

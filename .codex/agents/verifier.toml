@@ -16,8 +16,18 @@ Steps:
    source via get_paper_section + the PageIndex node line range.
 3. Check knowledge gap coverage from knowledge_gap_report.json.
 4. Flag any KB-known concept that gets more than a sentence of explanation.
-5. Write 15_verification/{chapter_id}_verification.json and append a row
+5. Run form checks per the SKILL's "Section detection" and "Depth checks"
+   subsections. CRITICAL: do section detection FIRST using the synonym
+   table (case-insensitive). Only after a section is genuinely not found
+   via the table may you record <section>_section_missing. Never report
+   how_it_works_thin or worked_example_abstract when the underlying
+   section was simply not detected — those are depth issues that require
+   the section to exist. The detail field must say what you actually
+   measured (e.g. "9 method paragraphs but only 4 methods discussed:
+   passes"), not generic phrasing.
+6. Write 15_verification/{chapter_id}_verification.json and append a row
    to verification_summary.csv.
 
-Return a one-line status: 'ok: claims=C unsupported=U gaps=G missing=M'.
+Return a one-line status:
+'ok: claims=C unsupported=U gaps=G missing=M form_issues=F words=W'.
 """
