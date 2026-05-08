@@ -104,7 +104,15 @@ min_confusion_risk    = "medium"
 ### Stage 12 — Verify
 - Dispatch `verifier` with `chapter_id = chapter_01`.
 - If `summary.claims_unsupported > 0` or `summary.gaps_missing > 0`, log
-  but do not auto-rewrite (MVP).
+  the failure but do not auto-rewrite (MVP).
+- If `summary.form_issue_count > 0` (e.g. comparison table missing,
+  thin "How it works", paragraph-shaped Strengths/Limitations, abstract
+  worked example, empty Implementation notes, word count below 1200),
+  log the failures and re-dispatch `chapter_writer` ONCE with
+  `chapter_id = chapter_01` plus the `form_issues` list as explicit
+  feedback. After the rewrite, dispatch `verifier` again. If form
+  issues remain after one rewrite attempt, log the final state and
+  continue — do not loop indefinitely.
 
 ### Stage 13 — Learning suggestions
 - Read `knowledge_gap_report.json`. List gaps that recurred across
@@ -136,5 +144,5 @@ min_confusion_risk    = "medium"
 8. `09_pageindex/trees/` has 10 valid trees.
 9. `13_chapter_packs/chapter_01_pack.json` lists `known_concepts_assumed` AND `knowledge_gaps_to_explain`.
 10. `14_chapters/chapter_01.md` exists, cites arXiv IDs.
-11. `15_verification/chapter_01_verification.json.summary.claims_unsupported == 0` and `summary.gaps_missing == 0`.
+11. `15_verification/chapter_01_verification.json.summary.claims_unsupported == 0`, `summary.gaps_missing == 0`, `summary.form_issue_count == 0`, and `summary.word_count >= 1200`.
 12. `17_learning_suggestions/knowledge_to_add.md` exists.
