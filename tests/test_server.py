@@ -63,6 +63,25 @@ def test_alphaxiv_overview_returns_arxiv_id_and_markdown(monkeypatch):
     }
 
 
+def test_alphaxiv_overview_returns_structured_error_on_failure(monkeypatch):
+    import asyncio
+    from swarn_research_mcp.tools import paper_search
+
+    async def failing_overview(arxiv_id: str) -> str:
+        raise RuntimeError("404 Not Found")
+
+    monkeypatch.setattr(
+        paper_search,
+        "get_alphaxiv_overview_markdown",
+        failing_overview,
+    )
+
+    result = asyncio.run(paper_search.get_alphaxiv_overview("9999.99999"))
+    assert result["arxiv_id"] == "9999.99999"
+    assert result["markdown"] == ""
+    assert result["error"].startswith("RuntimeError: 404")
+
+
 def test_paper_metadata_tool_registered():
     from swarn_research_mcp.server import MCP_TOOL_SPECS
     names = [spec.function.__name__ for spec in MCP_TOOL_SPECS]

@@ -389,13 +389,23 @@ async def get_paper_metadata(arxiv_id: str) -> dict:
     return row
 
 
-async def get_alphaxiv_overview(arxiv_id: str) -> dict[str, str]:
+async def get_alphaxiv_overview(arxiv_id: str) -> dict:
     """Fetch the alphaXiv overview Markdown for an arXiv paper.
 
-    Returns a dict with arxiv_id and markdown so MCP clients can
-    persist both fields without re-deriving them.
+    Returns a dict with arxiv_id and markdown when the fetch succeeds.
+    On any failure (paper has no alphaXiv overview, network error,
+    upstream API change), returns {"arxiv_id": ..., "markdown": "",
+    "error": "<actual reason>"} so the caller never has to invent a
+    fallback message.
     """
-    markdown = await get_alphaxiv_overview_markdown(arxiv_id)
+    try:
+        markdown = await get_alphaxiv_overview_markdown(arxiv_id)
+    except Exception as exc:
+        return {
+            "arxiv_id": arxiv_id,
+            "markdown": "",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
     return {"arxiv_id": arxiv_id, "markdown": markdown}
 
 if __name__ == "__main__":
