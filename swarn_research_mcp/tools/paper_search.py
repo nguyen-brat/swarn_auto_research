@@ -2,12 +2,49 @@ import asyncio
 import ast
 import datetime
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+
+_DEFAULT_BULK_SEARCH_CONFIG = {
+    "trending_months": 12,
+    "trending_month_limit": 30,
+    "influence_windows": [
+        {"label": "older", "year_offset_start": -4, "year_offset_end": -2,
+         "limit": 10, "min_citation_count": 50, "depth": 1,
+         "citation_limit_per_level": 20, "min_citation_depth": 30, "max_papers": 100},
+        {"label": "middle", "year_offset_start": -2, "year_offset_end": -1,
+         "limit": 10, "min_citation_count": 30, "depth": 2,
+         "citation_limit_per_level": 30, "min_citation_depth": 20, "max_papers": 100},
+        {"label": "recent", "year_offset_start": -1, "year_offset_end": None,
+         "limit": 10, "min_citation_count": 10, "depth": 3,
+         "citation_limit_per_level": 20, "min_citation_depth": 10, "max_papers": 100},
+    ],
+    "huggingface_search_limit": 120,
+    "recommendations_seed_cap": 100,
+    "recommendations_limit": 100,
+    "survey_limit": 5,
+    "survey_citation_limit_per_level": 30,
+    "survey_max_papers": 100,
+}
+
+
+def _load_bulk_search_config():
+    path = os.environ.get(
+        "SWARN_BULK_SEARCH_CONFIG",
+        str(Path(__file__).resolve().parents[1] / "bulk_search_config.json"),
+    )
+    cfg = dict(_DEFAULT_BULK_SEARCH_CONFIG)
+    p = Path(path)
+    if p.is_file():
+        overrides = json.loads(p.read_text())
+        cfg.update(overrides)
+    return cfg
 
 from swarn_research_mcp.services.semantic_scholar import (
     paper_batch,
@@ -131,43 +168,32 @@ async def bulk_normal_start_search(
     negative_keywords,
     output_dir
 ):
+    cfg = _load_bulk_search_config()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     current_date = datetime.datetime.now()
     current_year = current_date.year
     start_year = str(current_year - 4)
-    trending_months = _recent_month_filters(current_year, current_date.month, month_count=12)
+    trending_months = _recent_month_filters(
+        current_year, current_date.month, month_count=cfg["trending_months"]
+    )
+
+    def _resolve_year(offset):
+        return None if offset is None else str(current_year + offset)
+
     influence_search_windows = [
         {
-            "label": "older",
-            "start_year": str(current_year - 4),
-            "end_year": str(current_year - 2),
-            "limit": 10,
-            "min_citation_count": 50,
-            "depth": 1,
-            "citation_limit_per_level": 20,
-            "min_citation_depth": 30,
-        },
-        {
-            "label": "middle",
-            "start_year": str(current_year - 2),
-            "end_year": str(current_year - 1),
-            "limit": 10,
-            "min_citation_count": 30,
-            "depth": 2,
-            "citation_limit_per_level": 30,
-            "min_citation_depth": 20,
-        },
-        {
-            "label": "recent",
-            "start_year": str(current_year - 1),
-            "end_year": None,
-            "limit": 10,
-            "min_citation_count": 10,
-            "depth": 3,
-            "citation_limit_per_level": 20,
-            "min_citation_depth": 10,
-        },
+            "label": w["label"],
+            "start_year": _resolve_year(w["year_offset_start"]),
+            "end_year": _resolve_year(w["year_offset_end"]),
+            "limit": w["limit"],
+            "min_citation_count": w["min_citation_count"],
+            "depth": w["depth"],
+            "citation_limit_per_level": w["citation_limit_per_level"],
+            "min_citation_depth": w["min_citation_depth"],
+            "max_papers": w["max_papers"],
+        }
+        for w in cfg["influence_windows"]
     ]
     bulk_results = {}
     excluded_paper_ids = set()
@@ -177,7 +203,9 @@ async def bulk_normal_start_search(
         f"trending_months={trending_months[0]}..{trending_months[-1]}"
     )
     monthly_trending_tasks = [
-        asyncio.create_task(collect_huggingface_trending_papers(month=month, limit=30))
+        asyncio.create_task(collect_huggingface_trending_papers(
+            month=month, limit=cfg["trending_month_limit"]
+        ))
         for month in trending_months
     ]
 
@@ -197,16 +225,21 @@ async def bulk_normal_start_search(
                 citation_limit_per_level=window["citation_limit_per_level"],
                 min_citation_depth=window["min_citation_depth"],
                 exclude_paper_ids=set(excluded_paper_ids),
-                max_papers=100,
+                max_papers=window["max_papers"],
             ))
             for window in influence_search_windows
         ]
-        trending_task = asyncio.create_task(search_huggingface_papers(query=query, limit=120))
+        trending_task = asyncio.create_task(
+            search_huggingface_papers(query=query, limit=cfg["huggingface_search_limit"])
+        )
 
         trending_paper_result = await trending_task
         print(f"Bulk normal query {index}: HuggingFace results={len(trending_paper_result)}")
         recommendations_task = asyncio.create_task(
-            recommendations_multi(list(trending_paper_result.keys())[:100], limit=100)
+            recommendations_multi(
+                list(trending_paper_result.keys())[:cfg["recommendations_seed_cap"]],
+                limit=cfg["recommendations_limit"],
+            )
         )
         influence_results = await asyncio.gather(*influence_tasks)
         influence_paper_result = {}
@@ -234,26 +267,26 @@ async def bulk_normal_start_search(
         )
         survey_result_old = asyncio.create_task(paper_relevance_search(
             query=survey_query,
-            limit=5,
+            limit=cfg["survey_limit"],
             start_year=str(datetime.datetime.now().year - 2),
             end_year=str(datetime.datetime.now().year - 1),
             min_citation_count=30,
             depth=1,
-            citation_limit_per_level=30,
+            citation_limit_per_level=cfg["survey_citation_limit_per_level"],
             min_citation_depth=30,
             exclude_paper_ids=set(excluded_paper_ids),
-            max_papers=100,
+            max_papers=cfg["survey_max_papers"],
         ))
         survey_result_new = asyncio.create_task(paper_relevance_search(
             query=survey_query,
-            limit=5,
+            limit=cfg["survey_limit"],
             start_year=str(datetime.datetime.now().year - 1),
             min_citation_count=10,
             depth=1,
-            citation_limit_per_level=30,
+            citation_limit_per_level=cfg["survey_citation_limit_per_level"],
             min_citation_depth=10,
             exclude_paper_ids=set(excluded_paper_ids),
-            max_papers=100,
+            max_papers=cfg["survey_max_papers"],
         ))
         survey_result_new_result = await survey_result_new
         survey_result_old_result = await survey_result_old
