@@ -45,6 +45,23 @@ async def run_blocking(func, *args, **kwargs):
         executor.shutdown(wait=True)
 
 
+def _is_connection_level_error(exc):
+    """True if the failure is something a different network path could fix.
+
+    HTTPError (4xx/5xx) is an upstream answer; a proxy will get the same
+    answer. Only retry through proxy for transport-level failures
+    (timeouts, connection refused, DNS, SSL).
+    """
+    if isinstance(exc, requests.HTTPError):
+        return False
+    return isinstance(exc, (
+        requests.ConnectionError,
+        requests.Timeout,
+        requests.exceptions.ProxyError,
+        requests.exceptions.SSLError,
+    ))
+
+
 def _request(
     method,
     url,
@@ -72,6 +89,9 @@ def _request(
                 raise
             last_error = exc
             print(f"  Direct request attempt {attempt}/{direct_retries} failed: {exc}")
+            # Upstream HTTP error (404/400/etc.) — proxy won't change the answer.
+            if not _is_connection_level_error(exc):
+                raise
 
     if not PROXY_POOL:
         raise last_error

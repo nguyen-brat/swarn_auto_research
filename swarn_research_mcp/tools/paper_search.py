@@ -48,6 +48,7 @@ def _load_bulk_search_config():
 
 from swarn_research_mcp.services.semantic_scholar import (
     paper_batch,
+    paper_metadata_simple,
     paper_relevance_search,
     recommendations_multi,
 )
@@ -363,28 +364,72 @@ async def bulk_normal_start_search(
     return selected_results
 
 
-async def get_paper_markdown(arxiv_id: str) -> str:
-    """Return the full Markdown content for an arXiv paper."""
-    return await get_arxiv_markdown(arxiv_id, remove_toc=False)
+async def get_paper_markdown(arxiv_id: str) -> dict:
+    """Return the full Markdown content for an arXiv paper.
+
+    Returns {"arxiv_id", "markdown"} on success.
+    Returns {"arxiv_id", "markdown": "", "error": "<TypeName: msg>"}
+    on any failure (bad ID, upstream 4xx/5xx, network error) so the
+    caller never has to invent a fallback.
+    """
+    try:
+        markdown = await get_arxiv_markdown(arxiv_id, remove_toc=False)
+    except Exception as exc:
+        return {
+            "arxiv_id": arxiv_id,
+            "markdown": "",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    return {"arxiv_id": arxiv_id, "markdown": markdown}
 
 
-async def get_paper_section(arxiv_id: str, section: str) -> str:
-    """Return a single Markdown section from an arXiv paper."""
-    markdown = await get_arxiv_markdown(arxiv_id, remove_toc=False)
-    return extract_markdown_section(markdown, section)
+async def get_paper_section(arxiv_id: str, section: str) -> dict:
+    """Return a single Markdown section from an arXiv paper.
+
+    Returns {"arxiv_id", "section_path", "section"} on success.
+    Returns {"arxiv_id", "section_path", "section": "",
+    "error": "<TypeName: msg>"} on any failure (bad ID, missing
+    heading, upstream error). Heading lookup is case-insensitive
+    and ignores leading numeric prefixes like "1 Introduction".
+    """
+    try:
+        markdown = await get_arxiv_markdown(arxiv_id, remove_toc=False)
+        section_text = extract_markdown_section(markdown, section)
+    except Exception as exc:
+        return {
+            "arxiv_id": arxiv_id,
+            "section_path": section,
+            "section": "",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    return {
+        "arxiv_id": arxiv_id,
+        "section_path": section,
+        "section": section_text,
+    }
 
 
 async def get_paper_metadata(arxiv_id: str) -> dict:
     """Fetch Semantic Scholar metadata for one arXiv paper.
 
-    Returns a flat dict with abstract, citation/reference counts, and
-    linked arxiv IDs. Returns {"arxiv_id": ..., "found": False} when
-    Semantic Scholar has no record for the ID.
+    Returns a flat dict with title, year, abstract, citationCount,
+    and referenceCount on success.
+    Returns {"arxiv_id", "found": False} when Semantic Scholar has
+    no record for the ID.
+    Returns {"arxiv_id", "found": False, "error": "<TypeName: msg>"}
+    on network/HTTP failure so the caller never has to invent a
+    fallback.
     """
-    rows = await paper_batch([arxiv_id])
-    if not rows:
+    try:
+        row = await paper_metadata_simple(arxiv_id)
+    except Exception as exc:
+        return {
+            "arxiv_id": arxiv_id,
+            "found": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    if not row:
         return {"arxiv_id": arxiv_id, "found": False}
-    row = rows[0]
     row.setdefault("arxiv_id", arxiv_id)
     return row
 

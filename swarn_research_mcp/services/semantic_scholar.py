@@ -1120,6 +1120,46 @@ async def paper_bulk_search(query, start_year=None, end_year=None, min_citation_
     )
 
 
+PAPER_METADATA_SIMPLE_FIELDS = (
+    "paperId,title,year,externalIds,abstract,citationCount,referenceCount"
+)
+
+
+def _paper_metadata_simple_sync(arxiv_id: str) -> dict:
+    """Fetch one paper's metadata using a small field list.
+
+    The full PAPER_WITH_LINKED_FIELDS list (used by paper_batch) makes
+    Semantic Scholar return HTTP 400 for single-paper batch lookups.
+    The MCP-tool consumer only needs scalar metadata plus citation/
+    reference counts, so use the smaller search-fields set instead.
+    """
+    payload = {"ids": [f"ArXiv:{arxiv_id}"]}
+    params = {"fields": PAPER_METADATA_SIMPLE_FIELDS}
+    data = _semantic_scholar_post(
+        f"{GRAPH_BASE}/paper/batch",
+        payload,
+        params=params,
+        headers=HEADERS,
+    )
+    rows = _normalize_batch_response(data)
+    if not rows or not rows[0]:
+        return {}
+    paper = rows[0]
+    return {
+        "arxiv_id": safe_get(paper, "externalIds.ArXiv") or arxiv_id,
+        "scholar_semantic_id": paper.get("paperId"),
+        "title": paper.get("title"),
+        "year": paper.get("year"),
+        "abstract": paper.get("abstract"),
+        "citationCount": paper.get("citationCount") or 0,
+        "referenceCount": paper.get("referenceCount") or 0,
+    }
+
+
+async def paper_metadata_simple(arxiv_id: str) -> dict:
+    return await run_blocking(_paper_metadata_simple_sync, arxiv_id)
+
+
 # ---------------------------------------------------------------------------
 # 1-D  Paper Batch  (fetch many papers in ONE request)
 # ---------------------------------------------------------------------------

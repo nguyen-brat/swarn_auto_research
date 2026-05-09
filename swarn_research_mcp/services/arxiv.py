@@ -17,8 +17,12 @@ async def get_arxiv_markdown(arxiv_id: str, remove_toc: bool = False) -> str:
     return await run_blocking(_get_arxiv_markdown_sync, arxiv_id, remove_toc)
 
 
+_HEADING_NUMERIC_PREFIX = re.compile(r"^\d+(?:\.\d+)*\.?\s+")
+
+
 def _normalize_heading(title: str) -> str:
     normalized = re.sub(r"\s+", " ", title.strip().lower())
+    normalized = _HEADING_NUMERIC_PREFIX.sub("", normalized)
     return normalized.rstrip(":").strip()
 
 

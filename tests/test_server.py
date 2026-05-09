@@ -92,19 +92,19 @@ def test_paper_metadata_returns_flat_dict(monkeypatch):
     import asyncio
     from swarn_research_mcp.tools import paper_search
 
-    async def fake_paper_batch(paper_ids):
-        assert paper_ids == ["2304.08485"]
-        return [{
+    async def fake_metadata(arxiv_id):
+        assert arxiv_id == "2304.08485"
+        return {
             "arxiv_id": "2304.08485",
             "scholar_semantic_id": "abc123",
+            "title": "LLaVA",
+            "year": 2023,
             "abstract": "We present LLaVA...",
-            "citations": ["2103.00020"],
             "citationCount": 1234,
-            "references": [],
-            "referenceCount": 0,
-        }]
+            "referenceCount": 42,
+        }
 
-    monkeypatch.setattr(paper_search, "paper_batch", fake_paper_batch)
+    monkeypatch.setattr(paper_search, "paper_metadata_simple", fake_metadata)
 
     result = asyncio.run(paper_search.get_paper_metadata("2304.08485"))
     assert result["arxiv_id"] == "2304.08485"
@@ -117,13 +117,111 @@ def test_paper_metadata_returns_empty_when_not_found(monkeypatch):
     import asyncio
     from swarn_research_mcp.tools import paper_search
 
-    async def fake_paper_batch(paper_ids):
-        return []
+    async def fake_metadata(arxiv_id):
+        return {}
 
-    monkeypatch.setattr(paper_search, "paper_batch", fake_paper_batch)
+    monkeypatch.setattr(paper_search, "paper_metadata_simple", fake_metadata)
 
     result = asyncio.run(paper_search.get_paper_metadata("9999.99999"))
     assert result == {"arxiv_id": "9999.99999", "found": False}
+
+
+def test_paper_metadata_returns_structured_error_on_failure(monkeypatch):
+    import asyncio
+    from swarn_research_mcp.tools import paper_search
+
+    async def failing(arxiv_id):
+        raise RuntimeError("400 Bad Request")
+
+    monkeypatch.setattr(paper_search, "paper_metadata_simple", failing)
+
+    result = asyncio.run(paper_search.get_paper_metadata("2304.08485"))
+    assert result["arxiv_id"] == "2304.08485"
+    assert result["found"] is False
+    assert result["error"].startswith("RuntimeError: 400")
+
+
+def test_paper_markdown_returns_dict_with_markdown(monkeypatch):
+    import asyncio
+    from swarn_research_mcp.tools import paper_search
+
+    async def fake_md(arxiv_id, remove_toc):
+        assert arxiv_id == "2304.08485"
+        assert remove_toc is False
+        return "## 1 Introduction\n\nWe present LLaVA..."
+
+    monkeypatch.setattr(paper_search, "get_arxiv_markdown", fake_md)
+
+    result = asyncio.run(paper_search.get_paper_markdown("2304.08485"))
+    assert result == {
+        "arxiv_id": "2304.08485",
+        "markdown": "## 1 Introduction\n\nWe present LLaVA...",
+    }
+
+
+def test_paper_markdown_returns_structured_error_on_failure(monkeypatch):
+    import asyncio
+    from swarn_research_mcp.tools import paper_search
+
+    async def failing(arxiv_id, remove_toc):
+        raise RuntimeError("404 Not Found")
+
+    monkeypatch.setattr(paper_search, "get_arxiv_markdown", failing)
+
+    result = asyncio.run(paper_search.get_paper_markdown("9999.99999"))
+    assert result["arxiv_id"] == "9999.99999"
+    assert result["markdown"] == ""
+    assert result["error"].startswith("RuntimeError: 404")
+
+
+def test_paper_section_returns_dict_with_section(monkeypatch):
+    import asyncio
+    from swarn_research_mcp.tools import paper_search
+
+    async def fake_md(arxiv_id, remove_toc):
+        return "## 1 Introduction\n\nIntro body.\n\n## 2 Method\n\nMethod body."
+
+    monkeypatch.setattr(paper_search, "get_arxiv_markdown", fake_md)
+
+    result = asyncio.run(paper_search.get_paper_section("2304.08485", "Introduction"))
+    assert result["arxiv_id"] == "2304.08485"
+    assert result["section_path"] == "Introduction"
+    assert "Intro body." in result["section"]
+    assert "Method body." not in result["section"]
+
+
+def test_paper_section_returns_structured_error_when_section_missing(monkeypatch):
+    import asyncio
+    from swarn_research_mcp.tools import paper_search
+
+    async def fake_md(arxiv_id, remove_toc):
+        return "## Some heading\n\nContent."
+
+    monkeypatch.setattr(paper_search, "get_arxiv_markdown", fake_md)
+
+    result = asyncio.run(paper_search.get_paper_section("2304.08485", "Nope"))
+    assert result["section"] == ""
+    assert "section not found" in result["error"]
+
+
+def test_extract_markdown_section_strips_numeric_prefixes():
+    from swarn_research_mcp.services.arxiv import extract_markdown_section
+
+    md = (
+        "## 1 Introduction\n"
+        "Intro body.\n\n"
+        "## 2 Method\n"
+        "Method body.\n\n"
+        "## 3.1 Subsection\n"
+        "Sub body.\n"
+    )
+    intro = extract_markdown_section(md, "Introduction")
+    assert intro.startswith("## 1 Introduction")
+    assert "Intro body." in intro
+    assert "Method body." not in intro
+
+    sub = extract_markdown_section(md, "Subsection")
+    assert "Sub body." in sub
 
 
 if __name__ == "__main__":
