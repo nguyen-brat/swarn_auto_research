@@ -34,6 +34,31 @@ SECTION_HEADING_METHOD_ID_PATTERNS = re.compile(
 )
 
 METHOD_REQUIRED_SOURCE_SECTIONS = {"theory", "algorithm", "example", "limitations"}
+FAMILY_REQUIRED_HEADINGS = [
+    "## Summary",
+    "## Motivation",
+    "## Core Idea",
+    "## Common Pipeline",
+    "## Main Variants",
+    "## Representative Methods",
+    "## Strengths",
+    "## Limitations",
+    "## When to Use",
+    "## Related Families",
+]
+METHOD_REQUIRED_HEADINGS = [
+    "## Summary",
+    "## Motivation",
+    "## Intuition",
+    "## Theory",
+    "## Algorithm",
+    "## Worked Example",
+    "## Interpretation",
+    "## Strengths",
+    "## Limitations",
+    "## Practical Guidance",
+    "## Related Methods",
+]
 METHOD_MIN_WORDS = 1500
 FAMILY_MIN_WORDS = 1000
 STANDALONE_GROUP_ID = "standalone"
@@ -194,6 +219,21 @@ def _markdown_sections(text: str) -> dict[str, str]:
     return {title: "\n".join(lines).strip() for title, lines in sections.items()}
 
 
+def _diff_headings(text: str, required: list[str]) -> dict[str, Any]:
+    """Return missing/extra/order diagnostics. Allows trailing ## References."""
+    headings = [line.strip() for line in text.splitlines() if line.strip().startswith("## ")]
+    if headings and headings[-1] == "## References":
+        headings = headings[:-1]
+    required_set = set(required)
+    observed_set = set(headings)
+    missing = [heading for heading in required if heading not in observed_set]
+    extra = [heading for heading in headings if heading not in required_set]
+    observed_required = [heading for heading in headings if heading in required_set]
+    expected_observed_order = [heading for heading in required if heading in set(observed_required)]
+    out_of_order = observed_required != expected_observed_order
+    return {"missing": missing, "extra": extra, "out_of_order": out_of_order}
+
+
 def _copied_source_outline_count(text: str) -> int:
     return sum(1 for line in text.splitlines() if COPIED_SOURCE_OUTLINE_PATTERN.search(line))
 
@@ -284,6 +324,45 @@ def validate_research_book_run(run_dir: Path | str) -> list[dict[str, str]]:
     methods = outline.get("methods", [])
     families = outline.get("families", [])
     issues.extend(_validate_parts(outline, families))
+    chapters_dir = run_path / "14_chapters"
+    for family in families:
+        family_id = family.get("id")
+        if family.get("is_group") or not family_id:
+            continue
+        family_path = chapters_dir / "families" / f"{family_id}.md"
+        if not family_path.exists():
+            continue
+        diff = _diff_headings(family_path.read_text(encoding="utf-8"), FAMILY_REQUIRED_HEADINGS)
+        if diff["missing"] or diff["extra"] or diff["out_of_order"]:
+            issues.append(
+                {
+                    "severity": "error",
+                    "code": "wrong_chapter_headings",
+                    "detail": (
+                        f"family/{family_id}: missing={diff['missing']} "
+                        f"extra={diff['extra']} out_of_order={diff['out_of_order']}"
+                    ),
+                }
+            )
+    for method in methods:
+        method_id = method.get("id")
+        if not method_id:
+            continue
+        method_path = chapters_dir / "methods" / f"{method_id}.md"
+        if not method_path.exists():
+            continue
+        diff = _diff_headings(method_path.read_text(encoding="utf-8"), METHOD_REQUIRED_HEADINGS)
+        if diff["missing"] or diff["extra"] or diff["out_of_order"]:
+            issues.append(
+                {
+                    "severity": "error",
+                    "code": "wrong_chapter_headings",
+                    "detail": (
+                        f"method/{method_id}: missing={diff['missing']} "
+                        f"extra={diff['extra']} out_of_order={diff['out_of_order']}"
+                    ),
+                }
+            )
     method_by_id = _method_by_id(outline)
     family_by_id = {family.get("id"): family for family in families if family.get("id")}
 
@@ -523,15 +602,6 @@ def validate_research_book_run(run_dir: Path | str) -> list[dict[str, str]]:
                         "detail": f"{family_id} contains generic placeholder prose",
                     }
                 )
-            if "## Core design pattern" not in family_text:
-                issues.append(
-                    {
-                        "severity": "error",
-                        "code": "family_core_design_pattern_missing",
-                        "detail": f"{family_id} is missing ## Core design pattern",
-                    }
-                )
-
     for method in methods:
         method_id = method.get("id")
         if not method_id:
