@@ -46,6 +46,7 @@
 from __future__ import annotations
 import asyncio
 import importlib.util
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
@@ -101,6 +102,19 @@ def test_parses_json_with_schema():
             return await m.run_one_shot(prompt="p", model="m", system="s",
                                          schema={"required": ["a"]})
     assert asyncio.run(go()) == {"a": 1}
+
+
+def test_logs_stage_on_json_success(caplog, monkeypatch):
+    m = _load()
+    fake = _FakeCodex(_FakeThread(['{"a": 1}']))
+    monkeypatch.setenv("CODEX_STAGE_ID", "query_planner")
+    caplog.set_level(logging.INFO, logger="sdk.codex.one_shot")
+    async def go():
+        with patch.object(m, "AsyncCodex", return_value=fake):
+            return await m.run_one_shot(prompt="p", model="m", system="s",
+                                         schema={"required": ["a"]})
+    assert asyncio.run(go()) == {"a": 1}
+    assert "stage=query_planner" in caplog.text
 
 
 def test_retries_on_bad_json_then_succeeds():
@@ -212,8 +226,8 @@ async def run_one_shot(
                     "Return a JSON object with all required fields."
                 )
                 continue
-            _LOG.info("run_one_shot ok model=%s attempts=%d wall=%.2fs in=%d out=%d",
-                      model, attempt + 1, _time.monotonic() - started,
+            _LOG.info("run_one_shot ok stage=%s model=%s attempts=%d wall=%.2fs in=%d out=%d",
+                      stage_id, model, attempt + 1, _time.monotonic() - started,
                       len(full_prompt), len(final_text))
             return parsed
 
@@ -225,7 +239,7 @@ async def run_one_shot(
 - [ ] **Step 4: Run tests**
 
 Run: `pytest tests/test_sdk_run_one_shot.py -v`
-Expected: PASS (5 tests).
+Expected: PASS (6 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -316,7 +330,7 @@ async def run_one_shot_batch(
 - [ ] **Step 4: Run tests**
 
 Run: `pytest tests/test_sdk_run_one_shot.py -v`
-Expected: PASS (7 tests).
+Expected: PASS (8 tests).
 
 - [ ] **Step 5: Commit**
 
