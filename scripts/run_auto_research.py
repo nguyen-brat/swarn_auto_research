@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from swarn_research_mcp.research_book import BOOK_FILE_BY_ID
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNS_ROOT = REPO_ROOT / "research_runs"
@@ -494,14 +496,27 @@ def build_chapter_targets(run_dir: Path) -> list[dict[str, str]]:
     for section in outline.get("book_sections", []):
         if section["id"] == "appendices":
             continue
-        targets.append({"type": "book", "id": section["id"]})
+        target = {"type": "book", "id": section["id"]}
+        _validate_chapter_target(target)
+        targets.append(target)
     for family in outline.get("families", []):
         if family.get("is_group") or family["id"] == "standalone":
             continue
-        targets.append({"type": "families", "id": family["id"]})
+        target = {"type": "families", "id": family["id"]}
+        _validate_chapter_target(target)
+        targets.append(target)
     for method in outline.get("methods", []):
-        targets.append({"type": "methods", "id": method["id"]})
+        target = {"type": "methods", "id": method["id"]}
+        _validate_chapter_target(target)
+        targets.append(target)
     return targets
+
+
+def _validate_chapter_target(target: dict[str, str]) -> None:
+    target_type = target["type"]
+    if target_type not in {"book", "families", "methods"}:
+        raise ValueError(f"unsafe target type: {target_type}")
+    _safe_component(target["id"], field="target id")
 
 
 def chunked(items: list[Any], size: int) -> list[list[Any]]:
@@ -556,20 +571,25 @@ def run_stage_12(run_dir: Path) -> None:
 
 
 def _expected_chapter_pack(target: dict[str, str]) -> str:
-    return f"13_chapter_packs/{target['type']}/{target['id']}.json"
+    _validate_chapter_target(target)
+    return f"13_chapter_packs/{target['type']}/{target['id']}_pack.json"
 
 
 def _expected_chapter_file(target: dict[str, str]) -> str:
+    _validate_chapter_target(target)
+    if target["type"] == "book":
+        filename = BOOK_FILE_BY_ID.get(target["id"], f"{target['id']}.md")
+        return f"14_chapters/book/{filename}"
     return f"14_chapters/{target['type']}/{target['id']}.md"
 
 
 def _expected_verification_file(target: dict[str, str]) -> str:
+    _validate_chapter_target(target)
     return f"15_verification/{target['type']}/{target['id']}_verification.json"
 
 
 def run_stage_13(run_dir: Path) -> None:
     targets = build_chapter_targets(run_dir)
-    missing = [t for t in targets if not (run_dir / _expected_chapter_pack(t)).exists()]
     specs = [
         ShardSpec(
             stage="13",
@@ -585,7 +605,8 @@ def run_stage_13(run_dir: Path) -> None:
             ),
             expected_outputs=[_expected_chapter_pack(t) for t in chunk],
         )
-        for idx, chunk in enumerate(chunked(missing, 1), start=1)
+        for idx, chunk in enumerate(chunked(targets, 1), start=1)
+        if any(not (run_dir / _expected_chapter_pack(t)).exists() for t in chunk)
     ]
     if specs:
         run_shards(run_dir, specs)
@@ -593,42 +614,41 @@ def run_stage_13(run_dir: Path) -> None:
 
 def run_stage_14(run_dir: Path) -> None:
     targets = build_chapter_targets(run_dir)
-    missing = [t for t in targets if not (run_dir / _expected_chapter_file(t)).exists()]
     specs = []
-    for idx, chunk in enumerate(chunked(missing, 2), start=1):
-        types = {t["type"] for t in chunk}
-        agent = (
-            "method_chapter_writer"
-            if types == {"methods"}
-            else "family_chapter_writer"
-            if types == {"families"}
-            else "book_section_writer"
-        )
-        specs.append(
-            ShardSpec(
-                stage="14",
-                shard_id=f"write-{idx:03d}",
-                agent=agent,
-                model="gpt-5.4",
-                prompt=_generic_agent_prompt(
-                    f".codex/agents/{agent}.toml",
-                    run_dir.name,
-                    "14",
-                    f"write-{idx:03d}",
-                    {"targets": chunk},
-                ),
-                expected_outputs=[_expected_chapter_file(t) for t in chunk],
+    agent_by_type = {
+        "book": "book_section_writer",
+        "families": "family_chapter_writer",
+        "methods": "method_chapter_writer",
+    }
+    for target_type in ("book", "families", "methods"):
+        typed_targets = [t for t in targets if t["type"] == target_type]
+        for idx, chunk in enumerate(chunked(typed_targets, 2), start=1):
+            if all((run_dir / _expected_chapter_file(t)).exists() for t in chunk):
+                continue
+            agent = agent_by_type[target_type]
+            shard_id = f"write-{target_type}-{idx:03d}"
+            specs.append(
+                ShardSpec(
+                    stage="14",
+                    shard_id=shard_id,
+                    agent=agent,
+                    model="gpt-5.4",
+                    prompt=_generic_agent_prompt(
+                        f".codex/agents/{agent}.toml",
+                        run_dir.name,
+                        "14",
+                        shard_id,
+                        {"targets": chunk},
+                    ),
+                    expected_outputs=[_expected_chapter_file(t) for t in chunk],
+                )
             )
-        )
     if specs:
         run_shards(run_dir, specs)
 
 
 def run_stage_15(run_dir: Path) -> None:
     targets = build_chapter_targets(run_dir)
-    missing = [
-        t for t in targets if not (run_dir / _expected_verification_file(t)).exists()
-    ]
     specs = [
         ShardSpec(
             stage="15",
@@ -644,36 +664,119 @@ def run_stage_15(run_dir: Path) -> None:
             ),
             expected_outputs=[_expected_verification_file(t) for t in chunk],
         )
-        for idx, chunk in enumerate(chunked(missing, 2), start=1)
+        for idx, chunk in enumerate(chunked(targets, 2), start=1)
+        if any(not (run_dir / _expected_verification_file(t)).exists() for t in chunk)
     ]
     if specs:
         run_shards(run_dir, specs)
+    _write_verification_summary(run_dir, targets)
+
+
+def _write_verification_summary(run_dir: Path, targets: list[dict[str, str]]) -> None:
+    summary_dir = run_dir / "15_verification"
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for target in targets:
+        path = run_dir / _expected_verification_file(target)
+        if not path.exists():
+            raise RuntimeError(f"Stage 15 missing verification file: {path}")
+        data = json.loads(path.read_text())
+        summary = data.get("summary", {})
+        rows.append(
+            {
+                "target_type": target["type"],
+                "target_id": target["id"],
+                "passed": data.get("passed"),
+                "claims_total": summary.get("claims_total", 0),
+                "claims_unsupported": summary.get("claims_unsupported", 0),
+                "claims_overstated": summary.get("claims_overstated", 0),
+                "gaps_covered": summary.get("gaps_covered", 0),
+                "gaps_missing": summary.get("gaps_missing", 0),
+                "word_count": summary.get("word_count", 0),
+                "form_issue_count": summary.get("form_issue_count", 0),
+                "equations_rendered": summary.get("equations_rendered", 0),
+                "pseudocode_blocks": summary.get("pseudocode_blocks", 0),
+            }
+        )
+    summary_path = summary_dir / "verification_summary.csv"
+    tmp_path = summary_dir / "verification_summary.csv.tmp"
+    with tmp_path.open("w", newline="") as handle:
+        fieldnames = [
+            "target_type",
+            "target_id",
+            "passed",
+            "claims_total",
+            "claims_unsupported",
+            "claims_overstated",
+            "gaps_covered",
+            "gaps_missing",
+            "word_count",
+            "form_issue_count",
+            "equations_rendered",
+            "pseudocode_blocks",
+        ]
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    tmp_path.replace(summary_path)
 
 
 def run_stage_16(run_dir: Path) -> None:
     targets = build_chapter_targets(run_dir)
-    specs = [
-        ShardSpec(
-            stage="16",
-            shard_id=f"manifest-{idx:03d}",
-            agent="chapter_manifest_builder",
-            model="gpt-5.4",
-            prompt=_generic_agent_prompt(
-                ".codex/agents/chapter_manifest_builder.toml",
-                run_dir.name,
-                "16",
-                f"manifest-{idx:03d}",
-                {"targets": chunk},
-            ),
-            expected_outputs=[f"16_book/chapters_manifest_shard_manifest-{idx:03d}.json"],
+    shard_paths: list[str] = []
+    specs = []
+    for idx, chunk in enumerate(chunked(targets, 2), start=1):
+        shard_id = f"manifest-{idx:03d}"
+        shard_path = f"16_book/chapters_manifest_shard_{shard_id}.json"
+        shard_paths.append(shard_path)
+        if (run_dir / shard_path).exists():
+            continue
+        specs.append(
+            ShardSpec(
+                stage="16",
+                shard_id=shard_id,
+                agent="chapter_manifest_builder",
+                model="gpt-5.4",
+                prompt=_generic_agent_prompt(
+                    ".codex/agents/chapter_manifest_builder.toml",
+                    run_dir.name,
+                    "16",
+                    shard_id,
+                    {"targets": chunk},
+                ),
+                expected_outputs=[shard_path],
+            )
         )
-        for idx, chunk in enumerate(chunked(targets, 2), start=1)
-        if not (
-            run_dir / f"16_book/chapters_manifest_shard_manifest-{idx:03d}.json"
-        ).exists()
-    ]
     if specs:
         run_shards(run_dir, specs)
+    _merge_chapter_manifest_shards(run_dir, shard_paths)
+
+
+def _merge_chapter_manifest_shards(run_dir: Path, shard_paths: list[str]) -> None:
+    manifest_dir = run_dir / "16_book"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    chapters: list[dict[str, Any]] = []
+    for rel_path in shard_paths:
+        path = run_dir / rel_path
+        if not path.exists():
+            raise RuntimeError(f"Stage 16 missing manifest shard: {path}")
+        shard_data = json.loads(path.read_text())
+        if not isinstance(shard_data, list):
+            raise RuntimeError(f"Stage 16 manifest shard is not a list: {path}")
+        chapters.extend(shard_data)
+    manifest_path = manifest_dir / "chapters_manifest.json"
+    tmp_path = manifest_dir / "chapters_manifest.json.tmp"
+    tmp_path.write_text(
+        json.dumps(
+            {"run_id": run_dir.name, "generated_at": now_iso(), "chapters": chapters},
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    tmp_path.replace(manifest_path)
+    for rel_path in shard_paths:
+        (run_dir / rel_path).unlink()
 
 
 def run_stage_17(run_dir: Path) -> None:

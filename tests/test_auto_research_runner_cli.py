@@ -7,6 +7,10 @@ from unittest.mock import patch
 from scripts.run_auto_research import (
     build_chapter_targets,
     run_deterministic_command,
+    run_stage_13,
+    run_stage_14,
+    run_stage_15,
+    run_stage_16,
     run_stage_18,
 )
 
@@ -108,3 +112,169 @@ def test_build_chapter_targets_excludes_appendices_and_keeps_order(tmp_path):
         {"type": "families", "id": "fam_a"},
         {"type": "methods", "id": "m1"},
     ]
+
+
+def test_build_chapter_targets_rejects_unsafe_ids(tmp_path):
+    run = tmp_path / "run"
+    (run / "12_taxonomy").mkdir(parents=True)
+    outline = {
+        "book_sections": [{"id": "../preface", "title": "Preface"}],
+        "families": [],
+        "methods": [],
+    }
+    (run / "12_taxonomy" / "outline.json").write_text(json.dumps(outline))
+
+    try:
+        build_chapter_targets(run)
+    except ValueError as error:
+        assert "unsafe target id" in str(error)
+    else:
+        raise AssertionError("expected unsafe target id failure")
+
+
+def test_run_stage_13_uses_pack_suffixes_and_stable_shard_ids(tmp_path):
+    run = tmp_path / "run"
+    _write_outline(run)
+    captured = []
+
+    def fake_run_shards(run_dir, specs, max_retries=1):
+        captured.extend(specs)
+
+    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+        run_stage_13(run)
+
+    assert [spec.shard_id for spec in captured] == ["pack-001", "pack-002", "pack-003"]
+    assert captured[0].expected_outputs == ["13_chapter_packs/book/preface_pack.json"]
+    assert captured[1].expected_outputs == ["13_chapter_packs/families/fam_a_pack.json"]
+    assert captured[2].expected_outputs == ["13_chapter_packs/methods/m1_pack.json"]
+
+    (run / "13_chapter_packs" / "book").mkdir(parents=True)
+    (run / "13_chapter_packs" / "book" / "preface_pack.json").write_text("{}")
+    captured.clear()
+    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+        run_stage_13(run)
+
+    assert [spec.shard_id for spec in captured] == ["pack-002", "pack-003"]
+
+
+def test_run_stage_14_groups_targets_by_type_and_uses_book_filenames(tmp_path):
+    run = tmp_path / "run"
+    _write_outline(
+        run,
+        book_sections=[
+            {"id": "preface", "title": "Preface"},
+            {"id": "goals", "title": "Goals"},
+        ],
+    )
+    captured = []
+
+    def fake_run_shards(run_dir, specs, max_retries=1):
+        captured.extend(specs)
+
+    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+        run_stage_14(run)
+
+    assert [(spec.shard_id, spec.agent, spec.expected_outputs) for spec in captured] == [
+        (
+            "write-book-001",
+            "book_section_writer",
+            ["14_chapters/book/00_preface.md", "14_chapters/book/03_goals.md"],
+        ),
+        ("write-families-001", "family_chapter_writer", ["14_chapters/families/fam_a.md"]),
+        ("write-methods-001", "method_chapter_writer", ["14_chapters/methods/m1.md"]),
+    ]
+
+
+def test_run_stage_15_writes_verification_summary_from_per_target_json(tmp_path):
+    run = tmp_path / "run"
+    _write_outline(run)
+    rows = [
+        ("book", "preface", True),
+        ("families", "fam_a", False),
+        ("methods", "m1", True),
+    ]
+    for target_type, target_id, passed in rows:
+        path = run / "15_verification" / target_type / f"{target_id}_verification.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "passed": passed,
+                    "summary": {
+                        "claims_total": 2,
+                        "claims_unsupported": 0,
+                        "claims_overstated": 0,
+                        "gaps_covered": 1,
+                        "gaps_missing": 0,
+                        "word_count": 1234,
+                        "form_issue_count": 0,
+                        "equations_rendered": 1,
+                        "pseudocode_blocks": 1,
+                    },
+                }
+            )
+        )
+
+    with patch("scripts.run_auto_research.run_shards") as run_shards:
+        run_stage_15(run)
+
+    run_shards.assert_not_called()
+    summary = (run / "15_verification" / "verification_summary.csv").read_text()
+    assert "target_type,target_id,passed" in summary
+    assert "book,preface,True" in summary
+    assert "families,fam_a,False" in summary
+    assert "methods,m1,True" in summary
+
+
+def test_run_stage_16_merges_manifest_shards_in_canonical_order(tmp_path):
+    run = tmp_path / "run"
+    _write_outline(
+        run,
+        book_sections=[
+            {"id": "preface", "title": "Preface"},
+            {"id": "goals", "title": "Goals"},
+        ],
+    )
+
+    def fake_run_shards(run_dir, specs, max_retries=1):
+        for spec in specs:
+            path = run_dir / spec.expected_outputs[0]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "chapter_id": target["id"],
+                            "chapter_type": target["type"],
+                            "file": f"dummy/{target['id']}.md",
+                        }
+                        for target in json.loads(spec.prompt.split("payload=", 1)[1].split("\n", 1)[0])["targets"]
+                    ]
+                )
+            )
+
+    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+        run_stage_16(run)
+
+    manifest = json.loads((run / "16_book" / "chapters_manifest.json").read_text())
+    assert [chapter["chapter_id"] for chapter in manifest["chapters"]] == [
+        "preface",
+        "goals",
+        "fam_a",
+        "m1",
+    ]
+    assert not list((run / "16_book").glob("chapters_manifest_shard_*.json"))
+
+
+def _write_outline(run, *, book_sections=None):
+    (run / "12_taxonomy").mkdir(parents=True, exist_ok=True)
+    outline = {
+        "book_sections": book_sections
+        or [
+            {"id": "preface", "title": "Preface"},
+            {"id": "appendices", "title": "Appendices"},
+        ],
+        "families": [{"id": "fam_a", "title": "A", "method_ids": ["m1"]}],
+        "methods": [{"id": "m1", "title": "M1", "arxiv_id": "1.1", "family_id": "fam_a"}],
+    }
+    (run / "12_taxonomy" / "outline.json").write_text(json.dumps(outline))
