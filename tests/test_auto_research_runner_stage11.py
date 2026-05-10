@@ -80,6 +80,27 @@ def test_merge_verified_graph_fragments_rejects_empty_source_lines(tmp_path):
         merge_verified_graph_fragments(run)
 
 
+def test_merge_verified_graph_fragments_rejects_empty_fragments_dir(tmp_path):
+    run = tmp_path / "run"
+    (run / "11_verified_graph" / "fragments").mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="no Stage 11 fragment JSON files found"):
+        merge_verified_graph_fragments(run)
+
+
+def test_merge_verified_graph_fragments_rejects_node_missing_id(tmp_path):
+    run = tmp_path / "run"
+    _write_fragment(
+        run,
+        "1.1",
+        [{"type": "Paper"}],
+        [],
+    )
+
+    with pytest.raises(ValueError, match=r"node missing id in .*1\.1\.json"):
+        merge_verified_graph_fragments(run)
+
+
 def test_run_stage_11_merge_writes_global_graph_report_and_log(tmp_path):
     run = tmp_path / "run"
     _write_fragment(

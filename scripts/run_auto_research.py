@@ -109,15 +109,21 @@ def _edge_key(edge: dict[str, Any]) -> tuple[Any, ...]:
 def merge_verified_graph_fragments(run_dir: Path) -> dict[str, Any]:
     fragments_dir = run_dir / "11_verified_graph" / "fragments"
     if not fragments_dir.exists():
-        raise FileNotFoundError(fragments_dir)
+        raise FileNotFoundError(f"missing Stage 11 fragments directory: {fragments_dir}")
+
+    fragment_paths = sorted(fragments_dir.glob("*.json"))
+    if not fragment_paths:
+        raise ValueError(f"no Stage 11 fragment JSON files found in {fragments_dir}")
 
     nodes_by_id: dict[Any, dict[str, Any]] = {}
     edges_by_key: dict[tuple[Any, ...], dict[str, Any]] = {}
 
-    for fragment_path in sorted(fragments_dir.glob("*.json")):
+    for fragment_path in fragment_paths:
         fragment = json.loads(fragment_path.read_text())
         for node in fragment.get("nodes", []):
-            node_id = node["id"]
+            node_id = node.get("id")
+            if not node_id:
+                raise ValueError(f"node missing id in {fragment_path}")
             if node_id not in nodes_by_id:
                 nodes_by_id[node_id] = node
         for edge in fragment.get("edges", []):
@@ -151,7 +157,9 @@ def run_stage_11_merge(run_dir: Path) -> None:
     verified_graph_dir.mkdir(parents=True, exist_ok=True)
 
     global_graph_path = verified_graph_dir / "global_graph.json"
-    global_graph_path.write_text(json.dumps(graph, indent=2, sort_keys=True) + "\n")
+    global_graph_tmp_path = verified_graph_dir / "global_graph.json.tmp"
+    global_graph_tmp_path.write_text(json.dumps(graph, indent=2, sort_keys=True) + "\n")
+    global_graph_tmp_path.replace(global_graph_path)
 
     verified_edges = len(graph["edges"])
     weak_edges = _load_weak_edge_count(run_dir)
@@ -166,7 +174,10 @@ def run_stage_11_merge(run_dir: Path) -> None:
             "",
         ]
     )
-    (verified_graph_dir / "graph_report.md").write_text(report)
+    report_path = verified_graph_dir / "graph_report.md"
+    report_tmp_path = verified_graph_dir / "graph_report.md.tmp"
+    report_tmp_path.write_text(report)
+    report_tmp_path.replace(report_path)
 
     append_run_log(run_dir, "11", "merged", f"{verified_edges} verified edges")
 
