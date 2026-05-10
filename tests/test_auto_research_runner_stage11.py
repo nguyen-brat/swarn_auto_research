@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 import pytest
 
-from scripts.run_auto_research import merge_verified_graph_fragments, run_stage_11_merge
+from scripts.run_auto_research import (
+    merge_verified_graph_fragments,
+    run_stage_11,
+    run_stage_11_merge,
+)
 
 
 def _write_fragment(run, arxiv_id, nodes, edges):
@@ -142,3 +147,74 @@ def test_run_stage_11_merge_writes_global_graph_report_and_log(tmp_path):
     assert "- Verified edges: 1" in report_text
     assert "- Weak edges not promoted: 2" in report_text
     assert "11,merged" in (run / "run_log.csv").read_text()
+
+
+def test_run_stage_11_merges_when_all_fragments_already_exist(tmp_path):
+    run = tmp_path / "run"
+    (run / "07_scoring").mkdir(parents=True)
+    (run / "07_scoring" / "promoted_papers.json").write_text(
+        json.dumps({"promoted_papers": [{"arxiv_id": "1.1"}]})
+    )
+    _write_fragment(
+        run,
+        "1.1",
+        [{"id": "1.1", "type": "Paper"}, {"id": "m", "type": "Method"}],
+        [{
+            "src": "1.1",
+            "dst": "m",
+            "type": "INTRODUCES",
+            "confidence": "verified",
+            "source_node_id": "s.1",
+            "source_lines": [1],
+        }],
+    )
+
+    with patch("scripts.run_auto_research.run_shards") as run_shards:
+        run_stage_11(run)
+
+    run_shards.assert_not_called()
+    assert (run / "11_verified_graph" / "global_graph.json").exists()
+
+
+def test_run_stage_11_dispatches_only_missing_fragments(tmp_path):
+    run = tmp_path / "run"
+    (run / "07_scoring").mkdir(parents=True)
+    (run / "07_scoring" / "promoted_papers.json").write_text(
+        json.dumps({"promoted_papers": [{"arxiv_id": "1.1"}, {"arxiv_id": "1.2"}]})
+    )
+    _write_fragment(
+        run,
+        "1.1",
+        [{"id": "1.1", "type": "Paper"}],
+        [{
+            "src": "1.1",
+            "dst": "1.1",
+            "type": "USES",
+            "confidence": "verified",
+            "source_node_id": "s.1",
+            "source_lines": [1],
+        }],
+    )
+
+    def fake_run_shards(run_dir, specs, max_retries=1):
+        assert len(specs) == 1
+        assert specs[0].shard_id == "vgraph-resume-001"
+        assert specs[0].expected_outputs == ["11_verified_graph/fragments/1.2.json"]
+        _write_fragment(
+            run_dir,
+            "1.2",
+            [{"id": "1.2", "type": "Paper"}],
+            [{
+                "src": "1.2",
+                "dst": "1.2",
+                "type": "USES",
+                "confidence": "verified",
+                "source_node_id": "s.2",
+                "source_lines": [2],
+            }],
+        )
+
+    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+        run_stage_11(run)
+
+    assert (run / "11_verified_graph" / "global_graph.json").exists()

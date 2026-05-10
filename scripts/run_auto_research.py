@@ -340,6 +340,66 @@ def run_shards(
             )
 
 
+def load_promoted_arxiv_ids(run_dir: Path) -> list[str]:
+    path = run_dir / "07_scoring" / "promoted_papers.json"
+    data = json.loads(path.read_text())
+    return [str(item["arxiv_id"]) for item in data.get("promoted_papers", [])]
+
+
+def _stage_11_prompt(run_id: str, shard_id: str, arxiv_ids: list[str]) -> str:
+    return "\n".join(
+        [
+            "Read AGENTS.md first.",
+            "Run Stage 11 verified graph extraction only.",
+            f"run_id={run_id}",
+            f"shard_id={shard_id}",
+            f"arxiv_ids={arxiv_ids}",
+            "Follow .codex/agents/verified_graph_extractor.toml and .agents/skills/verified-graph-extraction/SKILL.md.",
+            "Read 10_verified_evidence and 05_weak_graph/fragments for these ids.",
+            "Write only 11_verified_graph/fragments/{arxiv_id}.json.",
+            "Do not write 11_verified_graph/global_graph.json.",
+            "Return the standard short success string.",
+        ]
+    )
+
+
+def run_stage_11(run_dir: Path) -> None:
+    if primary_artifact_exists(run_dir, "11"):
+        append_run_log(run_dir, "11", "skipped", "global graph already present")
+        return
+
+    run_id = run_dir.name
+    promoted = load_promoted_arxiv_ids(run_dir)
+    missing = [
+        aid
+        for aid in promoted
+        if not (run_dir / "11_verified_graph" / "fragments" / f"{aid}.json").exists()
+    ]
+    specs = [
+        ShardSpec(
+            stage="11",
+            shard_id=f"vgraph-resume-{idx:03d}",
+            agent="verified_graph_extractor",
+            model="gpt-5.4-mini",
+            prompt=_stage_11_prompt(run_id, f"vgraph-resume-{idx:03d}", [aid]),
+            expected_outputs=[f"11_verified_graph/fragments/{aid}.json"],
+        )
+        for idx, aid in enumerate(missing, start=1)
+    ]
+    if specs:
+        append_run_log(run_dir, "11", "dispatching", f"{len(specs)} missing fragments")
+        run_shards(run_dir, specs)
+
+    still_missing = [
+        aid
+        for aid in promoted
+        if not (run_dir / "11_verified_graph" / "fragments" / f"{aid}.json").exists()
+    ]
+    if still_missing:
+        raise RuntimeError(f"Stage 11 still missing fragments: {still_missing}")
+    run_stage_11_merge(run_dir)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if not args.topic and not args.run_id:
