@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import json
 
-from swarn_research_mcp.research_book import collect_excluded, generate_book_artifacts, write_needs_review
+from swarn_research_mcp.research_book import (
+    collect_excluded,
+    generate_book_artifacts,
+    validate_research_book_run,
+    write_needs_review,
+)
 
 
 def test_collect_excluded_finds_excluded_chapters(voice_lm_minimal):
@@ -67,6 +72,18 @@ def test_generate_succeeds_with_excluded_chapters(voice_lm_minimal, monkeypatch)
     needs = voice_lm_minimal / "16_book" / "NEEDS_REVIEW.md"
     assert needs.exists()
     assert "m_excluded" in needs.read_text()
+
+    taxonomy_path = voice_lm_minimal / "14_chapters" / "book" / "04_method_taxonomy.md"
+    taxonomy_path.write_text(
+        taxonomy_path.read_text().replace("../methods/m_voicebox.md", "../methods/m_voicebox_removed.md")
+    )
+
+    issues = validate_research_book_run(voice_lm_minimal)
+    missing_method_details = [
+        issue["detail"] for issue in issues if issue["code"] == "method_taxonomy_missing_method_link"
+    ]
+    assert any("../methods/m_voicebox.md" in detail for detail in missing_method_details)
+    assert not any("../methods/m_excluded.md" in detail for detail in missing_method_details)
 
 
 def test_excluded_family_keeps_passed_methods_visible(tmp_path):
@@ -138,6 +155,12 @@ def test_excluded_family_keeps_passed_methods_visible(tmp_path):
     assert "../14_chapters/methods/m1.md" in summary
     assert "../14_chapters/methods/m2.md" in summary
     assert "../14_chapters/families/fam_b.md" in summary
+
+    issues = validate_research_book_run(run)
+    missing_family_details = [
+        issue["detail"] for issue in issues if issue["code"] == "method_taxonomy_missing_family_link"
+    ]
+    assert not any("../families/fam_a.md" in detail for detail in missing_family_details)
 
 
 def test_excluded_book_section_omitted_from_summary(tmp_path):

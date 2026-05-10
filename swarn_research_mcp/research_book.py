@@ -380,6 +380,12 @@ def validate_research_book_run(run_dir: Path | str) -> list[dict[str, str]]:
     outline = _outline(run_path)
     manifest = _manifest(run_path)
     promoted = _promoted_entries(run_path)
+    offenders = collect_excluded(run_path)
+    excluded_family_method_ids = {
+        offender["id"]
+        for offender in offenders
+        if offender.get("type") in ("families", "methods") and offender.get("id")
+    }
 
     methods = outline.get("methods", [])
     families = outline.get("families", [])
@@ -570,6 +576,8 @@ def validate_research_book_run(run_dir: Path | str) -> list[dict[str, str]]:
         if family.get("is_group"):
             continue
         family_id = family.get("id")
+        if family_id in excluded_family_method_ids:
+            continue
         expected_link = f"../families/{family_id}.md"
         if family_id and expected_link not in taxonomy_text:
             issues.append(
@@ -581,6 +589,8 @@ def validate_research_book_run(run_dir: Path | str) -> list[dict[str, str]]:
             )
     for method in methods:
         method_id = method.get("id")
+        if method_id in excluded_family_method_ids:
+            continue
         expected_link = f"../methods/{method_id}.md"
         if method_id and expected_link not in taxonomy_text:
             issues.append(
