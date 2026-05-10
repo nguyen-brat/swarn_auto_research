@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Bring auto-research pipeline output into structural agreement with `Book_style.md`, deterministically normalize the taxonomy, fix the `<title unknown>` bibliography bug, and enforce verification as a hard gate (with a `NEEDS_REVIEW.md` fallback artifact).
+**Goal:** Produce a reader-oriented handbook structure inspired by `Book_style.md`. Always ship a readable, trustworthy synthesis; quarantine failed material rather than blocking the whole book. The pipeline is judged on **reader experience** (parts visible in navigation, passing chapters always reachable, failed material clearly marked) — not on formal conformance.
 
-**Architecture:** SKILL contracts under `.agents/skills/` define the per-stage behavior. `swarn_research_mcp/research_book.py` provides validators, deterministic post-processors, and the book-artifact generator. We tighten the SKILL contracts and add deterministic Python that runs in `generate_book_artifacts` so the agent's output is normalized regardless of small contract drift.
+**Architecture:** SKILL contracts under `.agents/skills/` define the per-stage behavior. `swarn_research_mcp/research_book.py` provides validators, deterministic post-processors, and the book-artifact generator. Verification produces a **quarantine** (passed → main navigation; excluded → `NEEDS_REVIEW.md`), not a hard gate. Singletons stay as method chapters under a "Standalone / Emerging Methods" group when they lack strong graph evidence; only well-connected singletons merge into existing families.
 
 **Tech Stack:** Python 3.11 (pytest), markdown SKILL contracts, JSON artifacts under `research_runs/{run_id}/`.
 
@@ -22,7 +22,7 @@
 - `.agents/skills/method-chapter-writing/SKILL.md` — rename Example→Worked Example, Software→Practical Guidance
 - `.agents/skills/book-section-writing/SKILL.md` — bibliography rule, goals rules, appendices directory
 - `.agents/skills/auto-research-orchestrator/SKILL.md` — verification gate, fix_excluded loop
-- `swarn_research_mcp/research_book.py` — multi-shape `_paper_lookup`, strict `resolve_paper_citation`, deterministic `merge_singletons`, `verification_gate` + `NEEDS_REVIEW.md` emitter, appendices directory builder, `BOOK_FILE_BY_ID` switch, heading lint with diagnostics
+- `swarn_research_mcp/research_book.py` — multi-shape `_paper_lookup`, strict `resolve_paper_citation`, `merge_singletons` + standalone group, `collect_excluded` + `write_needs_review` (quarantine, never raises), `appendices/` directory builder with `references.md`, parts-aware `_build_summary` / `_build_sidebar` / `_build_method_taxonomy`, heading lint with diagnostics
 
 **Create:**
 - `tests/fixtures/voice_lm_minimal/` — real-shape fixture mirroring the audited run's quirks (list-shaped paper_pool, semantic_scholar metadata-only, mixed status chapters)
@@ -31,7 +31,7 @@
 - `tests/test_research_book_singleton_merge.py`
 - `tests/test_research_book_bibliography.py`
 - `tests/test_research_book_chapter_headings.py`
-- `tests/test_research_book_verification_gate.py`
+- `tests/test_research_book_verification_quarantine.py`
 - `tests/test_research_book_appendices_dir.py`
 
 **Delete:**
@@ -663,9 +663,14 @@ git commit -m "feat(research-book): validate outline.json parts (2..5, exclusive
 
 ---
 
-## Task 1.4: Deterministic singleton-merge post-processor (Stage 12.5)
+## Task 1.4: Singleton policy — merge with evidence, otherwise standalone
 
-This is a **named Stage 12.5 contract**. It runs immediately after `taxonomy-building` (Stage 12) and BEFORE pack/chapter generation (Stages 13/14/15). `generate_book_artifacts` (Stage 18) ASSERTS that no singletons remain — it does not mutate.
+This is a **named Stage 12.5 contract** running between Stages 12 and 13.
+
+**Policy:**
+- A singleton **merges** into its nearest non-singleton family iff there is **strong graph evidence**: at least 2 of the singleton-method's `neighbor_method_ids` live in the candidate family, OR the candidate's id appears in the singleton's `neighbor_family_ids` AND at least 1 method overlap exists.
+- Otherwise the singleton is **kept as a standalone method chapter** (no family chapter wrapper). Its family record is replaced with a marker `{"id": "standalone", "title": "Standalone / Emerging Methods", "method_ids": [...], "is_group": true}` — one such record per book, accumulating all weak singletons. The `standalone` group lives in its own part `standalone_methods` (auto-added if any standalone methods exist).
+- `assert_no_singletons` (Stage 18) treats the `standalone` group as valid (i.e. allows `len(method_ids) >= 1` for `id == "standalone"` and for `id.startswith("other_")`).
 
 **Files:**
 - Test: `tests/test_research_book_singleton_merge.py` (create)
@@ -692,13 +697,15 @@ def _outline(families, methods, parts=None):
                                 {"id": "p2", "title": "P2", "family_ids": []}]}
 
 
-def test_singleton_merges_into_neighbor_with_shared_neighbor():
+def test_singleton_with_strong_evidence_merges():
+    """≥2 shared neighbor methods OR (neighbor_family_id + ≥1 shared method) triggers merge."""
     families = [
         {"id": "fam_a", "title": "A", "method_ids": ["m1"], "neighbor_family_ids": ["fam_b"]},
         {"id": "fam_b", "title": "B", "method_ids": ["m2", "m3"], "neighbor_family_ids": ["fam_a"]},
     ]
     methods = [
-        {"id": "m1", "arxiv_id": "1.1", "family_id": "fam_a", "neighbor_method_ids": ["m2"]},
+        # m1 has 2 shared neighbors in fam_b → strong evidence → merge.
+        {"id": "m1", "arxiv_id": "1.1", "family_id": "fam_a", "neighbor_method_ids": ["m2", "m3"]},
         {"id": "m2", "arxiv_id": "1.2", "family_id": "fam_b", "neighbor_method_ids": ["m1", "m3"]},
         {"id": "m3", "arxiv_id": "1.3", "family_id": "fam_b", "neighbor_method_ids": ["m2"]},
     ]
@@ -708,7 +715,28 @@ def test_singleton_merges_into_neighbor_with_shared_neighbor():
     assert sorted(family_by_id["fam_b"]["method_ids"]) == ["m1", "m2", "m3"]
 
 
-def test_singleton_with_no_neighbors_lands_in_catchall():
+def test_singleton_with_weak_evidence_goes_to_standalone():
+    """1 shared neighbor without neighbor_family link → weak → standalone."""
+    families = [
+        {"id": "fam_a", "title": "A", "method_ids": ["m1"], "neighbor_family_ids": []},
+        {"id": "fam_b", "title": "B", "method_ids": ["m2", "m3"], "neighbor_family_ids": []},
+    ]
+    methods = [
+        {"id": "m1", "arxiv_id": "1.1", "family_id": "fam_a", "neighbor_method_ids": ["m2"]},
+        {"id": "m2", "arxiv_id": "1.2", "family_id": "fam_b", "neighbor_method_ids": ["m1", "m3"]},
+        {"id": "m3", "arxiv_id": "1.3", "family_id": "fam_b", "neighbor_method_ids": ["m2"]},
+    ]
+    merged = merge_singletons(_outline(families, methods))
+    family_by_id = {f["id"]: f for f in merged["families"]}
+    assert "fam_a" not in family_by_id
+    standalone = family_by_id["standalone"]
+    assert standalone["is_group"] is True
+    assert standalone["method_ids"] == ["m1"]
+    parts_by_id = {p["id"]: p for p in merged["parts"]}
+    assert "standalone" in parts_by_id["standalone_methods"]["family_ids"]
+
+
+def test_singleton_with_no_evidence_goes_to_standalone():
     families = [
         {"id": "fam_a", "title": "A", "method_ids": ["m1"], "neighbor_family_ids": []},
         {"id": "fam_b", "title": "B", "method_ids": ["m2", "m3"], "neighbor_family_ids": []},
@@ -718,21 +746,18 @@ def test_singleton_with_no_neighbors_lands_in_catchall():
         {"id": "m2", "arxiv_id": "1.2", "family_id": "fam_b", "neighbor_method_ids": ["m3"]},
         {"id": "m3", "arxiv_id": "1.3", "family_id": "fam_b", "neighbor_method_ids": ["m2"]},
     ]
-    parts = [{"id": "p1", "title": "P1", "family_ids": ["fam_a"]},
-             {"id": "p2", "title": "P2", "family_ids": ["fam_b"]}]
-    merged = merge_singletons(_outline(families, methods, parts))
-    assert any(f["id"] == "other_p1" and f["method_ids"] == ["m1"] for f in merged["families"])
-    parts_lookup = {p["id"]: p for p in merged["parts"]}
-    assert "other_p1" in parts_lookup["p1"]["family_ids"]
+    merged = merge_singletons(_outline(families, methods))
+    standalone = next(f for f in merged["families"] if f["id"] == "standalone")
+    assert standalone["method_ids"] == ["m1"]
 
 
-def test_method_family_id_updated_after_merge():
+def test_method_family_id_updated_to_winner():
     families = [
         {"id": "fam_a", "title": "A", "method_ids": ["m1"], "neighbor_family_ids": ["fam_b"]},
         {"id": "fam_b", "title": "B", "method_ids": ["m2", "m3"], "neighbor_family_ids": ["fam_a"]},
     ]
     methods = [
-        {"id": "m1", "arxiv_id": "1.1", "family_id": "fam_a", "neighbor_method_ids": ["m2"]},
+        {"id": "m1", "arxiv_id": "1.1", "family_id": "fam_a", "neighbor_method_ids": ["m2", "m3"]},
         {"id": "m2", "arxiv_id": "1.2", "family_id": "fam_b", "neighbor_method_ids": ["m1"]},
         {"id": "m3", "arxiv_id": "1.3", "family_id": "fam_b", "neighbor_method_ids": []},
     ]
@@ -752,28 +777,6 @@ def test_no_op_when_all_families_have_two_methods():
     assert after == before
 
 
-def test_catchall_is_not_re_processed_as_singleton():
-    """Regression: a catch-all created during the loop must NOT be merged again."""
-    families = [
-        {"id": "fam_a", "title": "A", "method_ids": ["m1"], "neighbor_family_ids": []},
-        {"id": "fam_b", "title": "B", "method_ids": ["m2", "m3"], "neighbor_family_ids": []},
-    ]
-    methods = [
-        {"id": "m1", "arxiv_id": "1.1", "family_id": "fam_a", "neighbor_method_ids": []},
-        {"id": "m2", "arxiv_id": "1.2", "family_id": "fam_b", "neighbor_method_ids": ["m3"]},
-        {"id": "m3", "arxiv_id": "1.3", "family_id": "fam_b", "neighbor_method_ids": ["m2"]},
-    ]
-    parts = [{"id": "p1", "title": "P1", "family_ids": ["fam_a"]},
-             {"id": "p2", "title": "P2", "family_ids": ["fam_b"]}]
-    merged = merge_singletons(_outline(families, methods, parts))
-    catchall = next((f for f in merged["families"] if f["id"] == "other_p1"), None)
-    assert catchall is not None
-    assert catchall["method_ids"] == ["m1"]
-    # Method's family_id resolves to the surviving catch-all.
-    method_by_id = {m["id"]: m for m in merged["methods"]}
-    assert method_by_id["m1"]["family_id"] == "other_p1"
-
-
 def test_assert_no_singletons_raises_on_unmerged_outline():
     from swarn_research_mcp.research_book import assert_no_singletons
     families = [
@@ -787,13 +790,13 @@ def test_assert_no_singletons_raises_on_unmerged_outline():
         assert_no_singletons(_outline(families, methods))
 
 
-def test_assert_no_singletons_allows_catchall_singletons():
+def test_assert_no_singletons_allows_standalone_group_with_one_method():
     from swarn_research_mcp.research_book import assert_no_singletons
     families = [
-        {"id": "other_p1", "title": "Other (p1)", "method_ids": ["m1"]},
+        {"id": "standalone", "title": "Standalone / Emerging Methods", "method_ids": ["m1"], "is_group": True},
         {"id": "fam_b", "title": "B", "method_ids": ["m2", "m3"]},
     ]
-    methods = [{"id": "m1", "arxiv_id": "1.1", "family_id": "other_p1"},
+    methods = [{"id": "m1", "arxiv_id": "1.1", "family_id": "standalone"},
                {"id": "m2", "arxiv_id": "1.2", "family_id": "fam_b"},
                {"id": "m3", "arxiv_id": "1.3", "family_id": "fam_b"}]
     assert_no_singletons(_outline(families, methods))  # no raise
@@ -812,118 +815,115 @@ In `swarn_research_mcp/research_book.py`, add (place after `_method_by_id`, arou
 import copy as _copy
 
 
+STANDALONE_GROUP_ID = "standalone"
+STANDALONE_PART_ID = "standalone_methods"
+
+
+def _has_strong_graph_evidence(singleton: dict, candidate: dict, method_by_id: dict) -> bool:
+    s_method = method_by_id[singleton["method_ids"][0]]
+    s_neighbor_methods = set(s_method.get("neighbor_method_ids", []) or [])
+    s_neighbor_families = set(singleton.get("neighbor_family_ids", []) or [])
+    cand_methods = set(candidate.get("method_ids", []) or [])
+    shared = len(s_neighbor_methods & cand_methods)
+    if shared >= 2:
+        return True
+    if candidate["id"] in s_neighbor_families and shared >= 1:
+        return True
+    return False
+
+
 def merge_singletons(outline: dict[str, Any]) -> dict[str, Any]:
-    """Deterministic Stage 12.5 post-processor: merge each single-method family into its nearest non-singleton.
+    """Stage 12.5 post-processor.
 
-    Single-pass over the ORIGINAL singletons (snapshot before the loop). Catch-all families
-    created during merging are NOT re-processed; they are by definition the home of orphans
-    and may be singletons.
+    For each original singleton family:
+      - If a non-singleton family has STRONG graph evidence (≥2 shared neighbor methods,
+        OR neighbor_family + ≥1 shared method): merge into it.
+      - Otherwise: drop the singleton family; the method becomes a member of the
+        `standalone` group (a family marked `is_group=True`) under a new
+        `standalone_methods` part. No family chapter is rendered for the group.
 
-    Algorithm:
-      1. Snapshot the original singletons (excluding any pre-existing `other_*` catch-alls).
-      2. For each in deterministic id order:
-         a. Score candidates = non-singleton, non-catchall families.
-            Primary: count of singleton's neighbor_method_ids living in candidate's method_ids.
-            Tiebreaker: candidate.id in singleton.neighbor_family_ids.
-            Final tiebreaker: lexicographic candidate.id (deterministic).
-         b. If best score is (0, 0): no graph connection. Place method in catch-all `other_{part_id}`.
-         c. Otherwise merge into best.
-      3. Update method.family_id, drop the singleton family, drop its id from any part's family_ids.
+    Catch-all `other_*` families are NEVER created. The standalone group replaces them.
     """
     out = _copy.deepcopy(outline)
     families: list[dict[str, Any]] = out["families"]
     methods: list[dict[str, Any]] = out["methods"]
     method_by_id = {m["id"]: m for m in methods}
-
     parts = out.get("parts") or []
-    family_to_part: dict[str, str] = {}
-    for part in parts:
-        for fid in part.get("family_ids", []) or []:
-            family_to_part[fid] = part["id"]
 
-    # Snapshot ORIGINAL singletons; never re-process catch-alls created during the loop.
     original_singletons = sorted(
         (f for f in families
          if len(f.get("method_ids", [])) == 1
-         and not f["id"].startswith("other_")),
+         and f["id"] != STANDALONE_GROUP_ID),
         key=lambda f: f["id"],
     )
+    if not original_singletons:
+        return out
 
     for singleton in original_singletons:
         sid = singleton["id"]
-        # Singleton may have been removed already? It can't — we never remove during this loop
-        # except for the singleton itself, exactly once. But guard for safety.
         if not any(f["id"] == sid for f in families):
             continue
         s_method_id = singleton["method_ids"][0]
-        s_method = method_by_id[s_method_id]
-        s_neighbor_methods = set(s_method.get("neighbor_method_ids", []) or [])
-        s_neighbor_families = set(singleton.get("neighbor_family_ids", []) or [])
 
         candidates = [
             f for f in families
             if f["id"] != sid
-            and not f["id"].startswith("other_")
+            and f["id"] != STANDALONE_GROUP_ID
             and len(f.get("method_ids", [])) >= 2
         ]
 
-        def score(f: dict[str, Any]) -> tuple[int, int, str]:
-            shared = sum(1 for mid in f.get("method_ids", []) if mid in s_neighbor_methods)
-            neighbor_bonus = 1 if f["id"] in s_neighbor_families else 0
-            # Negate id so the sort prefers lexicographically smaller ids on a tie.
-            return (shared, neighbor_bonus, f["id"])
+        # Pick the strongest-evidence candidate; on tie, lexicographically smaller id wins.
+        winner = None
+        for cand in sorted(candidates, key=lambda f: f["id"]):
+            if _has_strong_graph_evidence(singleton, cand, method_by_id):
+                winner = cand
+                break
 
-        best = None
-        for cand in candidates:
-            sc = score(cand)
-            if sc[0] == 0 and sc[1] == 0:
-                continue  # no graph signal; skip
-            if best is None:
-                best = cand
-            else:
-                # Higher (shared, neighbor) wins; on tie, lexicographically smaller id wins.
-                bs = score(best)
-                if (sc[0], sc[1]) > (bs[0], bs[1]) or (
-                    (sc[0], sc[1]) == (bs[0], bs[1]) and sc[2] < bs[2]
-                ):
-                    best = cand
-
-        if best is not None:
-            target_id = best["id"]
+        if winner is not None:
+            winner["method_ids"] = list(winner["method_ids"]) + [s_method_id]
+            method_by_id[s_method_id]["family_id"] = winner["id"]
         else:
-            part_id = family_to_part.get(sid) or (parts[0]["id"] if parts else "p1")
-            catchall_id = f"other_{part_id}"
-            catchall = next((f for f in families if f["id"] == catchall_id), None)
-            if catchall is None:
-                catchall = {"id": catchall_id, "title": f"Other ({part_id})",
-                            "method_ids": [], "neighbor_family_ids": []}
-                families.append(catchall)
-                for part in parts:
-                    if part["id"] == part_id and catchall_id not in (part.get("family_ids") or []):
-                        part.setdefault("family_ids", []).append(catchall_id)
-            target_id = catchall_id
-
-        target = next(f for f in families if f["id"] == target_id)
-        target["method_ids"] = list(target["method_ids"]) + [s_method_id]
-        s_method["family_id"] = target_id
+            standalone = next((f for f in families if f["id"] == STANDALONE_GROUP_ID), None)
+            if standalone is None:
+                standalone = {
+                    "id": STANDALONE_GROUP_ID,
+                    "title": "Standalone / Emerging Methods",
+                    "method_ids": [],
+                    "neighbor_family_ids": [],
+                    "is_group": True,
+                }
+                families.append(standalone)
+                if not any(p["id"] == STANDALONE_PART_ID for p in parts):
+                    parts.append({
+                        "id": STANDALONE_PART_ID,
+                        "title": "Standalone / Emerging Methods",
+                        "family_ids": [STANDALONE_GROUP_ID],
+                    })
+                else:
+                    sp = next(p for p in parts if p["id"] == STANDALONE_PART_ID)
+                    if STANDALONE_GROUP_ID not in (sp.get("family_ids") or []):
+                        sp.setdefault("family_ids", []).append(STANDALONE_GROUP_ID)
+            standalone["method_ids"] = list(standalone["method_ids"]) + [s_method_id]
+            method_by_id[s_method_id]["family_id"] = STANDALONE_GROUP_ID
 
         families = [f for f in families if f["id"] != sid]
         for part in parts:
             fids = part.get("family_ids", []) or []
             part["family_ids"] = [fid for fid in fids if fid != sid]
 
+    # Cap parts at 5 — if standalone push us over 5, this is acceptable per topic-adaptive rule.
     out["families"] = families
     out["parts"] = parts
     return out
 
 
 def assert_no_singletons(outline: dict[str, Any]) -> None:
-    """Stage 18 precondition: outline must already be normalized (no non-catch-all singletons)."""
+    """Stage 18 precondition: every family with len(method_ids)==1 must be the standalone group."""
     bad = [f["id"] for f in outline.get("families", [])
-           if len(f.get("method_ids", [])) == 1 and not f["id"].startswith("other_")]
+           if len(f.get("method_ids", [])) == 1 and f["id"] != STANDALONE_GROUP_ID]
     if bad:
         raise RuntimeError(
-            f"outline.json has singleton families {bad}; run merge_singletons "
+            f"outline.json has singleton families {bad}; run --normalize-outline "
             "(stage 12.5) before generate_book_artifacts."
         )
 ```
@@ -1181,7 +1181,7 @@ In `.agents/skills/book-section-writing/SKILL.md`, replace the `method_taxonomy`
 
 ```markdown
 - `method_taxonomy` — deterministic artifact. Always run `python -m swarn_research_mcp.research_book research_runs/{run_id} --generate`. Manual drafting is forbidden because reference rendering relies on `_paper_label` + `resolve_paper_citation`, which fail loud rather than emit `<title unknown>` / `<year unknown>`. If a cited arxiv_id has no resolvable title/year, fix `02_paper_pool/paper_pool.json`, `03_overviews/semantic_scholar/`, or `04_weak_evidence/` before re-running.
-- `appendices` — deterministic artifact. Always run the generator; output is the directory `99_appendices/` with `glossary.md`, `notation.md`, `datasets.md`, `software.md` (NOT a single 99_appendices.md file).
+- `appendices` — deterministic artifact. Always run the generator; output is the directory `appendices/` with `glossary.md`, `notation.md`, `datasets.md`, `software.md`, `references.md` (NOT a single appendices.md file).
 ```
 
 - [ ] **Step 2: Commit**
@@ -1519,16 +1519,25 @@ from swarn_research_mcp.research_book import (
 
 
 def test_appendices_constant_points_to_directory():
-    assert BOOK_FILE_BY_ID["appendices"] == "99_appendices"  # directory name, no .md
+    assert BOOK_FILE_BY_ID["appendices"] == "appendices"  # directory name, no .md
 
 
-def test_build_appendices_dir_creates_four_files(voice_lm_minimal):
+def test_build_appendices_dir_creates_five_files(voice_lm_minimal):
     outline = json.loads((voice_lm_minimal / "12_taxonomy" / "outline.json").read_text())
     _build_appendices_dir(voice_lm_minimal, outline)
-    out = voice_lm_minimal / "14_chapters" / "book" / "99_appendices"
+    out = voice_lm_minimal / "14_chapters" / "book" / "appendices"
     assert out.is_dir()
-    for name in ("glossary.md", "notation.md", "datasets.md", "software.md"):
+    for name in ("glossary.md", "notation.md", "datasets.md", "software.md", "references.md"):
         assert (out / name).exists(), f"missing {name}"
+
+
+def test_appendices_references_uses_paper_pool(voice_lm_minimal):
+    outline = json.loads((voice_lm_minimal / "12_taxonomy" / "outline.json").read_text())
+    _build_appendices_dir(voice_lm_minimal, outline)
+    refs = (voice_lm_minimal / "14_chapters" / "book" / "appendices" / "references.md").read_text()
+    assert "VALL-E" in refs  # title resolved via semantic_scholar
+    assert "(2023)" in refs
+    assert "<title unknown>" not in refs
 
 
 def test_generate_book_artifacts_writes_appendices_dir(voice_lm_minimal, monkeypatch):
@@ -1542,16 +1551,16 @@ def test_generate_book_artifacts_writes_appendices_dir(voice_lm_minimal, monkeyp
     op.write_text(json.dumps(outline))
     monkeypatch.setattr(rb, "verification_gate", lambda _: None)
     rb.generate_book_artifacts(voice_lm_minimal)
-    assert (voice_lm_minimal / "14_chapters" / "book" / "99_appendices" / "glossary.md").exists()
+    assert (voice_lm_minimal / "14_chapters" / "book" / "appendices" / "glossary.md").exists()
 
 
 def test_validator_rejects_missing_appendices_directory(voice_lm_minimal):
     issues = validate_research_book_run(voice_lm_minimal)
-    # Fixture has no 99_appendices/ directory yet.
+    # Fixture has no appendices/ directory yet.
     codes = [i["code"] for i in issues]
     assert "missing_book_chapter" in codes
     detail = next(i["detail"] for i in issues if i["code"] == "missing_book_chapter" and "appendices" in i["detail"])
-    assert "99_appendices" in detail
+    assert "appendices" in detail
 ```
 
 - [ ] **Step 2: Run test**
@@ -1563,7 +1572,7 @@ Expected: FAIL.
 
 In `swarn_research_mcp/research_book.py`, change line 18:
 ```python
-    "appendices": "99_appendices",
+    "appendices": "appendices",
 ```
 
 - [ ] **Step 4: Update appendices existence check in validator**
@@ -1576,7 +1585,7 @@ Find the loop in `validate_research_book_run` that checks `(run_path / "14_chapt
         if section_id == "appendices":
             ok = target.is_dir() and all(
                 (target / sub).exists()
-                for sub in ("glossary.md", "notation.md", "datasets.md", "software.md")
+                for sub in ("glossary.md", "notation.md", "datasets.md", "software.md", "references.md")
             )
         else:
             ok = target.exists()
@@ -1593,7 +1602,7 @@ Remove the existing `_build_appendices` function (lines 562–594). Add:
 
 ```python
 def _build_appendices_dir(run_dir: Path, outline: dict[str, Any]) -> None:
-    out_dir = run_dir / "14_chapters" / "book" / "99_appendices"
+    out_dir = run_dir / "14_chapters" / "book" / "appendices"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # glossary.md
@@ -1647,6 +1656,24 @@ def _build_appendices_dir(run_dir: Path, outline: dict[str, Any]) -> None:
 
     (out_dir / "datasets.md").write_text("\n".join(_harvest("datasets", "Datasets")) + "\n", encoding="utf-8")
     (out_dir / "software.md").write_text("\n".join(_harvest("artifacts", "Software and Artifacts")) + "\n", encoding="utf-8")
+
+    # references.md — every promoted paper, sorted by arxiv_id, resolved via paper_pool/semantic_scholar.
+    refs = ["# References", ""]
+    promoted_path = run_dir / "07_scoring" / "promoted_papers.json"
+    if promoted_path.exists():
+        promoted = _load_json(promoted_path).get("promoted_papers") or []
+        for entry in sorted(promoted, key=lambda e: e.get("arxiv_id", "")):
+            aid = entry.get("arxiv_id", "")
+            if not aid:
+                continue
+            try:
+                cite = resolve_paper_citation(run_dir, aid)
+                refs.append(f"- [arxiv:{cite['arxiv_id']}] {cite['title']} ({cite['year']})")
+            except MissingCitationError as exc:
+                raise MissingCitationError(
+                    f"references.md generation blocked: {exc}"
+                ) from exc
+    (out_dir / "references.md").write_text("\n".join(refs) + "\n", encoding="utf-8")
 ```
 
 - [ ] **Step 6: Update `generate_book_artifacts` to call the dir builder**
@@ -1663,7 +1690,7 @@ Also remove the line that constructs `appendices_path` (it referenced `BOOK_FILE
 
 - [ ] **Step 7: Update `_build_summary` and `_build_sidebar` to link the directory index**
 
-In `_build_summary` (line 595), the loop appends `[Title](../14_chapters/book/{filename})`. For `appendices` the target is a directory; link to `../14_chapters/book/99_appendices/glossary.md` as the entry point. Add a special case:
+In `_build_summary` (line 595), the loop appends `[Title](../14_chapters/book/{filename})`. For `appendices` the target is a directory; link to `../14_chapters/book/appendices/glossary.md` as the entry point. Add a special case:
 
 ```python
     for section in outline.get("book_sections", []):
@@ -1686,11 +1713,11 @@ Run: `pytest tests/test_research_book_appendices_dir.py -v`
 Expected: PASS (4 tests).
 
 Run: `pytest tests/test_research_book_artifacts.py -v`
-Expected: existing tests still pass (any that asserted `99_appendices.md` should now be updated to assert the directory).
+Expected: existing tests still pass (any that asserted `appendices.md` should now be updated to assert the directory).
 
-- [ ] **Step 9: Update existing artifact tests if they mention `99_appendices.md`**
+- [ ] **Step 9: Update existing artifact tests if they mention `appendices.md`**
 
-Run: `grep -n "99_appendices.md" tests/`. For each hit, update to `99_appendices` (directory) or to a specific sub-file. If the assertion was on the file existing, change to `(... / "99_appendices" / "glossary.md").exists()`.
+Run: `grep -n "appendices.md" tests/`. For each hit, update to `appendices` (directory) or to a specific sub-file. If the assertion was on the file existing, change to `(... / "appendices" / "glossary.md").exists()`.
 
 Run: `pytest tests/ -v`
 Expected: PASS.
@@ -1701,7 +1728,7 @@ In `.agents/skills/chapter-manifest/SKILL.md`, find the section that enumerates 
 
 ```markdown
 ## Hard rules
-- `book:appendices` is NOT a manifest target. The appendices directory is generated deterministically (`99_appendices/`) and contains reference files without chapter front matter or verification status. Skip any `book:appendices` target passed to this stage and log `skipped: appendices is directory`.
+- `book:appendices` is NOT a manifest target. The appendices directory is generated deterministically (`appendices/`) and contains reference files without chapter front matter or verification status. Skip any `book:appendices` target passed to this stage and log `skipped: appendices is directory`.
 ```
 
 - [ ] **Step 11: Update orchestrator SKILL — Stage 16 target list**
@@ -1716,7 +1743,7 @@ Stage 16 chapter_targets EXCLUDE `book:appendices` — the appendices directory 
 
 ```bash
 git add tests/ swarn_research_mcp/research_book.py .agents/skills/chapter-manifest/SKILL.md .agents/skills/auto-research-orchestrator/SKILL.md
-git commit -m "feat(research-book): hard-switch appendices to 99_appendices/ directory; exclude from manifest"
+git commit -m "feat(research-book): hard-switch appendices to appendices/ directory; exclude from manifest"
 ```
 
 ---
@@ -1730,12 +1757,12 @@ git commit -m "feat(research-book): hard-switch appendices to 99_appendices/ dir
 
 In `## Output filenames`, change the appendices row to:
 ```markdown
-| `appendices`         | `99_appendices/` (directory)   | n/a (deterministic)  |
+| `appendices`         | `appendices/` (directory)   | n/a (deterministic)  |
 ```
 
 In `## Per-section structure`, the appendices row was already updated in Task 2.2 to mention the directory. Verify it reads:
 ```markdown
-- `appendices` — deterministic artifact. Always run the generator; output is the directory `99_appendices/` with `glossary.md`, `notation.md`, `datasets.md`, `software.md`.
+- `appendices` — deterministic artifact. Always run the generator; output is the directory `appendices/` with `glossary.md`, `notation.md`, `datasets.md`, `software.md`, `references.md`.
 ```
 
 - [ ] **Step 2: Commit**
@@ -1747,72 +1774,335 @@ git commit -m "docs(book-section-writing): appendices output is a directory, no 
 
 ---
 
-# Wave 5 — Verification gate + NEEDS_REVIEW.md
+## Task 4.4: Render parts in SUMMARY.md, sidebar.json, and method_taxonomy.md
 
-## Task 5.1: Add `verification_gate` + `NEEDS_REVIEW.md` emitter
+Parts must be **reader-visible**. The current `_build_summary` lists families flat under "## Families and Methods"; readers cannot see that the book is organized into parts. Same for `_build_sidebar` and `_build_method_taxonomy`.
 
 **Files:**
-- Test: `tests/test_research_book_verification_gate.py` (create)
+- Test: extend `tests/test_research_book_artifacts.py`
+- Modify: `swarn_research_mcp/research_book.py:532` (`_build_method_taxonomy`), `:595` (`_build_summary`), `:614` (`_build_sidebar`)
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `tests/test_research_book_artifacts.py`:
+
+```python
+def test_summary_groups_families_under_parts(voice_lm_minimal, monkeypatch):
+    import json
+    from swarn_research_mcp import research_book as rb
+    op = voice_lm_minimal / "12_taxonomy" / "outline.json"
+    outline = json.loads(op.read_text())
+    # Manually merge fam_codec into fam_flow so we have two families to spread across parts.
+    outline["families"] = [
+        {"id": "fam_flow", "title": "flow matching", "method_ids": ["m_voicebox", "m_excluded", "m_valle"]},
+        {"id": "fam_codec_b", "title": "discrete codec B", "method_ids": ["m_b1", "m_b2"]},
+    ]
+    outline["methods"].extend([
+        {"id": "m_b1", "title": "B1", "arxiv_id": "0009.0001", "family_id": "fam_codec_b"},
+        {"id": "m_b2", "title": "B2", "arxiv_id": "0009.0002", "family_id": "fam_codec_b"},
+    ])
+    outline["methods"][0]["family_id"] = "fam_flow"  # m_valle now under flow
+    outline["parts"] = [
+        {"id": "generation", "title": "Generation", "family_ids": ["fam_flow"]},
+        {"id": "tokenization", "title": "Tokenization", "family_ids": ["fam_codec_b"]},
+    ]
+    op.write_text(json.dumps(outline))
+    monkeypatch.setattr(rb, "verification_gate", lambda _: None)
+    monkeypatch.setattr(rb, "_paper_label", lambda aid, p, pool: f"[arxiv:{aid}] x (2024)")
+    rb.generate_book_artifacts(voice_lm_minimal)
+    summary = (voice_lm_minimal / "16_book" / "SUMMARY.md").read_text()
+    assert "## Part 1: Generation" in summary
+    assert "## Part 2: Tokenization" in summary
+    # Family sits under its part heading.
+    assert summary.index("## Part 1: Generation") < summary.index("flow matching")
+    assert summary.index("flow matching") < summary.index("## Part 2: Tokenization")
+
+
+def test_sidebar_groups_families_under_parts(voice_lm_minimal, monkeypatch):
+    import json
+    from swarn_research_mcp import research_book as rb
+    op = voice_lm_minimal / "12_taxonomy" / "outline.json"
+    outline = json.loads(op.read_text())
+    outline["families"] = [
+        {"id": "fam_flow", "title": "flow matching", "method_ids": ["m_voicebox", "m_excluded", "m_valle"]},
+        {"id": "fam_codec_b", "title": "discrete codec B", "method_ids": ["m_b1", "m_b2"]},
+    ]
+    outline["methods"].extend([
+        {"id": "m_b1", "title": "B1", "arxiv_id": "0009.0001", "family_id": "fam_codec_b"},
+        {"id": "m_b2", "title": "B2", "arxiv_id": "0009.0002", "family_id": "fam_codec_b"},
+    ])
+    outline["methods"][0]["family_id"] = "fam_flow"
+    outline["parts"] = [
+        {"id": "generation", "title": "Generation", "family_ids": ["fam_flow"]},
+        {"id": "tokenization", "title": "Tokenization", "family_ids": ["fam_codec_b"]},
+    ]
+    op.write_text(json.dumps(outline))
+    monkeypatch.setattr(rb, "verification_gate", lambda _: None)
+    monkeypatch.setattr(rb, "_paper_label", lambda aid, p, pool: f"[arxiv:{aid}] x (2024)")
+    rb.generate_book_artifacts(voice_lm_minimal)
+    sidebar = json.loads((voice_lm_minimal / "16_book" / "sidebar.json").read_text())
+    titles = [item["title"] for item in sidebar["items"]]
+    assert "Generation" in titles
+    assert "Tokenization" in titles
+```
+
+- [ ] **Step 2: Run test**
+
+Run: `pytest tests/test_research_book_artifacts.py -v`
+Expected: FAIL — current builders produce flat structure.
+
+- [ ] **Step 3: Rewrite `_build_summary` to group by part**
+
+In `swarn_research_mcp/research_book.py`, replace the body of `_build_summary` (lines 595–611) with:
+
+```python
+def _build_summary(outline: dict[str, Any]) -> str:
+    methods = _method_by_id(outline)
+    family_by_id = {f["id"]: f for f in outline.get("families", [])}
+    lines = ["# Summary", "", "## Book", ""]
+    for section in outline.get("book_sections", []):
+        section_id = section["id"]
+        filename = BOOK_FILE_BY_ID.get(section_id)
+        if not filename:
+            continue
+        if section_id == "appendices":
+            href = f"../14_chapters/book/{filename}/glossary.md"
+        else:
+            href = f"../14_chapters/book/{filename}"
+        lines.append(f"- [{section['title']}]({href})")
+
+    parts = outline.get("parts", []) or []
+    for idx, part in enumerate(parts, start=1):
+        lines.extend(["", f"## Part {idx}: {part['title']}", ""])
+        for fid in part.get("family_ids", []) or []:
+            family = family_by_id.get(fid)
+            if not family:
+                continue
+            if family.get("is_group"):
+                # Standalone group: list methods directly, no family chapter link.
+                for method_id in family.get("method_ids", []):
+                    method = methods.get(method_id)
+                    if method:
+                        lines.append(f"- [{method['title']}](../14_chapters/methods/{method_id}.md)")
+            else:
+                lines.append(f"- [{family['title']}](../14_chapters/families/{fid}.md)")
+                for method_id in family.get("method_ids", []):
+                    method = methods.get(method_id)
+                    if method:
+                        lines.append(f"  - [{method['title']}](../14_chapters/methods/{method_id}.md)")
+    return "\n".join(lines)
+```
+
+- [ ] **Step 4: Rewrite `_build_sidebar` similarly**
+
+Replace the body of `_build_sidebar` (lines 614–637) with:
+
+```python
+def _build_sidebar(outline: dict[str, Any]) -> dict[str, Any]:
+    methods = _method_by_id(outline)
+    family_by_id = {f["id"]: f for f in outline.get("families", [])}
+    book_items = []
+    for section in outline.get("book_sections", []):
+        filename = BOOK_FILE_BY_ID.get(section["id"])
+        if not filename:
+            continue
+        path = (f"14_chapters/book/{filename}/glossary.md"
+                if section["id"] == "appendices" else f"14_chapters/book/{filename}")
+        book_items.append({"title": section["title"], "path": path})
+
+    part_items = []
+    for part in outline.get("parts", []) or []:
+        children = []
+        for fid in part.get("family_ids", []) or []:
+            family = family_by_id.get(fid)
+            if not family:
+                continue
+            if family.get("is_group"):
+                for mid in family.get("method_ids", []) or []:
+                    m = methods.get(mid)
+                    if m:
+                        children.append({"title": m["title"], "path": f"14_chapters/methods/{mid}.md"})
+            else:
+                method_kids = []
+                for mid in family.get("method_ids", []) or []:
+                    m = methods.get(mid)
+                    if m:
+                        method_kids.append({"title": m["title"], "path": f"14_chapters/methods/{mid}.md"})
+                children.append({
+                    "title": family["title"],
+                    "path": f"14_chapters/families/{fid}.md",
+                    "children": method_kids,
+                })
+        part_items.append({"title": part["title"], "children": children})
+
+    return {"items": [{"title": "Book", "children": book_items}] + part_items}
+```
+
+- [ ] **Step 5: Rewrite `_build_method_taxonomy` to render parts**
+
+In `swarn_research_mcp/research_book.py:532`, replace `_build_method_taxonomy(outline)` with:
+
+```python
+def _build_method_taxonomy(outline: dict[str, Any]) -> str:
+    methods = _method_by_id(outline)
+    family_by_id = {f["id"]: f for f in outline.get("families", [])}
+    lines = ["# Method Taxonomy", "",
+             "This taxonomy is generated from `12_taxonomy/outline.json` so it stays complete and navigable.",
+             ""]
+    for idx, part in enumerate(outline.get("parts", []) or [], start=1):
+        lines.extend(["", f"## Part {idx}: {part['title']}", ""])
+        for fid in part.get("family_ids", []) or []:
+            family = family_by_id.get(fid)
+            if not family:
+                continue
+            if family.get("is_group"):
+                for mid in family.get("method_ids", []) or []:
+                    m = methods.get(mid)
+                    if m:
+                        lines.append(f"- [{m['title']}](../methods/{mid}.md) [arxiv:{m.get('arxiv_id', '')}]")
+            else:
+                lines.append(f"- [{family['title']}](../families/{fid}.md)")
+                for mid in family.get("method_ids", []) or []:
+                    m = methods.get(mid)
+                    if m:
+                        lines.append(f"  - [{m['title']}](../methods/{mid}.md) [arxiv:{m.get('arxiv_id', '')}]")
+    return "\n".join(lines)
+```
+
+- [ ] **Step 6: Update existing flat-summary tests**
+
+Run: `grep -n "Families and Methods" tests/`. For each hit, update expectations to match the new `## Part N: <title>` heading structure.
+
+- [ ] **Step 7: Run tests**
+
+Run: `pytest tests/ -v`
+Expected: all green.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add tests/ swarn_research_mcp/research_book.py
+git commit -m "feat(research-book): SUMMARY/sidebar/method_taxonomy group families under parts (reader-visible)"
+```
+
+---
+
+# Wave 5 — Verification quarantine (passed → main nav, failed → NEEDS_REVIEW.md)
+
+## Task 5.1: Verification quarantine — collect excluded, emit `NEEDS_REVIEW.md`, never raise
+
+The product behavior: `generate_book_artifacts` always succeeds when prerequisites are met. Excluded chapters are quarantined — they stay on disk but are NOT linked from `SUMMARY.md` or `sidebar.json`. A separate `16_book/NEEDS_REVIEW.md` lists every excluded chapter with its `status` and `reason`. Readers always get a working book.
+
+**Files:**
+- Test: `tests/test_research_book_verification_quarantine.py` (create)
 - Modify: `swarn_research_mcp/research_book.py`
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
-# tests/test_research_book_verification_gate.py
+# tests/test_research_book_verification_quarantine.py
 from __future__ import annotations
+import json
 import pytest
 from swarn_research_mcp.research_book import (
-    verification_gate,
-    VerificationGateError,
+    collect_excluded,
     write_needs_review,
+    generate_book_artifacts,
 )
 
 
-def test_gate_passes_when_no_excluded(tmp_path):
+def test_collect_excluded_finds_excluded_chapters(voice_lm_minimal):
+    offenders = collect_excluded(voice_lm_minimal)
+    assert any(o["id"] == "m_excluded" and o["status"].startswith("excluded_")
+               for o in offenders)
+
+
+def test_collect_excluded_returns_empty_when_all_passed(tmp_path):
     run = tmp_path / "run"
     run.mkdir()
-    verification_gate(run)  # no raise
+    assert collect_excluded(run) == []
 
 
-def test_gate_collects_offenders(voice_lm_minimal):
-    with pytest.raises(VerificationGateError) as exc:
-        verification_gate(voice_lm_minimal)
-    msg = str(exc.value)
-    assert "m_excluded" in msg
-    assert "excluded_unsupported_claims" in msg
-
-
-def test_write_needs_review_creates_file(voice_lm_minimal):
+def test_write_needs_review_lists_offenders(voice_lm_minimal):
     offenders = [{"type": "methods", "id": "m_excluded",
                   "status": "excluded_unsupported_claims",
                   "reason": "claims_unsupported=3"}]
     write_needs_review(voice_lm_minimal, offenders)
-    needs = voice_lm_minimal / "16_book" / "NEEDS_REVIEW.md"
-    assert needs.exists()
-    text = needs.read_text()
+    text = (voice_lm_minimal / "16_book" / "NEEDS_REVIEW.md").read_text()
     assert "m_excluded" in text
     assert "excluded_unsupported_claims" in text
     assert "claims_unsupported=3" in text
+
+
+def test_generate_succeeds_with_excluded_chapters(voice_lm_minimal, monkeypatch):
+    """Quarantine: excluded chapters do NOT block SUMMARY.md generation."""
+    from swarn_research_mcp import research_book as rb
+    op = voice_lm_minimal / "12_taxonomy" / "outline.json"
+    outline = json.loads(op.read_text())
+    # Pre-normalize the singleton via the standalone group so assertion passes.
+    outline["families"] = [
+        {"id": "fam_flow", "title": "flow matching", "method_ids": ["m_voicebox", "m_excluded"]},
+        {"id": "standalone", "title": "Standalone / Emerging Methods",
+         "method_ids": ["m_valle"], "is_group": True},
+    ]
+    outline["methods"][0]["family_id"] = "standalone"  # m_valle
+    outline["parts"] = [
+        {"id": "generation", "title": "Generation", "family_ids": ["fam_flow"]},
+        {"id": "standalone_methods", "title": "Standalone / Emerging Methods",
+         "family_ids": ["standalone"]},
+    ]
+    op.write_text(json.dumps(outline))
+    monkeypatch.setattr(rb, "_paper_label", lambda aid, p, pool: f"[arxiv:{aid}] x (2024)")
+    rb.generate_book_artifacts(voice_lm_minimal)  # MUST NOT raise
+
+    summary = (voice_lm_minimal / "16_book" / "SUMMARY.md").read_text()
+    assert "m_excluded" not in summary  # quarantined out
+    assert "m_valle" in summary  # standalone method visible
+
+    needs = voice_lm_minimal / "16_book" / "NEEDS_REVIEW.md"
+    assert needs.exists()
+    assert "m_excluded" in needs.read_text()
+
+
+def test_excluded_chapters_omitted_from_sidebar(voice_lm_minimal, monkeypatch):
+    from swarn_research_mcp import research_book as rb
+    op = voice_lm_minimal / "12_taxonomy" / "outline.json"
+    outline = json.loads(op.read_text())
+    outline["families"] = [
+        {"id": "fam_flow", "title": "flow matching", "method_ids": ["m_voicebox", "m_excluded"]},
+        {"id": "standalone", "title": "Standalone / Emerging Methods",
+         "method_ids": ["m_valle"], "is_group": True},
+    ]
+    outline["methods"][0]["family_id"] = "standalone"
+    outline["parts"] = [
+        {"id": "generation", "title": "Generation", "family_ids": ["fam_flow"]},
+        {"id": "standalone_methods", "title": "Standalone / Emerging Methods",
+         "family_ids": ["standalone"]},
+    ]
+    op.write_text(json.dumps(outline))
+    monkeypatch.setattr(rb, "_paper_label", lambda aid, p, pool: f"[arxiv:{aid}] x (2024)")
+    rb.generate_book_artifacts(voice_lm_minimal)
+    sidebar = json.loads((voice_lm_minimal / "16_book" / "sidebar.json").read_text())
+    titles = json.dumps(sidebar)
+    assert "m_excluded" not in titles
 ```
 
 - [ ] **Step 2: Run test**
 
-Run: `pytest tests/test_research_book_verification_gate.py -v`
+Run: `pytest tests/test_research_book_verification_quarantine.py -v`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement `verification_gate` and `write_needs_review`**
+- [ ] **Step 3: Implement `collect_excluded` and `write_needs_review`**
 
-In `swarn_research_mcp/research_book.py`, add:
+In `swarn_research_mcp/research_book.py`, add (note: NO `VerificationGateError` — quarantine never raises):
 
 ```python
-class VerificationGateError(RuntimeError):
-    """Raised when one or more chapters carry status: excluded_*."""
-
-
-def _collect_excluded(run_dir: Path) -> list[dict[str, str]]:
+def collect_excluded(run_dir: Path | str) -> list[dict[str, str]]:
+    """Walk 14_chapters/ and return every chapter with front-matter status starting 'excluded_'."""
+    run_path = Path(run_dir)
     offenders: list[dict[str, str]] = []
     for sub in ("families", "methods", "book"):
-        d = run_dir / "14_chapters" / sub
+        d = run_path / "14_chapters" / sub
         if not d.exists():
             continue
         for path in sorted(d.glob("*.md")):
@@ -1835,97 +2125,140 @@ def _collect_excluded(run_dir: Path) -> list[dict[str, str]]:
 
 
 def write_needs_review(run_dir: Path | str, offenders: list[dict[str, str]]) -> None:
-    """Emit 16_book/NEEDS_REVIEW.md so the run still has a navigation artifact when the gate trips."""
+    """Emit 16_book/NEEDS_REVIEW.md listing quarantined chapters."""
     out = Path(run_dir) / "16_book" / "NEEDS_REVIEW.md"
     out.parent.mkdir(parents=True, exist_ok=True)
-    lines = ["# NEEDS REVIEW", "",
-             "SUMMARY.md was not generated because one or more chapters failed verification.",
-             "Re-run with `phase=write fix_excluded=true` to attempt automated fixes.",
-             "", "## Offenders", ""]
+    lines = ["# Needs Review", "",
+             "These chapters did not pass verification and are NOT linked from SUMMARY.md.",
+             "They remain on disk under `14_chapters/` and can be re-attempted with",
+             "`phase=write fix_excluded=true`.",
+             "", "## Quarantined chapters", ""]
+    if not offenders:
+        lines.append("_(none — every chapter passed)_")
     for o in offenders:
         lines.append(f"- **{o['type']}/{o['id']}** — `{o['status']}` ({o['reason']})")
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+```
 
+- [ ] **Step 4: Update `_build_summary`, `_build_sidebar`, `_build_method_taxonomy` to skip excluded methods/families**
 
-def verification_gate(run_dir: Path | str) -> None:
-    """Block stage 18 if any chapter has status: excluded_*. Emits NEEDS_REVIEW.md and raises."""
+Add a helper at the top of `research_book.py`:
+
+```python
+def _excluded_ids(run_dir: Path) -> set[str]:
+    return {o["id"] for o in collect_excluded(run_dir)}
+```
+
+Modify each builder's signature to accept an optional `excluded: set[str]` parameter and skip any family/method whose id is in that set:
+
+```python
+def _build_summary(outline: dict[str, Any], excluded: set[str] | None = None) -> str:
+    excluded = excluded or set()
+    methods = _method_by_id(outline)
+    family_by_id = {f["id"]: f for f in outline.get("families", [])}
+    lines = ["# Summary", "", "## Book", ""]
+    for section in outline.get("book_sections", []):
+        section_id = section["id"]
+        filename = BOOK_FILE_BY_ID.get(section_id)
+        if not filename:
+            continue
+        if section_id == "appendices":
+            href = f"../14_chapters/book/{filename}/glossary.md"
+        else:
+            href = f"../14_chapters/book/{filename}"
+        lines.append(f"- [{section['title']}]({href})")
+
+    for idx, part in enumerate(outline.get("parts", []) or [], start=1):
+        lines.extend(["", f"## Part {idx}: {part['title']}", ""])
+        for fid in part.get("family_ids", []) or []:
+            if fid in excluded:
+                continue
+            family = family_by_id.get(fid)
+            if not family:
+                continue
+            if family.get("is_group"):
+                for method_id in family.get("method_ids", []):
+                    if method_id in excluded:
+                        continue
+                    method = methods.get(method_id)
+                    if method:
+                        lines.append(f"- [{method['title']}](../14_chapters/methods/{method_id}.md)")
+            else:
+                lines.append(f"- [{family['title']}](../14_chapters/families/{fid}.md)")
+                for method_id in family.get("method_ids", []):
+                    if method_id in excluded:
+                        continue
+                    method = methods.get(method_id)
+                    if method:
+                        lines.append(f"  - [{method['title']}](../14_chapters/methods/{method_id}.md)")
+    return "\n".join(lines)
+```
+
+Apply the same `excluded` filtering to `_build_sidebar` and `_build_method_taxonomy`.
+
+- [ ] **Step 5: Wire it all into `generate_book_artifacts` (quarantine, no raise)**
+
+Replace `generate_book_artifacts` body (around line 638) with:
+
+```python
+def generate_book_artifacts(run_dir: Path | str) -> dict[str, int]:
     run_path = Path(run_dir)
-    offenders = _collect_excluded(run_path)
-    if offenders:
-        write_needs_review(run_path, offenders)
-        lines = [f"  - {o['type']}/{o['id']}: {o['status']} ({o['reason']})" for o in offenders]
-        raise VerificationGateError(
-            "verification gate blocked SUMMARY.md generation; offenders:\n"
-            + "\n".join(lines)
-            + "\n\nSee 16_book/NEEDS_REVIEW.md for the punch list."
-        )
+    outline = _outline(run_path)
+    assert_no_singletons(outline)
+
+    offenders = collect_excluded(run_path)
+    write_needs_review(run_path, offenders)
+    excluded_ids = {o["id"] for o in offenders}
+
+    taxonomy_path = run_path / "14_chapters" / "book" / BOOK_FILE_BY_ID["method_taxonomy"]
+    _write_markdown_preserving_front_matter(
+        taxonomy_path, _build_method_taxonomy(outline, excluded_ids)
+    )
+    _build_appendices_dir(run_path, outline)
+
+    (run_path / "16_book").mkdir(parents=True, exist_ok=True)
+    (run_path / "16_book" / "SUMMARY.md").write_text(
+        _build_summary(outline, excluded_ids) + "\n", encoding="utf-8"
+    )
+    _write_json(run_path / "16_book" / "sidebar.json",
+                _build_sidebar(outline, excluded_ids))
+    return {
+        "families": len(outline.get("families", [])),
+        "methods": len(outline.get("methods", [])),
+        "quarantined": len(offenders),
+    }
 ```
 
-- [ ] **Step 4: Run tests**
+- [ ] **Step 6: Run tests**
 
-Run: `pytest tests/test_research_book_verification_gate.py -v`
-Expected: PASS (3 tests).
+Run: `pytest tests/test_research_book_verification_quarantine.py -v`
+Expected: PASS (5 tests).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 7: Update earlier task tests that monkeypatched `verification_gate`**
+
+In `tests/test_research_book_singleton_merge.py`, replace any `monkeypatch.setattr(rb, "verification_gate", lambda _: None)` with no-op (the function no longer exists or is no longer raising). Run `pytest tests/ -v` and fix mismatches.
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git add tests/test_research_book_verification_gate.py swarn_research_mcp/research_book.py
-git commit -m "feat(research-book): verification_gate raises on excluded chapters and emits NEEDS_REVIEW.md"
+git add tests/ swarn_research_mcp/research_book.py
+git commit -m "feat(research-book): quarantine excluded chapters from SUMMARY/sidebar; never block the book"
 ```
 
 ---
 
-## Task 5.2: Wire gate into `generate_book_artifacts`
-
-**Files:**
-- Modify: `swarn_research_mcp/research_book.py:638` (`generate_book_artifacts`)
-
-- [ ] **Step 1: Add gate call as the first line**
-
-In `generate_book_artifacts`, before any other code in the function body, add:
-```python
-    verification_gate(run_dir)
-```
-
-- [ ] **Step 2: Add integration test**
-
-Append to `tests/test_research_book_verification_gate.py`:
-
-```python
-def test_generate_blocks_on_excluded(voice_lm_minimal):
-    from swarn_research_mcp.research_book import generate_book_artifacts, VerificationGateError
-    with pytest.raises(VerificationGateError):
-        generate_book_artifacts(voice_lm_minimal)
-    assert (voice_lm_minimal / "16_book" / "NEEDS_REVIEW.md").exists()
-```
-
-Run: `pytest tests/test_research_book_verification_gate.py -v`
-Expected: PASS (4 tests).
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add tests/test_research_book_verification_gate.py swarn_research_mcp/research_book.py
-git commit -m "feat(research-book): generate_book_artifacts blocks on verification_gate; emits NEEDS_REVIEW.md"
-```
-
----
-
-## Task 5.3: Update orchestrator SKILL with gate + fix_excluded loop
+## Task 5.2: Update orchestrator SKILL with quarantine + fix_excluded loop
 
 **Files:**
 - Modify: `.agents/skills/auto-research-orchestrator/SKILL.md`
 
-- [ ] **Step 1: Document the gate at stage 18**
+- [ ] **Step 1: Document quarantine at stage 18**
 
 Find the Stage table row for stage 18 (`SUMMARY.md`...). Append AFTER the table:
 
 ```markdown
-## Stage 18 verification gate
-Before generating SUMMARY.md, call `swarn_research_mcp.research_book.verification_gate(run_dir)`. If it raises `VerificationGateError`:
-- The run fails the `write` phase.
-- `16_book/NEEDS_REVIEW.md` is written with the offender list.
-- `SUMMARY.md` and `sidebar.json` are NOT written.
+## Stage 18 verification quarantine
+At stage 18, `generate_book_artifacts` ALWAYS produces `SUMMARY.md`, `sidebar.json`, `04_method_taxonomy.md`, and `appendices/` (assuming Stage 12.5 normalized the outline). Chapters whose front-matter `status` starts with `excluded_` are **quarantined** — they remain on disk under `14_chapters/` but are NOT linked from main navigation. The list of quarantined chapters is written to `16_book/NEEDS_REVIEW.md`, which always exists (even if empty).
 ```
 
 - [ ] **Step 2: Add `fix_excluded` retry-loop spec**
@@ -1940,7 +2273,7 @@ When the operator re-launches with `phase=write fix_excluded=true`:
    - `gaps_missing` → re-dispatch stage 13 (pack rebuild) for that ID, then stage 14.
    - `claims_unsupported` → re-dispatch stage 14 with a directive to drop or re-cite offending claims.
 3. Re-run stage 15 verification on affected chapters.
-4. On still-failing chapters after one retry, fail hard with a final exclusion list. No further retries.
+4. Re-run stage 18 (`generate_book_artifacts`); chapters now passing get added to main navigation, the rest stay quarantined in `NEEDS_REVIEW.md`. No retry budget — a single attempt per offender per invocation.
 5. Each fix attempt logs a row in `run_log.csv`: `stage,chapter_id,attempt,outcome`.
 ```
 
@@ -1977,22 +2310,20 @@ print(f'total issues: {len(issues)}')
 
 Expected: surfaces `missing_parts`, `singleton_family` (multiple), `wrong_chapter_headings` (multiple), and the existing run's status flags. Confirms the validator now catches the audit gaps. (We are NOT migrating the existing run.)
 
-- [ ] **Step 3: Verify the gate trips on the audited run**
+- [ ] **Step 3: Verify quarantine on the audited run**
 
 Run:
 ```bash
 python -c "
-from swarn_research_mcp.research_book import verification_gate
-try:
-    verification_gate('research_runs/voice-language-model-text-speech-io-20260509-222749')
-    print('PASSED — unexpected')
-except Exception as e:
-    print('GATE TRIPPED as expected')
-    print(str(e)[:500])
+from swarn_research_mcp.research_book import collect_excluded
+offenders = collect_excluded('research_runs/voice-language-model-text-speech-io-20260509-222749')
+print(f'quarantined: {len(offenders)} chapters')
+for o in offenders[:10]:
+    print(f'  {o[\"type\"]}/{o[\"id\"]}: {o[\"status\"]} ({o[\"reason\"]})')
 "
 ```
 
-Expected: GATE TRIPPED message listing several `excluded_*` chapters.
+Expected: a non-zero count with several `excluded_unsupported_claims` and `excluded_gaps_missing` entries.
 
 - [ ] **Step 4: Commit any stray changes (if any)**
 
@@ -2006,23 +2337,26 @@ git status
 # Self-Review
 
 **Spec coverage:**
-- §1 parts → Task 1.3 (validator), 1.6 (skill)
-- §2 singleton merge → Task 1.4 (deterministic merger), 1.5 (wired into generator), 1.6 (skill text)
+- §1 parts (validator + reader-visible) → Task 1.3 (validator + empty_part), 4.4 (render in SUMMARY/sidebar/method_taxonomy), 1.6 (skill)
+- §2 singleton policy (evidence-based merge, otherwise standalone group) → Task 1.4, 1.5, 1.6
 - §3 family headings → Task 3.1 (lint), 3.2 (skill)
 - §4 method headings → Task 3.1 (lint), 3.3 (skill)
-- §5 verification gate → Task 5.1 (gate + NEEDS_REVIEW), 5.2 (wired), 5.3 (skill)
+- §5 verification quarantine (no hard gate) → Task 5.1, 5.2
 - §6a bibliography bug → Task 1.1 (multi-shape lookup), 1.2 (loud `_paper_label`), 2.1 (regression), 2.2 (skill)
 - §6b goals → Task 4.1
-- §6c appendices → Task 4.2 (hard break), 4.3 (skill)
+- §6c appendices (`appendices/` directory, glossary + notation + datasets + software + references) → Task 4.2, 4.3
 - §7 SDK migration → **deferred to separate plan** `2026-05-10-codex-sdk-context-relief-pilot.md`
 
 **Type consistency:**
-- `MissingCitationError` defined in Task 1.1, used in 1.2, 2.1
-- `VerificationGateError` defined in Task 5.1, used in 5.2
-- `merge_singletons` defined in Task 1.4, called in 1.5
-- `BOOK_FILE_BY_ID["appendices"]` is `"99_appendices"` (no `.md`) consistently after Task 4.2
+- `MissingCitationError` defined in Task 1.1, used in 1.2, 2.1, 4.2 (references.md)
+- `collect_excluded` + `write_needs_review` defined in Task 5.1, used by `generate_book_artifacts` (no exception type — quarantine never raises)
+- `merge_singletons` + `assert_no_singletons` defined in Task 1.4, called in 1.5
+- `STANDALONE_GROUP_ID = "standalone"` and `STANDALONE_PART_ID = "standalone_methods"` are stable identifiers used in 1.4, 4.4, and all rendering tests
+- `BOOK_FILE_BY_ID["appendices"]` is `"appendices"` (no `.md`, no leading `99_`) after Task 4.2
 - `_diff_headings` returns `{missing, extra, out_of_order}` everywhere; `## References` allowed only as last `##`
+- All rendering helpers (`_build_summary`, `_build_sidebar`, `_build_method_taxonomy`) accept `excluded: set[str] | None` and skip excluded ids
 
 **Real-shape coverage:**
-- Wave 0 fixture has list-shaped paper_pool (no titles), semantic_scholar metadata, mixed pass/excluded chapters, old skill heading shapes — exactly the audited-run quirks
-- Tasks 1.1, 2.1, 3.1, 4.2, 5.1, 5.2 all run against the fixture
+- Wave 0 fixture has list-shaped paper_pool (no titles), semantic_scholar metadata, mixed pass/excluded chapters, old skill heading shapes
+- Tasks 1.1, 2.1, 3.1, 4.2, 4.4, 5.1 all run against the fixture
+- Quarantine model verified end-to-end in Task 5.1 (excluded chapter remains on disk; SUMMARY does not link to it; NEEDS_REVIEW.md lists it)

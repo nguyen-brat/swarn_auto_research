@@ -338,38 +338,52 @@ git commit -m "feat(sdk): run_one_shot_batch with semaphore-bounded concurrency"
 mkdir -p swarn_research_mcp/config/sdk_prompts
 ```
 
-Write `swarn_research_mcp/config/sdk_prompts/query_planner.md`:
+Write `swarn_research_mcp/config/sdk_prompts/query_planner.md` — schema parity with `.agents/skills/query-planning/SKILL.md` is mandatory:
 
 ```markdown
-Follow .agents/skills/query-planning/SKILL.md.
+Follow .agents/skills/query-planning/SKILL.md exactly.
 
-Inputs (provided in the user message as JSON): run_id, topic, user_queries (optional), user_keywords (optional).
+Inputs (provided in the user message as JSON): topic (required), user_queries (optional list of strings), user_keywords (optional list of strings).
 
 Steps:
 1. Identify 4–6 distinct aspects of the topic across method families, architectural enablers, training/adaptation, evaluation, foundational priors, boundary aspects (skip axes that don't apply).
-2. Per aspect: 2–3 normal_queries, 1 survey_query, 3–5 positive_keywords, optional negative_keywords.
-3. Add global_negative_keywords (3–8) that exclude noise across all aspects.
-4. If user_queries / user_keywords were supplied, include them verbatim in the most relevant aspect.
+2. Per aspect emit:
+   - aspect_id: short snake_case slug.
+   - title: human-readable.
+   - rationale: 1 sentence — why this aspect matters and what would be missed without it.
+   - normal_queries: 2–3 plain-phrase queries.
+   - survey_queries: 1 query starting with "survey", "review", or "overview".
+   - positive_keywords: 3–5 distinctive keywords (lowercase except proper nouns / model names).
+   - negative_keywords: aspect-specific exclusions (usually empty).
+3. Add global_negative_keywords: 3–8 entries that exclude noise across all aspects.
+4. If user_queries / user_keywords were supplied, include them verbatim in the most relevant aspect — do not drop them.
 
 Hard rules:
-- Aspects are distinct — merge any pair that would share > 50% of queries.
-- Total normal_queries ≤ 15 and total survey_queries ≤ 6 across all aspects.
+- ≤ 15 normal_queries total across all aspects; ≤ 6 survey_queries total.
+- No two aspects share an aspect_id, title, or > 50% of their normal_queries.
 - Plain-phrase queries only (no operators / quotes).
-- Never invent specific papers, methods, or numbers.
+- Never invent specific papers, methods, or numerical claims.
 
-Return: a single JSON object:
+Return a single JSON object exactly matching this schema:
+
 {
+  "topic": "<echo of the input topic>",
   "aspects": [
     {
-      "name": "...",
-      "normal_queries": ["...", ...],
-      "survey_queries": ["..."],
-      "positive_keywords": ["...", ...],
-      "negative_keywords": ["..."]
+      "aspect_id": "sparse_attention",
+      "title": "Sparse attention methods",
+      "rationale": "Sparse patterns are the dominant strategy for long-context efficiency...",
+      "normal_queries": ["sparse attention long context transformer", "..."],
+      "survey_queries": ["survey efficient long-context attention"],
+      "positive_keywords": ["sparse attention", "block-sparse", "..."],
+      "negative_keywords": []
     }
   ],
-  "global_negative_keywords": ["...", ...]
+  "global_negative_keywords": ["image classification only", "speech only", "graph neural network"]
 }
+
+Required top-level keys: topic, aspects, global_negative_keywords.
+Required per-aspect keys: aspect_id, title, rationale, normal_queries, survey_queries, positive_keywords, negative_keywords.
 ```
 
 - [ ] **Step 2: Commit**
@@ -435,8 +449,15 @@ for tag, topic in [("sdk_t1", "transformer attention variants"),
         prompt=json.dumps({"topic": topic}),
         system=prompt_text,
         model="gpt-5.4-mini",
-        schema={"required": ["aspects", "global_negative_keywords"]},
+        schema={"required": ["topic", "aspects", "global_negative_keywords"]},
     ))
+    # Per-aspect schema parity check (run_one_shot only verifies top-level required keys).
+    REQUIRED_ASPECT_FIELDS = {"aspect_id", "title", "rationale", "normal_queries",
+                              "survey_queries", "positive_keywords", "negative_keywords"}
+    for asp in result["aspects"]:
+        missing = REQUIRED_ASPECT_FIELDS - set(asp.keys())
+        if missing:
+            raise ValueError(f"aspect missing fields {missing}: {asp}")
     wall = time.monotonic() - started
     out_path = f"/tmp/sdk_pilot/{tag}_search_plan.json"
     with open(out_path, "w") as f:

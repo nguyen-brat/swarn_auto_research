@@ -8,9 +8,10 @@
 
 ## Goals
 
-1. Bring the auto-research pipeline's output into structural agreement with `Book_style.md`.
-2. Reduce orchestrator context burden by routing single-shot stages through the Codex SDK session API instead of full sub-agent dispatch.
-3. Make verification a hard quality gate so unverified chapters cannot reach the published book.
+1. Produce a reader-oriented handbook structure inspired by `Book_style.md` — parts visible in navigation, families grouped under parts, every passing chapter reachable.
+2. Quarantine failed material rather than block the book: passing chapters always ship; excluded chapters are listed in `NEEDS_REVIEW.md` and omitted from main navigation.
+3. Singletons stay as method chapters under a "Standalone / Emerging Methods" group when they lack strong graph evidence; only well-connected singletons merge into existing families.
+4. Reduce orchestrator context burden by piloting one single-shot stage through the Codex SDK session API (separate plan).
 
 ## Non-goals
 
