@@ -12,6 +12,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNS_ROOT = REPO_ROOT / "research_runs"
+DEFAULT_SHARD_TIMEOUT_SECONDS = 3600
 
 PRIMARY_ARTIFACTS = {
     "0": ("run_config.json",),
@@ -96,6 +97,31 @@ def append_run_log(run_dir: Path, stage: str, status: str, detail: str) -> None:
 def primary_artifact_exists(run_dir: Path, stage: str) -> bool:
     artifacts = PRIMARY_ARTIFACTS.get(str(stage), ())
     return bool(artifacts) and all((run_dir / artifact).exists() for artifact in artifacts)
+
+
+def _safe_component(value: str, *, field: str) -> str:
+    path = Path(value)
+    if path.is_absolute() or len(path.parts) != 1 or value in {"", ".", ".."}:
+        raise ValueError(f"unsafe {field}: {value}")
+    return value
+
+
+def _safe_relative_path(value: str, *, field: str) -> Path:
+    path = Path(value)
+    if (
+        path.is_absolute()
+        or not path.parts
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise ValueError(f"unsafe {field}: {value}")
+    return path
+
+
+def _validate_shard_spec(spec: ShardSpec) -> None:
+    _safe_component(spec.stage, field="stage")
+    _safe_component(spec.shard_id, field="shard_id")
+    for rel in spec.expected_outputs:
+        _safe_relative_path(rel, field="expected output")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -195,10 +221,15 @@ def run_stage_11_merge(run_dir: Path) -> None:
 
 
 def expected_outputs_exist(run_dir: Path, spec: ShardSpec) -> bool:
-    return all((run_dir / rel).exists() for rel in spec.expected_outputs)
+    _validate_shard_spec(spec)
+    return all(
+        (run_dir / _safe_relative_path(rel, field="expected output")).exists()
+        for rel in spec.expected_outputs
+    )
 
 
 def _shard_dir(run_dir: Path, spec: ShardSpec) -> Path:
+    _validate_shard_spec(spec)
     path = ensure_run_control(run_dir) / "stages" / spec.stage / "shards"
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -228,7 +259,9 @@ def _write_shard_manifest(
         "stderr_path": str(stderr_path.relative_to(run_dir)),
         "updated_at": now_iso(),
     }
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    tmp_path.replace(path)
 
 
 def _codex_exec_command(spec: ShardSpec) -> list[str]:
@@ -245,8 +278,15 @@ def _codex_exec_command(spec: ShardSpec) -> list[str]:
     ]
 
 
-def run_shards(run_dir: Path, specs: list[ShardSpec], *, max_retries: int = 1) -> None:
+def run_shards(
+    run_dir: Path,
+    specs: list[ShardSpec],
+    *,
+    max_retries: int = 1,
+    timeout_seconds: int = DEFAULT_SHARD_TIMEOUT_SECONDS,
+) -> None:
     for spec in specs:
+        _validate_shard_spec(spec)
         if expected_outputs_exist(run_dir, spec):
             continue
 
@@ -254,18 +294,24 @@ def run_shards(run_dir: Path, specs: list[ShardSpec], *, max_retries: int = 1) -
             shard_dir = _shard_dir(run_dir, spec)
             stdout_path = shard_dir / f"{spec.shard_id}.attempt-{attempt}.stdout.txt"
             stderr_path = shard_dir / f"{spec.shard_id}.attempt-{attempt}.stderr.txt"
+            returncode = None
             with stdout_path.open("w") as out, stderr_path.open("w") as err:
-                completed = subprocess.run(
-                    _codex_exec_command(spec),
-                    cwd=REPO_ROOT,
-                    text=True,
-                    stdout=out,
-                    stderr=err,
-                )
+                try:
+                    completed = subprocess.run(
+                        _codex_exec_command(spec),
+                        cwd=REPO_ROOT,
+                        text=True,
+                        stdout=out,
+                        stderr=err,
+                        timeout=timeout_seconds,
+                    )
+                    returncode = completed.returncode
+                except (OSError, subprocess.TimeoutExpired) as error:
+                    err.write(f"{type(error).__name__}: {error}\n")
 
             status = (
                 "completed"
-                if completed.returncode == 0 and expected_outputs_exist(run_dir, spec)
+                if returncode == 0 and expected_outputs_exist(run_dir, spec)
                 else "failed"
             )
             _write_shard_manifest(
@@ -273,7 +319,7 @@ def run_shards(run_dir: Path, specs: list[ShardSpec], *, max_retries: int = 1) -
                 spec,
                 attempt=attempt,
                 status=status,
-                returncode=completed.returncode,
+                returncode=returncode,
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
             )
