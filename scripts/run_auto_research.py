@@ -805,6 +805,41 @@ def run_stage_17(run_dir: Path) -> None:
     run_shards(run_dir, [spec])
 
 
+def bootstrap_new_run(topic: str, phase: str) -> str:
+    prompt = "\n".join(
+        [
+            "Read AGENTS.md first.",
+            "Use .agents/skills/auto-research-orchestrator/SKILL.md.",
+            f"Run the auto-research pipeline for this topic through Stage 10 only: {topic}",
+            "Stop after Stage 10 verified evidence is complete.",
+            "Do not run Stage 11 or later.",
+            "Print the final run_id on a line exactly like: RUN_ID=<run_id>",
+        ]
+    )
+    completed = subprocess.run(
+        [
+            "codex",
+            "exec",
+            "--cd",
+            str(REPO_ROOT),
+            "--model",
+            "gpt-5.4-mini",
+            "--ask-for-approval",
+            "never",
+            prompt,
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"bootstrap failed: {completed.stderr}")
+    for line in completed.stdout.splitlines():
+        if line.startswith("RUN_ID="):
+            return line.split("=", 1)[1].strip()
+    raise RuntimeError("bootstrap did not print RUN_ID=<run_id>")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if not args.topic and not args.run_id:
@@ -812,9 +847,7 @@ def main(argv: list[str] | None = None) -> int:
 
     run_id = args.run_id
     if run_id is None:
-        raise SystemExit(
-            "new-run creation is not implemented until Task 8; pass --run-id for now"
-        )
+        run_id = bootstrap_new_run(args.topic, args.phase)
     run_dir = RUNS_ROOT / run_id
     if not run_dir.exists():
         raise SystemExit(f"run directory does not exist: {run_dir}")

@@ -367,3 +367,18 @@ def test_main_write_phase_rejects_saved_draft_current_stage(tmp_path, monkeypatc
         assert "stage 11 is not available for phase write" in str(error)
     else:
         raise AssertionError("expected saved draft current_stage failure")
+
+
+def test_main_with_topic_requires_bootstrap_to_create_run(tmp_path, monkeypatch):
+    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    monkeypatch.setattr("scripts.run_auto_research.bootstrap_new_run", lambda topic, phase: "demo-run")
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_11", lambda run_dir: None)
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_12", lambda run_dir: None)
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_12_5", lambda run_dir: None)
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_13", lambda run_dir: None)
+    (tmp_path / "research_runs" / "demo-run").mkdir(parents=True)
+
+    rc = main(["--topic", "Demo topic", "--phase", "draft", "--from-stage", "11"])
+
+    assert rc == 0
+    assert (tmp_path / "research_runs" / "demo-run" / "run_control" / "run_state.json").exists()
