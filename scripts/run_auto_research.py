@@ -425,11 +425,11 @@ def run_deterministic_command(run_dir: Path, stage: str, cmd: list[str]) -> None
     completed = subprocess.run(cmd, cwd=REPO_ROOT, text=True, capture_output=True)
     detail = " ".join(cmd)
     if completed.returncode != 0:
+        append_run_log(run_dir, stage, "failed", detail)
         stage_dir = ensure_run_control(run_dir) / "stages" / stage
         stage_dir.mkdir(parents=True, exist_ok=True)
-        (stage_dir / "last_stdout.txt").write_text(completed.stdout)
-        (stage_dir / "last_stderr.txt").write_text(completed.stderr)
-        append_run_log(run_dir, stage, "failed", detail)
+        (stage_dir / "last_stdout.txt").write_text(completed.stdout or "")
+        (stage_dir / "last_stderr.txt").write_text(completed.stderr or "")
         raise RuntimeError(f"stage {stage} command failed: {detail}")
     append_run_log(run_dir, stage, "completed", detail)
 
