@@ -17,7 +17,7 @@ BOOK_FILE_BY_ID = {
     "method_taxonomy": "04_method_taxonomy.md",
     "shared_examples": "05_shared_examples.md",
     "evaluation_outlook": "98_evaluation_outlook.md",
-    "appendices": "99_appendices.md",
+    "appendices": "appendices",
 }
 
 NOISY_TITLE_PATTERNS = re.compile(
@@ -532,7 +532,15 @@ def validate_research_book_run(run_dir: Path | str) -> list[dict[str, str]]:
             )
 
     for section_id, filename in BOOK_FILE_BY_ID.items():
-        if not (run_path / "14_chapters" / "book" / filename).exists():
+        target = run_path / "14_chapters" / "book" / filename
+        if section_id == "appendices":
+            ok = target.is_dir() and all(
+                (target / sub).exists()
+                for sub in ("glossary.md", "notation.md", "datasets.md", "software.md", "references.md")
+            )
+        else:
+            ok = target.exists()
+        if not ok:
             issues.append(
                 {
                     "severity": "error",
@@ -560,19 +568,6 @@ def validate_research_book_run(run_dir: Path | str) -> list[dict[str, str]]:
                     "severity": "error",
                     "code": "missing_method_chapter",
                     "detail": f"14_chapters/methods/{method_id}.md is missing",
-                }
-            )
-
-    appendices_path = run_path / "14_chapters" / "book" / BOOK_FILE_BY_ID["appendices"]
-    appendices_text = appendices_path.read_text(encoding="utf-8") if appendices_path.exists() else ""
-    for entry in promoted:
-        arxiv_id = entry["arxiv_id"]
-        if f"[arxiv:{arxiv_id}]" not in appendices_text:
-            issues.append(
-                {
-                    "severity": "error",
-                    "code": "appendices_missing_promoted_reference",
-                    "detail": f"{arxiv_id} is absent from 99_appendices.md",
                 }
             )
 
@@ -817,110 +812,209 @@ def _book_chapter_path(section_id: str) -> str:
     return f"14_chapters/book/{BOOK_FILE_BY_ID.get(section_id, section_id + '.md')}"
 
 
-def _build_method_taxonomy(outline: dict[str, Any]) -> str:
+def _build_method_taxonomy(outline: dict[str, Any], excluded: set[str] | None = None) -> str:
+    excluded = excluded or set()
     methods = _method_by_id(outline)
+    family_by_id = {family["id"]: family for family in outline.get("families", [])}
     lines = [
         "# Method Taxonomy",
         "",
-        "This section is generated from `12_taxonomy/outline.json` so it stays complete and navigable.",
-        "",
-        "## Family Map",
+        "This taxonomy is generated from `12_taxonomy/outline.json` so it stays complete and navigable.",
         "",
     ]
-    for family in outline.get("families", []):
-        family_id = family["id"]
-        lines.append(f"- [{family['title']}](../families/{family_id}.md)")
-        for method_id in family.get("method_ids", []):
-            method = methods.get(method_id)
-            if not method:
+    for idx, part in enumerate(outline.get("parts", []) or [], start=1):
+        lines.extend(["", f"## Part {idx}: {part['title']}", ""])
+        for family_id in part.get("family_ids", []) or []:
+            family = family_by_id.get(family_id)
+            if not family:
                 continue
-            arxiv_id = method.get("arxiv_id", "")
-            lines.append(f"  - [{method['title']}](../methods/{method_id}.md) [arxiv:{arxiv_id}]")
-    lines.extend(["", "## Boundary Notes", ""])
-    for family in outline.get("families", []):
-        neighbors = family.get("neighbor_family_ids") or []
-        neighbor_text = ", ".join(f"`{neighbor}`" for neighbor in neighbors) or "no explicit neighboring families"
-        lines.append(
-            f"- **[{family['title']}](../families/{family['id']}.md)** contains "
-            f"{len(family.get('method_ids', []))} method(s); neighboring families: {neighbor_text}."
-        )
+            family_excluded = family_id in excluded
+            passed_methods = [method_id for method_id in (family.get("method_ids") or []) if method_id not in excluded]
+            if family.get("is_group") or family_excluded:
+                for method_id in passed_methods:
+                    method = methods.get(method_id)
+                    if method:
+                        lines.append(
+                            f"- [{method['title']}](../methods/{method_id}.md) "
+                            f"[arxiv:{method.get('arxiv_id', '')}]"
+                        )
+            else:
+                lines.append(f"- [{family['title']}](../families/{family_id}.md)")
+                for method_id in passed_methods:
+                    method = methods.get(method_id)
+                    if method:
+                        lines.append(
+                            f"  - [{method['title']}](../methods/{method_id}.md) "
+                            f"[arxiv:{method.get('arxiv_id', '')}]"
+                        )
     return "\n".join(lines)
 
 
-def _build_appendices(run_dir: Path, outline: dict[str, Any]) -> str:
-    promoted_entries = _promoted_entries(run_dir)
-    promoted_by_id = {entry["arxiv_id"]: entry for entry in promoted_entries}
-    pool = _paper_lookup(run_dir)
-    gap_terms = sorted(
-        {
-            term
-            for family in outline.get("families", [])
-            for term in family.get("knowledge_gaps_to_explain", [])
-        }
-        | {
-            term
-            for method in outline.get("methods", [])
-            for term in method.get("knowledge_gaps_to_explain", [])
-        }
+def _build_appendices_dir(run_dir: Path, outline: dict[str, Any]) -> list[dict[str, str]]:
+    out_dir = run_dir / "14_chapters" / "book" / "appendices"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    snap = run_dir / "06_expansion" / "known_concepts_snapshot.json"
+    glossary = ["# Glossary", ""]
+    if snap.exists():
+        for entry in (_load_json(snap).get("known_concepts") or []):
+            name = entry.get("name") or entry.get("id") or ""
+            definition = entry.get("definition") or entry.get("summary") or ""
+            if name:
+                glossary.append(f"- **{name}** - {definition}")
+    (out_dir / "glossary.md").write_text("\n".join(glossary) + "\n", encoding="utf-8")
+
+    packs_dir = run_dir / "13_chapter_packs" / "methods"
+
+    def _harvest(field: str, header: str) -> list[str]:
+        seen: set[str] = set()
+        lines = [f"# {header}", ""]
+        if packs_dir.exists():
+            for pack_path in sorted(packs_dir.glob("*_pack.json")):
+                pack = _load_json(pack_path)
+                for entry in (pack.get("structured", {}).get(field) or []):
+                    name = entry.get("name") or ""
+                    if name and name not in seen:
+                        seen.add(name)
+                        if field == "equations":
+                            for symbol in entry.get("symbols", []) or []:
+                                symbol_name = symbol.get("name") or ""
+                                symbol_desc = symbol.get("description") or ""
+                                if symbol_name and symbol_name not in seen:
+                                    seen.add(symbol_name)
+                                    lines.append(f"- `{symbol_name}` - {symbol_desc}")
+                        else:
+                            lines.append(f"- {name}")
+        return lines
+
+    notation = ["# Notation", ""]
+    seen_notation: set[str] = set()
+    if packs_dir.exists():
+        for pack_path in sorted(packs_dir.glob("*_pack.json")):
+            pack = _load_json(pack_path)
+            for equation in (pack.get("structured", {}).get("equations") or []):
+                for symbol in equation.get("symbols", []) or []:
+                    symbol_name = symbol.get("name") or ""
+                    symbol_desc = symbol.get("description") or ""
+                    if symbol_name and symbol_name not in seen_notation:
+                        seen_notation.add(symbol_name)
+                        notation.append(f"- `{symbol_name}` - {symbol_desc}")
+    (out_dir / "notation.md").write_text("\n".join(notation) + "\n", encoding="utf-8")
+    (out_dir / "datasets.md").write_text("\n".join(_harvest("datasets", "Datasets")) + "\n", encoding="utf-8")
+    (out_dir / "software.md").write_text(
+        "\n".join(_harvest("artifacts", "Software and Artifacts")) + "\n", encoding="utf-8"
     )
-    lines = [
-        "# Appendices",
-        "",
-        "## References",
-        "",
-    ]
-    for arxiv_id in sorted(promoted_by_id):
-        lines.append(f"- {_paper_label(arxiv_id, promoted_by_id, pool)}")
-    lines.extend(["", "## Glossary", ""])
-    if gap_terms:
-        for term in gap_terms:
-            lines.append(f"- **{term}**: concept marked for explanation by the taxonomy.")
-    else:
-        lines.append("- No taxonomy-level knowledge gaps were recorded.")
-    return "\n".join(lines)
+
+    refs = ["# References", ""]
+    citation_issues: list[dict[str, str]] = []
+    for entry in sorted(_promoted_entries(run_dir), key=lambda item: item.get("arxiv_id", "")):
+        arxiv_id = entry.get("arxiv_id", "")
+        if not arxiv_id:
+            continue
+        try:
+            cite = resolve_paper_citation(run_dir, arxiv_id)
+            refs.append(f"- [arxiv:{cite['arxiv_id']}] {cite['title']} ({cite['year']})")
+        except MissingCitationError as exc:
+            refs.append(f"- [arxiv:{arxiv_id}] <citation metadata missing> (see NEEDS_REVIEW.md)")
+            citation_issues.append(
+                {
+                    "type": "citation",
+                    "id": arxiv_id,
+                    "status": "missing_citation_metadata",
+                    "reason": str(exc),
+                }
+            )
+    (out_dir / "references.md").write_text("\n".join(refs) + "\n", encoding="utf-8")
+    return citation_issues
 
 
 def _build_summary(outline: dict[str, Any]) -> str:
     methods = _method_by_id(outline)
+    family_by_id = {family["id"]: family for family in outline.get("families", [])}
     lines = ["# Summary", "", "## Book", ""]
     for section in outline.get("book_sections", []):
         section_id = section["id"]
         filename = BOOK_FILE_BY_ID.get(section_id)
-        if filename:
-            lines.append(f"- [{section['title']}](../14_chapters/book/{filename})")
-    lines.extend(["", "## Families and Methods", ""])
-    for family in outline.get("families", []):
-        family_id = family["id"]
-        lines.append(f"- [{family['title']}](../14_chapters/families/{family_id}.md)")
-        for method_id in family.get("method_ids", []):
-            method = methods.get(method_id)
-            if method:
-                lines.append(f"  - [{method['title']}](../14_chapters/methods/{method_id}.md)")
+        if not filename:
+            continue
+        if section_id == "appendices":
+            href = f"../14_chapters/book/{filename}/glossary.md"
+        else:
+            href = f"../14_chapters/book/{filename}"
+        lines.append(f"- [{section['title']}]({href})")
+
+    for idx, part in enumerate(outline.get("parts", []) or [], start=1):
+        lines.extend(["", f"## Part {idx}: {part['title']}", ""])
+        for family_id in part.get("family_ids", []) or []:
+            family = family_by_id.get(family_id)
+            if not family:
+                continue
+            if family.get("is_group"):
+                for method_id in family.get("method_ids", []):
+                    method = methods.get(method_id)
+                    if method:
+                        lines.append(f"- [{method['title']}](../14_chapters/methods/{method_id}.md)")
+            else:
+                lines.append(f"- [{family['title']}](../14_chapters/families/{family_id}.md)")
+                for method_id in family.get("method_ids", []):
+                    method = methods.get(method_id)
+                    if method:
+                        lines.append(f"  - [{method['title']}](../14_chapters/methods/{method_id}.md)")
     return "\n".join(lines)
 
 
-def _build_sidebar(outline: dict[str, Any]) -> dict[str, Any]:
+def _build_sidebar(
+    outline: dict[str, Any],
+    excluded: set[str] | None = None,
+    excluded_book_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    excluded = excluded or set()
+    excluded_book_ids = excluded_book_ids or set()
     methods = _method_by_id(outline)
+    family_by_id = {family["id"]: family for family in outline.get("families", [])}
     book_items = []
     for section in outline.get("book_sections", []):
+        if section["id"] in excluded_book_ids:
+            continue
         filename = BOOK_FILE_BY_ID.get(section["id"])
-        if filename:
-            book_items.append({"title": section["title"], "path": f"14_chapters/book/{filename}"})
-    family_items = []
-    for family in outline.get("families", []):
-        children = []
-        for method_id in family.get("method_ids", []):
-            method = methods.get(method_id)
-            if method:
-                children.append({"title": method["title"], "path": f"14_chapters/methods/{method_id}.md"})
-        family_items.append(
-            {
-                "title": family["title"],
-                "path": f"14_chapters/families/{family['id']}.md",
-                "children": children,
-            }
+        if not filename:
+            continue
+        path = (
+            f"14_chapters/book/{filename}/glossary.md"
+            if section["id"] == "appendices"
+            else f"14_chapters/book/{filename}"
         )
-    return {"items": [{"title": "Book", "children": book_items}, {"title": "Families", "children": family_items}]}
+        book_items.append({"title": section["title"], "path": path})
+
+    part_items = []
+    for part in outline.get("parts", []) or []:
+        children = []
+        for family_id in part.get("family_ids", []) or []:
+            family = family_by_id.get(family_id)
+            if not family:
+                continue
+            family_excluded = family_id in excluded
+            passed_methods = [method_id for method_id in (family.get("method_ids") or []) if method_id not in excluded]
+            if family.get("is_group") or family_excluded:
+                for method_id in passed_methods:
+                    method = methods.get(method_id)
+                    if method:
+                        children.append({"title": method["title"], "path": f"14_chapters/methods/{method_id}.md"})
+            else:
+                method_kids = []
+                for method_id in passed_methods:
+                    method = methods.get(method_id)
+                    if method:
+                        method_kids.append({"title": method["title"], "path": f"14_chapters/methods/{method_id}.md"})
+                children.append(
+                    {
+                        "title": family["title"],
+                        "path": f"14_chapters/families/{family_id}.md",
+                        "children": method_kids,
+                    }
+                )
+        part_items.append({"title": part["title"], "children": children})
+    return {"items": [{"title": "Book", "children": book_items}] + part_items}
 
 
 def generate_book_artifacts(run_dir: Path | str) -> dict[str, int]:
@@ -928,9 +1022,8 @@ def generate_book_artifacts(run_dir: Path | str) -> dict[str, int]:
     outline = _outline(run_path)
     assert_no_singletons(outline)
     taxonomy_path = run_path / "14_chapters" / "book" / BOOK_FILE_BY_ID["method_taxonomy"]
-    appendices_path = run_path / "14_chapters" / "book" / BOOK_FILE_BY_ID["appendices"]
     _write_markdown_preserving_front_matter(taxonomy_path, _build_method_taxonomy(outline))
-    _write_markdown_preserving_front_matter(appendices_path, _build_appendices(run_path, outline))
+    _citation_issues = _build_appendices_dir(run_path, outline)
     (run_path / "16_book").mkdir(parents=True, exist_ok=True)
     (run_path / "16_book" / "SUMMARY.md").write_text(_build_summary(outline) + "\n", encoding="utf-8")
     _write_json(run_path / "16_book" / "sidebar.json", _build_sidebar(outline))

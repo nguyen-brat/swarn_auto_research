@@ -16,17 +16,17 @@ description: Eight book-level chapters wrap the family/method chapters into a re
 | `preface`            | `00_preface.md`                | 400–800    |
 | `motivating_intro`   | `01_motivating_intro.md`       | 600–1200   |
 | `core_concepts`      | `02_core_concepts.md`          | 800–1500   |
-| `goals`              | `03_goals.md`                  | 300–600    |
+| `goals`              | `03_goals.md`                  | 600–1200   |
 | `method_taxonomy`    | `04_method_taxonomy.md`        | 800–1500   |
 | `shared_examples`    | `05_shared_examples.md`        | 500–1000   |
 | `evaluation_outlook` | `98_evaluation_outlook.md`     | 1000–2000  |
-| `appendices`         | `99_appendices.md`             | no floor   |
+| `appendices`         | `appendices/` (directory)      | n/a (deterministic) |
 
 ## Per-section structure
 - `preface` — H1 + Purpose · Target reader · Prerequisites · Scope and limits. No citations required.
 - `motivating_intro` — H1 + a real failure-mode story / practical problem (cite the source paper). Then "why this matters".
 - `core_concepts` — H1 + one short subsection per `knowledge_gaps_to_explain` concept (2–4 sentences each, ending in `[arxiv:ID, node_id]` when grounded). Final subsection: list `known_concepts_assumed` with one-line pointers (no definitions).
-- `goals` — H1 + bulleted reader goals (≥ 2).
+- `goals` — H1 + ≥ 4 goal categories. Each category has (a) why it matters, (b) which families help (cite via `[Family Name](../families/{id}.md)`), (c) one tradeoff. Min 600 words.
 - `method_taxonomy` — deterministic artifact. Always run `python -m swarn_research_mcp.research_book research_runs/{run_id} --generate`. Manual drafting is forbidden because generated references are resolved through `_paper_label` + `resolve_paper_citation`; unresolved citation metadata is surfaced in `16_book/NEEDS_REVIEW.md` rather than silently emitting `<title unknown>` / `<year unknown>` in the reader-facing book.
 - `shared_examples` — H1 + 1–3 running examples (input/state/output), each citing source.
 - `evaluation_outlook` — H1 + Evaluation methodology · Open problems · Future directions. Pull benchmarks/metrics from pack; pull open problems from gap report; cite limitations.
