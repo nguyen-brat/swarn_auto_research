@@ -30,13 +30,37 @@ def test_run_deterministic_command_logs_failure(tmp_path):
     assert "18,failed,python -m demo" in (run / "run_log.csv").read_text()
 
 
+def test_run_deterministic_command_logs_launch_error(tmp_path):
+    run = tmp_path / "research_runs" / "demo"
+    run.mkdir(parents=True)
+
+    with patch(
+        "scripts.run_auto_research.subprocess.run",
+        side_effect=FileNotFoundError("missing command"),
+    ):
+        try:
+            run_deterministic_command(run, "18", ["missing-command"])
+        except RuntimeError as error:
+            assert str(error) == "stage 18 command failed: missing-command"
+        else:
+            raise AssertionError("run_deterministic_command should fail")
+
+    stage_dir = run / "run_control" / "stages" / "18"
+    assert (stage_dir / "last_stdout.txt").read_text() == ""
+    assert "FileNotFoundError" in (stage_dir / "last_stderr.txt").read_text()
+    assert "18,failed,missing-command" in (run / "run_log.csv").read_text()
+
+
 def test_run_stage_18_runs_generate_then_validate(tmp_path):
     run = tmp_path / "research_runs" / "demo"
     run.mkdir(parents=True)
-    (run / "16_book" / "appendices").mkdir(parents=True)
+    (run / "14_chapters" / "book" / "appendices").mkdir(parents=True)
+    (run / "16_book").mkdir(parents=True)
     (run / "16_book" / "SUMMARY.md").write_text("# Summary\n")
     (run / "16_book" / "sidebar.json").write_text(json.dumps([]))
-    (run / "16_book" / "appendices" / "references.md").write_text("# References\n")
+    (run / "14_chapters" / "book" / "appendices" / "references.md").write_text(
+        "# References\n"
+    )
 
     with patch("scripts.run_auto_research.run_deterministic_command") as command:
         run_stage_18(Path(run))

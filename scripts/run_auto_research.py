@@ -35,7 +35,7 @@ PRIMARY_ARTIFACTS = {
     "18": (
         "16_book/SUMMARY.md",
         "16_book/sidebar.json",
-        "16_book/appendices/references.md",
+        "14_chapters/book/appendices/references.md",
     ),
 }
 
@@ -422,8 +422,17 @@ def run_stage_11(run_dir: Path) -> None:
 
 
 def run_deterministic_command(run_dir: Path, stage: str, cmd: list[str]) -> None:
-    completed = subprocess.run(cmd, cwd=REPO_ROOT, text=True, capture_output=True)
     detail = " ".join(cmd)
+    try:
+        completed = subprocess.run(cmd, cwd=REPO_ROOT, text=True, capture_output=True)
+    except OSError as error:
+        append_run_log(run_dir, stage, "failed", detail)
+        stage_dir = ensure_run_control(run_dir) / "stages" / stage
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        (stage_dir / "last_stdout.txt").write_text("")
+        (stage_dir / "last_stderr.txt").write_text(f"{type(error).__name__}: {error}\n")
+        raise RuntimeError(f"stage {stage} command failed: {detail}") from error
+
     if completed.returncode != 0:
         append_run_log(run_dir, stage, "failed", detail)
         stage_dir = ensure_run_control(run_dir) / "stages" / stage
