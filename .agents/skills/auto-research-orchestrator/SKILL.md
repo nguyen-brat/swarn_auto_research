@@ -114,6 +114,13 @@ min_confusion_risk    = "medium"
   issues remain after one rewrite attempt, log the final state and
   continue — do not loop indefinitely.
 
+## Stage 12.5 — Normalize outline (deterministic)
+After Stage 12 writes `outline.json` and BEFORE Stage 13 builds packs, run:
+
+  `python -m swarn_research_mcp.research_book research_runs/{run_id} --normalize-outline`
+
+This calls `merge_singletons`, which deterministically merges every single-method family into its nearest non-singleton family when strong graph evidence exists; otherwise the method is placed under the `standalone` group in the `standalone_methods` part. Stage 13's pack-building reads the normalized outline; Stage 18's `generate_book_artifacts` asserts the outline is normalized and refuses to render otherwise.
+
 ### Stage 13 — Learning suggestions
 - Read `knowledge_gap_report.json`. List gaps that recurred across
   multiple papers. Group them under simple category headings.
