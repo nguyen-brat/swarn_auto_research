@@ -18,6 +18,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNS_ROOT = REPO_ROOT / "research_runs"
 DEFAULT_SHARD_TIMEOUT_SECONDS = 3600
 BOOTSTRAP_TIMEOUT_SECONDS = 6 * 3600
+DIRECT_SHARD_RULES = [
+    "Execute directly in this codex exec session.",
+    "Do not spawn subagents, do not run nested codex commands, and do not wait for other agents.",
+    "Do not ask for human input.",
+]
 
 PRIMARY_ARTIFACTS = {
     "0": ("run_config.json",),
@@ -291,8 +296,10 @@ def _codex_exec_command(spec: ShardSpec) -> list[str]:
         str(REPO_ROOT),
         "--model",
         spec.model,
-        "--ask-for-approval",
-        "never",
+        "-c",
+        'approval_policy="never"',
+        "--sandbox",
+        "workspace-write",
         spec.prompt,
     ]
 
@@ -373,6 +380,7 @@ def _stage_11_prompt(run_id: str, shard_id: str, arxiv_ids: list[str]) -> str:
     return "\n".join(
         [
             "Read AGENTS.md first.",
+            *DIRECT_SHARD_RULES,
             "Run Stage 11 verified graph extraction only.",
             f"run_id={run_id}",
             f"shard_id={shard_id}",
@@ -534,6 +542,7 @@ def _generic_agent_prompt(
     return "\n".join(
         [
             "Read AGENTS.md first.",
+            *DIRECT_SHARD_RULES,
             f"Run Stage {stage} only.",
             f"run_id={run_id}",
             f"shard_id={shard_id}",
@@ -606,7 +615,7 @@ def run_stage_13(run_dir: Path) -> None:
             ),
             expected_outputs=[_expected_chapter_pack(t) for t in chunk],
         )
-        for idx, chunk in enumerate(chunked(targets, 1), start=1)
+        for idx, chunk in enumerate(chunked(targets, 2), start=1)
         if any(not (run_dir / _expected_chapter_pack(t)).exists() for t in chunk)
     ]
     if specs:
@@ -815,6 +824,7 @@ def bootstrap_new_run(
     prompt = "\n".join(
         [
             "Read AGENTS.md first.",
+            *DIRECT_SHARD_RULES,
             "Use .agents/skills/auto-research-orchestrator/SKILL.md.",
             f"Run the auto-research pipeline for this topic through Stage 10 only: {topic}",
             "Stop after Stage 10 verified evidence is complete.",
@@ -831,8 +841,10 @@ def bootstrap_new_run(
                 str(REPO_ROOT),
                 "--model",
                 "gpt-5.4-mini",
-                "--ask-for-approval",
-                "never",
+                "-c",
+                'approval_policy="never"',
+                "--sandbox",
+                "workspace-write",
                 prompt,
             ],
             cwd=REPO_ROOT,

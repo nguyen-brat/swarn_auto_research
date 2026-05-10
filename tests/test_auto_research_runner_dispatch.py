@@ -6,7 +6,12 @@ from unittest.mock import patch
 
 import pytest
 
-from scripts.run_auto_research import ShardSpec, expected_outputs_exist, run_shards
+from scripts.run_auto_research import (
+    ShardSpec,
+    _codex_exec_command,
+    expected_outputs_exist,
+    run_shards,
+)
 
 
 def test_expected_outputs_exist_requires_every_file(tmp_path):
@@ -29,6 +34,24 @@ def test_expected_outputs_exist_requires_every_file(tmp_path):
 
     (run / "11_verified_graph" / "fragments" / "2.json").write_text("{}")
     assert expected_outputs_exist(run, spec) is True
+
+
+def test_codex_exec_command_uses_current_noninteractive_flags():
+    spec = ShardSpec(
+        stage="12",
+        shard_id="outline",
+        agent="outline_planner",
+        model="gpt-5.4-mini",
+        prompt="write outline",
+        expected_outputs=["12_taxonomy/outline.json"],
+    )
+
+    command = _codex_exec_command(spec)
+
+    assert "--ask-for-approval" not in command
+    assert command[0:2] == ["codex", "exec"]
+    assert command[command.index("-c") + 1] == 'approval_policy="never"'
+    assert command[command.index("--sandbox") + 1] == "workspace-write"
 
 
 def test_run_shards_records_manifest_and_retries_missing_output(tmp_path):

@@ -695,8 +695,10 @@ def _codex_exec_command(spec: ShardSpec) -> list[str]:
         str(REPO_ROOT),
         "--model",
         spec.model,
-        "--ask-for-approval",
-        "never",
+        "-c",
+        'approval_policy="never"',
+        "--sandbox",
+        "workspace-write",
         spec.prompt,
     ]
 
@@ -1514,8 +1516,10 @@ def bootstrap_new_run(topic: str, phase: str) -> str:
             str(REPO_ROOT),
             "--model",
             "gpt-5.4-mini",
-            "--ask-for-approval",
-            "never",
+            "-c",
+            'approval_policy="never"',
+            "--sandbox",
+            "workspace-write",
             prompt,
         ],
         cwd=REPO_ROOT,
@@ -1670,6 +1674,6 @@ Report:
 
 **Spec coverage:** This plan addresses the failure mode directly: Stage 11 fragments can finish after an interactive parent stops, and the runner can still merge and continue. It also adds durable state, shard manifests, artifact checks, deterministic Stage 18 generation/validation, and resume behavior.
 
-**Known risk:** `codex exec --ask-for-approval never` may expose MCP approval/config blockers in stages that need tools. The runner must treat that as a real operational blocker and write logs, not silently continue. If it blocks, the next plan should introduce a repo-local Codex profile for trusted swarn-auto-research MCP tools or use SDK calls for the affected one-shot stages.
+**Known risk:** `codex exec -c approval_policy="never" --sandbox workspace-write` may expose MCP approval/config blockers in stages that need tools. The runner must treat that as a real operational blocker and write logs, not silently continue. If it blocks, the next plan should introduce a repo-local Codex profile for trusted swarn-auto-research MCP tools or use SDK calls for the affected one-shot stages.
 
 **SDK relationship:** The SDK pilot remains useful for small JSON stages, but it is not the main reliability fix. The durable runner can later swap specific `ShardSpec` calls from `codex exec` to `sdk.codex.run_one_shot` without changing artifact completion rules.

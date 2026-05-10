@@ -147,10 +147,15 @@ def test_run_stage_13_uses_pack_suffixes_and_stable_shard_ids(tmp_path):
     with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
         run_stage_13(run)
 
-    assert [spec.shard_id for spec in captured] == ["pack-001", "pack-002", "pack-003"]
-    assert captured[0].expected_outputs == ["13_chapter_packs/book/preface_pack.json"]
-    assert captured[1].expected_outputs == ["13_chapter_packs/families/fam_a_pack.json"]
-    assert captured[2].expected_outputs == ["13_chapter_packs/methods/m1_pack.json"]
+    assert [spec.shard_id for spec in captured] == ["pack-001", "pack-002"]
+    assert captured[0].expected_outputs == [
+        "13_chapter_packs/book/preface_pack.json",
+        "13_chapter_packs/families/fam_a_pack.json",
+    ]
+    assert captured[1].expected_outputs == ["13_chapter_packs/methods/m1_pack.json"]
+    assert "Execute directly in this codex exec session." in captured[0].prompt
+    assert "Do not spawn subagents" in captured[0].prompt
+    assert "do not run nested codex commands" in captured[0].prompt
 
     (run / "13_chapter_packs" / "book").mkdir(parents=True)
     (run / "13_chapter_packs" / "book" / "preface_pack.json").write_text("{}")
@@ -158,7 +163,11 @@ def test_run_stage_13_uses_pack_suffixes_and_stable_shard_ids(tmp_path):
     with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
         run_stage_13(run)
 
-    assert [spec.shard_id for spec in captured] == ["pack-002", "pack-003"]
+    assert [spec.shard_id for spec in captured] == ["pack-001", "pack-002"]
+    assert captured[0].expected_outputs == [
+        "13_chapter_packs/book/preface_pack.json",
+        "13_chapter_packs/families/fam_a_pack.json",
+    ]
 
 
 def test_run_stage_14_groups_targets_by_type_and_uses_book_filenames(tmp_path):
@@ -401,6 +410,26 @@ def test_bootstrap_new_run_rejects_unsafe_run_id():
             assert "unsafe run_id" in str(error)
         else:
             raise AssertionError("expected unsafe run_id failure")
+
+
+def test_bootstrap_new_run_uses_current_noninteractive_flags():
+    captured = {}
+
+    def fake_run(cmd, cwd, text, capture_output, timeout):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="RUN_ID=demo-run\n", stderr="")
+
+    with patch("scripts.run_auto_research.subprocess.run", side_effect=fake_run):
+        assert bootstrap_new_run("Demo topic", "draft") == "demo-run"
+
+    command = captured["cmd"]
+    assert "--ask-for-approval" not in command
+    assert command[0:2] == ["codex", "exec"]
+    assert command[command.index("-c") + 1] == 'approval_policy="never"'
+    assert command[command.index("--sandbox") + 1] == "workspace-write"
+    assert "Execute directly in this codex exec session." in command[-1]
+    assert "Do not spawn subagents" in command[-1]
+    assert "do not run nested codex commands" in command[-1]
 
 
 def test_bootstrap_new_run_reports_launch_error():
