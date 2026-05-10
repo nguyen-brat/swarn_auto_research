@@ -13,6 +13,7 @@ from scripts.run_auto_research import (
     run_stage_15,
     run_stage_16,
     run_stage_18,
+    save_run_state,
 )
 
 
@@ -330,3 +331,39 @@ def test_main_write_phase_defaults_to_stage_14(tmp_path, monkeypatch):
 
     assert rc == 0
     assert calls == ["14", "15", "16", "17", "18"]
+
+
+def test_main_write_phase_rejects_draft_from_stage(tmp_path, monkeypatch):
+    run = tmp_path / "research_runs" / "demo"
+    run.mkdir(parents=True)
+    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+
+    try:
+        main(["--run-id", "demo", "--phase", "write", "--from-stage", "11"])
+    except SystemExit as error:
+        assert "stage 11 is not available for phase write" in str(error)
+    else:
+        raise AssertionError("expected invalid write from-stage failure")
+
+
+def test_main_write_phase_rejects_saved_draft_current_stage(tmp_path, monkeypatch):
+    run = tmp_path / "research_runs" / "demo"
+    run.mkdir(parents=True)
+    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    save_run_state(
+        run,
+        {
+            "run_id": "demo",
+            "phase": "draft",
+            "topic": "Old topic",
+            "status": "running",
+            "current_stage": "11",
+        },
+    )
+
+    try:
+        main(["--run-id", "demo", "--phase", "write", "--resume"])
+    except SystemExit as error:
+        assert "stage 11 is not available for phase write" in str(error)
+    else:
+        raise AssertionError("expected saved draft current_stage failure")

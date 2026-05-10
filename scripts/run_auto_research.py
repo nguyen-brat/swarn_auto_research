@@ -820,24 +820,27 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"run directory does not exist: {run_dir}")
 
     state = load_run_state(run_dir)
-    handlers = [
+    draft_handlers = [
         ("11", run_stage_11),
         ("12", run_stage_12),
         ("12.5", run_stage_12_5),
         ("13", run_stage_13),
     ]
-    if args.phase in {"write", "all"}:
-        handlers.extend(
-            [
-                ("14", run_stage_14),
-                ("15", run_stage_15),
-                ("16", run_stage_16),
-                ("17", run_stage_17),
-                ("18", run_stage_18),
-            ]
-        )
+    write_handlers = [
+        ("14", run_stage_14),
+        ("15", run_stage_15),
+        ("16", run_stage_16),
+        ("17", run_stage_17),
+        ("18", run_stage_18),
+    ]
+    if args.phase == "draft":
+        handlers = draft_handlers
+    elif args.phase == "write":
+        handlers = write_handlers
+    else:
+        handlers = draft_handlers + write_handlers
 
-    default_start = "14" if args.phase == "write" else handlers[0][0]
+    default_start = handlers[0][0]
     start = args.from_stage or (state.get("current_stage") if args.resume else None) or default_start
     handler_stages = {stage for stage, _ in handlers}
     if start not in handler_stages:
