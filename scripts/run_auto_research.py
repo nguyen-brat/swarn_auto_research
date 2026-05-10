@@ -105,15 +105,23 @@ def main(argv: list[str] | None = None) -> int:
     run_dir = RUNS_ROOT / run_id
     ensure_run_control(run_dir)
     state = load_run_state(run_dir)
+    topic = args.topic or state.get("topic", "")
+    if args.resume:
+        current_stage = args.from_stage or state.get("current_stage", "0")
+        last_completed_stage = state.get("last_completed_stage")
+    else:
+        current_stage = args.from_stage or "0"
+        last_completed_stage = None
+
     save_run_state(
         run_dir,
         {
             "run_id": run_id,
             "phase": args.phase,
-            "topic": args.topic or state.get("topic", ""),
+            "topic": topic,
             "status": "ready",
-            "current_stage": args.from_stage or state.get("current_stage", "0"),
-            "last_completed_stage": state.get("last_completed_stage"),
+            "current_stage": current_stage,
+            "last_completed_stage": last_completed_stage,
             "resume": args.resume,
         },
     )

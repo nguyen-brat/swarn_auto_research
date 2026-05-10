@@ -92,3 +92,28 @@ def test_main_preserves_existing_resume_state(tmp_path, monkeypatch):
     assert state["last_completed_stage"] == "10"
     assert state["status"] == "ready"
     assert state["resume"] is True
+
+
+def test_main_resets_progress_without_resume(tmp_path, monkeypatch):
+    runs_root = tmp_path / "research_runs"
+    run = runs_root / "demo"
+    monkeypatch.setattr(runner, "RUNS_ROOT", runs_root)
+    save_run_state(
+        run,
+        {
+            "run_id": "demo",
+            "phase": "draft",
+            "topic": "Old topic",
+            "status": "running",
+            "current_stage": "11",
+            "last_completed_stage": "10",
+        },
+    )
+
+    assert main(["--run-id", "demo", "--topic", "New topic", "--phase", "all"]) == 0
+
+    state = load_run_state(run)
+    assert state["topic"] == "New topic"
+    assert state["current_stage"] == "0"
+    assert state["last_completed_stage"] is None
+    assert state["resume"] is False
