@@ -868,6 +868,7 @@ def main(argv: list[str] | None = None) -> int:
     run_id = args.run_id
     if run_id is None:
         run_id = bootstrap_new_run(args.topic, args.phase)
+    _safe_component(run_id, field="run_id")
     run_dir = RUNS_ROOT / run_id
     if not run_dir.exists():
         raise SystemExit(f"run directory does not exist: {run_dir}")

@@ -441,3 +441,14 @@ def test_main_rejects_topic_write_phase():
         assert "--topic cannot be used with --phase write" in str(error)
     else:
         raise AssertionError("expected topic write phase failure")
+
+
+def test_main_rejects_unsafe_cli_run_id(tmp_path, monkeypatch):
+    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+
+    try:
+        main(["--run-id", "../escape", "--phase", "draft"])
+    except ValueError as error:
+        assert "unsafe run_id" in str(error)
+    else:
+        raise AssertionError("expected unsafe CLI run_id failure")
