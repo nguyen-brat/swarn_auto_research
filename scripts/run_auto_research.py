@@ -17,6 +17,7 @@ from swarn_research_mcp.research_book import BOOK_FILE_BY_ID
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNS_ROOT = REPO_ROOT / "research_runs"
 DEFAULT_SHARD_TIMEOUT_SECONDS = 3600
+BOOTSTRAP_TIMEOUT_SECONDS = 6 * 3600
 
 PRIMARY_ARTIFACTS = {
     "0": ("run_config.json",),
@@ -805,7 +806,12 @@ def run_stage_17(run_dir: Path) -> None:
     run_shards(run_dir, [spec])
 
 
-def bootstrap_new_run(topic: str, phase: str) -> str:
+def bootstrap_new_run(
+    topic: str,
+    phase: str,
+    *,
+    timeout_seconds: int = BOOTSTRAP_TIMEOUT_SECONDS,
+) -> str:
     prompt = "\n".join(
         [
             "Read AGENTS.md first.",
@@ -816,34 +822,48 @@ def bootstrap_new_run(topic: str, phase: str) -> str:
             "Print the final run_id on a line exactly like: RUN_ID=<run_id>",
         ]
     )
-    completed = subprocess.run(
-        [
-            "codex",
-            "exec",
-            "--cd",
-            str(REPO_ROOT),
-            "--model",
-            "gpt-5.4-mini",
-            "--ask-for-approval",
-            "never",
-            prompt,
-        ],
-        cwd=REPO_ROOT,
-        text=True,
-        capture_output=True,
-    )
+    try:
+        completed = subprocess.run(
+            [
+                "codex",
+                "exec",
+                "--cd",
+                str(REPO_ROOT),
+                "--model",
+                "gpt-5.4-mini",
+                "--ask-for-approval",
+                "never",
+                prompt,
+            ],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError(f"bootstrap failed to launch or complete: {error}") from error
+
     if completed.returncode != 0:
-        raise RuntimeError(f"bootstrap failed: {completed.stderr}")
+        raise RuntimeError(
+            f"bootstrap failed: stderr={completed.stderr}\nstdout={completed.stdout}"
+        )
     for line in completed.stdout.splitlines():
         if line.startswith("RUN_ID="):
-            return line.split("=", 1)[1].strip()
-    raise RuntimeError("bootstrap did not print RUN_ID=<run_id>")
+            run_id = line.split("=", 1)[1].strip()
+            _safe_component(run_id, field="run_id")
+            return run_id
+    raise RuntimeError(
+        "bootstrap did not print RUN_ID=<run_id>; "
+        f"stdout tail={completed.stdout[-1000:]}"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if not args.topic and not args.run_id:
         raise SystemExit("one of --topic or --run-id is required")
+    if args.topic and not args.run_id and args.phase == "write":
+        raise SystemExit("--topic cannot be used with --phase write; use draft or all")
 
     run_id = args.run_id
     if run_id is None:

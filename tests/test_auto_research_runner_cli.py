@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
 from scripts.run_auto_research import (
+    bootstrap_new_run,
     build_chapter_targets,
     main,
     run_deterministic_command,
@@ -382,3 +384,60 @@ def test_main_with_topic_requires_bootstrap_to_create_run(tmp_path, monkeypatch)
 
     assert rc == 0
     assert (tmp_path / "research_runs" / "demo-run" / "run_control" / "run_state.json").exists()
+
+
+def test_bootstrap_new_run_rejects_unsafe_run_id():
+    completed = subprocess.CompletedProcess(
+        ["codex"],
+        0,
+        stdout="RUN_ID=../escape\n",
+        stderr="",
+    )
+
+    with patch("scripts.run_auto_research.subprocess.run", return_value=completed):
+        try:
+            bootstrap_new_run("Demo topic", "draft")
+        except ValueError as error:
+            assert "unsafe run_id" in str(error)
+        else:
+            raise AssertionError("expected unsafe run_id failure")
+
+
+def test_bootstrap_new_run_reports_launch_error():
+    with patch(
+        "scripts.run_auto_research.subprocess.run",
+        side_effect=FileNotFoundError("codex"),
+    ):
+        try:
+            bootstrap_new_run("Demo topic", "draft")
+        except RuntimeError as error:
+            assert "bootstrap failed to launch or complete" in str(error)
+        else:
+            raise AssertionError("expected bootstrap launch failure")
+
+
+def test_bootstrap_new_run_reports_missing_run_id_stdout():
+    completed = subprocess.CompletedProcess(
+        ["codex"],
+        0,
+        stdout="completed without id\n",
+        stderr="",
+    )
+
+    with patch("scripts.run_auto_research.subprocess.run", return_value=completed):
+        try:
+            bootstrap_new_run("Demo topic", "draft")
+        except RuntimeError as error:
+            assert "bootstrap did not print RUN_ID" in str(error)
+            assert "completed without id" in str(error)
+        else:
+            raise AssertionError("expected missing RUN_ID failure")
+
+
+def test_main_rejects_topic_write_phase():
+    try:
+        main(["--topic", "Demo topic", "--phase", "write"])
+    except SystemExit as error:
+        assert "--topic cannot be used with --phase write" in str(error)
+    else:
+        raise AssertionError("expected topic write phase failure")
