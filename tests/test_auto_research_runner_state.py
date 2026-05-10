@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import csv
 import json
-from pathlib import Path
 
+import scripts.run_auto_research as runner
 from scripts.run_auto_research import (
     append_run_log,
     ensure_run_control,
     load_run_state,
+    main,
     primary_artifact_exists,
     save_run_state,
 )
@@ -65,3 +66,29 @@ def test_primary_artifact_exists_for_stage_11(tmp_path):
 
     (run / "11_verified_graph" / "graph_report.md").write_text("Graph report\n")
     assert primary_artifact_exists(run, "11") is True
+
+
+def test_main_preserves_existing_resume_state(tmp_path, monkeypatch):
+    runs_root = tmp_path / "research_runs"
+    run = runs_root / "demo"
+    monkeypatch.setattr(runner, "RUNS_ROOT", runs_root)
+    save_run_state(
+        run,
+        {
+            "run_id": "demo",
+            "phase": "draft",
+            "topic": "Old topic",
+            "status": "running",
+            "current_stage": "11",
+            "last_completed_stage": "10",
+        },
+    )
+
+    assert main(["--run-id", "demo", "--phase", "all", "--resume"]) == 0
+
+    state = load_run_state(run)
+    assert state["topic"] == "Old topic"
+    assert state["current_stage"] == "11"
+    assert state["last_completed_stage"] == "10"
+    assert state["status"] == "ready"
+    assert state["resume"] is True

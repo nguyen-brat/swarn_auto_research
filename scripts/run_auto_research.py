@@ -5,6 +5,7 @@ import csv
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -44,14 +45,14 @@ def ensure_run_control(run_dir: Path) -> Path:
     return run_control
 
 
-def load_run_state(run_dir: Path) -> dict:
+def load_run_state(run_dir: Path) -> dict[str, Any]:
     state_path = run_dir / "run_control" / "run_state.json"
     if not state_path.exists():
         return {}
     return json.loads(state_path.read_text())
 
 
-def save_run_state(run_dir: Path, state: dict) -> None:
+def save_run_state(run_dir: Path, state: dict[str, Any]) -> None:
     run_control = ensure_run_control(run_dir)
     state_path = run_control / "run_state.json"
     tmp_path = run_control / "run_state.json.tmp"
@@ -85,33 +86,34 @@ def primary_artifact_exists(run_dir: Path, stage: str) -> bool:
     return bool(artifacts) and all((run_dir / artifact).exists() for artifact in artifacts)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare an auto-research durable run.")
     parser.add_argument("--topic")
     parser.add_argument("--run-id")
     parser.add_argument("--phase", choices=("draft", "write", "all"), default="all")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--from-stage")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     if not args.topic and not args.run_id:
         raise SystemExit("one of --topic or --run-id is required")
 
     run_id = args.run_id or "pending-topic-run"
     run_dir = RUNS_ROOT / run_id
     ensure_run_control(run_dir)
+    state = load_run_state(run_dir)
     save_run_state(
         run_dir,
         {
             "run_id": run_id,
             "phase": args.phase,
-            "topic": args.topic,
+            "topic": args.topic or state.get("topic", ""),
             "status": "ready",
-            "current_stage": args.from_stage,
-            "last_completed_stage": None,
+            "current_stage": args.from_stage or state.get("current_stage", "0"),
+            "last_completed_stage": state.get("last_completed_stage"),
             "resume": args.resume,
         },
     )
