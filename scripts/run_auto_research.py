@@ -484,6 +484,224 @@ def run_stage_18(run_dir: Path) -> None:
         raise RuntimeError("Stage 18 did not produce book artifacts")
 
 
+def load_outline(run_dir: Path) -> dict[str, Any]:
+    return json.loads((run_dir / "12_taxonomy" / "outline.json").read_text())
+
+
+def build_chapter_targets(run_dir: Path) -> list[dict[str, str]]:
+    outline = load_outline(run_dir)
+    targets: list[dict[str, str]] = []
+    for section in outline.get("book_sections", []):
+        if section["id"] == "appendices":
+            continue
+        targets.append({"type": "book", "id": section["id"]})
+    for family in outline.get("families", []):
+        if family.get("is_group") or family["id"] == "standalone":
+            continue
+        targets.append({"type": "families", "id": family["id"]})
+    for method in outline.get("methods", []):
+        targets.append({"type": "methods", "id": method["id"]})
+    return targets
+
+
+def chunked(items: list[Any], size: int) -> list[list[Any]]:
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def _generic_agent_prompt(
+    agent_toml: str,
+    run_id: str,
+    stage: str,
+    shard_id: str,
+    payload: dict[str, Any],
+) -> str:
+    return "\n".join(
+        [
+            "Read AGENTS.md first.",
+            f"Run Stage {stage} only.",
+            f"run_id={run_id}",
+            f"shard_id={shard_id}",
+            f"payload={json.dumps(payload, sort_keys=True)}",
+            f"Follow {agent_toml} exactly.",
+            "Write only the artifacts required by that agent and shard.",
+            "Return the standard short success string.",
+        ]
+    )
+
+
+def run_stage_12(run_dir: Path) -> None:
+    if primary_artifact_exists(run_dir, "12"):
+        append_run_log(run_dir, "12", "skipped", "outline already present")
+        return
+    expected_outputs = [
+        "12_taxonomy/communities.json",
+        "12_taxonomy/taxonomy.json",
+        "12_taxonomy/outline.json",
+    ]
+    spec = ShardSpec(
+        stage="12",
+        shard_id="outline",
+        agent="outline_planner",
+        model="gpt-5.4-mini",
+        prompt=_generic_agent_prompt(
+            ".codex/agents/outline_planner.toml",
+            run_dir.name,
+            "12",
+            "outline",
+            {"expected_outputs": expected_outputs},
+        ),
+        expected_outputs=expected_outputs,
+    )
+    run_shards(run_dir, [spec])
+
+
+def _expected_chapter_pack(target: dict[str, str]) -> str:
+    return f"13_chapter_packs/{target['type']}/{target['id']}.json"
+
+
+def _expected_chapter_file(target: dict[str, str]) -> str:
+    return f"14_chapters/{target['type']}/{target['id']}.md"
+
+
+def _expected_verification_file(target: dict[str, str]) -> str:
+    return f"15_verification/{target['type']}/{target['id']}_verification.json"
+
+
+def run_stage_13(run_dir: Path) -> None:
+    targets = build_chapter_targets(run_dir)
+    missing = [t for t in targets if not (run_dir / _expected_chapter_pack(t)).exists()]
+    specs = [
+        ShardSpec(
+            stage="13",
+            shard_id=f"pack-{idx:03d}",
+            agent="chapter_pack_builder",
+            model="gpt-5.4-mini",
+            prompt=_generic_agent_prompt(
+                ".codex/agents/chapter_pack_builder.toml",
+                run_dir.name,
+                "13",
+                f"pack-{idx:03d}",
+                {"targets": chunk},
+            ),
+            expected_outputs=[_expected_chapter_pack(t) for t in chunk],
+        )
+        for idx, chunk in enumerate(chunked(missing, 1), start=1)
+    ]
+    if specs:
+        run_shards(run_dir, specs)
+
+
+def run_stage_14(run_dir: Path) -> None:
+    targets = build_chapter_targets(run_dir)
+    missing = [t for t in targets if not (run_dir / _expected_chapter_file(t)).exists()]
+    specs = []
+    for idx, chunk in enumerate(chunked(missing, 2), start=1):
+        types = {t["type"] for t in chunk}
+        agent = (
+            "method_chapter_writer"
+            if types == {"methods"}
+            else "family_chapter_writer"
+            if types == {"families"}
+            else "book_section_writer"
+        )
+        specs.append(
+            ShardSpec(
+                stage="14",
+                shard_id=f"write-{idx:03d}",
+                agent=agent,
+                model="gpt-5.4",
+                prompt=_generic_agent_prompt(
+                    f".codex/agents/{agent}.toml",
+                    run_dir.name,
+                    "14",
+                    f"write-{idx:03d}",
+                    {"targets": chunk},
+                ),
+                expected_outputs=[_expected_chapter_file(t) for t in chunk],
+            )
+        )
+    if specs:
+        run_shards(run_dir, specs)
+
+
+def run_stage_15(run_dir: Path) -> None:
+    targets = build_chapter_targets(run_dir)
+    missing = [
+        t for t in targets if not (run_dir / _expected_verification_file(t)).exists()
+    ]
+    specs = [
+        ShardSpec(
+            stage="15",
+            shard_id=f"verify-{idx:03d}",
+            agent="verifier",
+            model="gpt-5.4",
+            prompt=_generic_agent_prompt(
+                ".codex/agents/verifier.toml",
+                run_dir.name,
+                "15",
+                f"verify-{idx:03d}",
+                {"targets": chunk},
+            ),
+            expected_outputs=[_expected_verification_file(t) for t in chunk],
+        )
+        for idx, chunk in enumerate(chunked(missing, 2), start=1)
+    ]
+    if specs:
+        run_shards(run_dir, specs)
+
+
+def run_stage_16(run_dir: Path) -> None:
+    targets = build_chapter_targets(run_dir)
+    specs = [
+        ShardSpec(
+            stage="16",
+            shard_id=f"manifest-{idx:03d}",
+            agent="chapter_manifest_builder",
+            model="gpt-5.4",
+            prompt=_generic_agent_prompt(
+                ".codex/agents/chapter_manifest_builder.toml",
+                run_dir.name,
+                "16",
+                f"manifest-{idx:03d}",
+                {"targets": chunk},
+            ),
+            expected_outputs=[f"16_book/chapters_manifest_shard_manifest-{idx:03d}.json"],
+        )
+        for idx, chunk in enumerate(chunked(targets, 2), start=1)
+        if not (
+            run_dir / f"16_book/chapters_manifest_shard_manifest-{idx:03d}.json"
+        ).exists()
+    ]
+    if specs:
+        run_shards(run_dir, specs)
+
+
+def run_stage_17(run_dir: Path) -> None:
+    if primary_artifact_exists(run_dir, "17"):
+        append_run_log(
+            run_dir, "17", "skipped", "learning suggestions already present"
+        )
+        return
+    spec = ShardSpec(
+        stage="17",
+        shard_id="learning-suggestions",
+        agent="knowledge_gap_detector",
+        model="gpt-5.4-mini",
+        prompt="\n".join(
+            [
+                "Read AGENTS.md first.",
+                "Run Stage 17 learning suggestions only.",
+                f"run_id={run_dir.name}",
+                "Read 06_expansion/knowledge_gap_report.json.",
+                "Write 17_learning_suggestions/knowledge_to_add.md.",
+                "Do not modify .agents/knowledge_base.md.",
+            ]
+        ),
+        expected_outputs=["17_learning_suggestions/knowledge_to_add.md"],
+    )
+    run_shards(run_dir, [spec])
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if not args.topic and not args.run_id:

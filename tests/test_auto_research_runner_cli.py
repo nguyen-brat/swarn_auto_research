@@ -4,7 +4,11 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.run_auto_research import run_deterministic_command, run_stage_18
+from scripts.run_auto_research import (
+    build_chapter_targets,
+    run_deterministic_command,
+    run_stage_18,
+)
 
 
 def test_run_deterministic_command_logs_failure(tmp_path):
@@ -81,4 +85,26 @@ def test_run_stage_18_runs_generate_then_validate(tmp_path):
         "swarn_research_mcp.research_book",
         str(run),
         "--validate",
+    ]
+
+
+def test_build_chapter_targets_excludes_appendices_and_keeps_order(tmp_path):
+    run = tmp_path / "run"
+    (run / "12_taxonomy").mkdir(parents=True)
+    outline = {
+        "book_sections": [
+            {"id": "preface", "title": "Preface"},
+            {"id": "appendices", "title": "Appendices"},
+        ],
+        "families": [{"id": "fam_a", "title": "A", "method_ids": ["m1"]}],
+        "methods": [{"id": "m1", "title": "M1", "arxiv_id": "1.1", "family_id": "fam_a"}],
+    }
+    (run / "12_taxonomy" / "outline.json").write_text(json.dumps(outline))
+
+    targets = build_chapter_targets(run)
+
+    assert targets == [
+        {"type": "book", "id": "preface"},
+        {"type": "families", "id": "fam_a"},
+        {"type": "methods", "id": "m1"},
     ]
