@@ -96,6 +96,79 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _edge_key(edge: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        edge.get("src"),
+        edge.get("dst"),
+        edge.get("type"),
+        edge.get("source_node_id"),
+        tuple(edge.get("source_lines", ())),
+    )
+
+
+def merge_verified_graph_fragments(run_dir: Path) -> dict[str, Any]:
+    fragments_dir = run_dir / "11_verified_graph" / "fragments"
+    if not fragments_dir.exists():
+        raise FileNotFoundError(fragments_dir)
+
+    nodes_by_id: dict[Any, dict[str, Any]] = {}
+    edges_by_key: dict[tuple[Any, ...], dict[str, Any]] = {}
+
+    for fragment_path in sorted(fragments_dir.glob("*.json")):
+        fragment = json.loads(fragment_path.read_text())
+        for node in fragment.get("nodes", []):
+            node_id = node["id"]
+            if node_id not in nodes_by_id:
+                nodes_by_id[node_id] = node
+        for edge in fragment.get("edges", []):
+            if edge.get("confidence") != "verified":
+                raise ValueError(f"unverified edge in {fragment_path}")
+            if not edge.get("source_node_id"):
+                raise ValueError(f"edge missing source_node_id in {fragment_path}")
+            if "source_lines" not in edge:
+                raise ValueError(f"edge missing source_lines in {fragment_path}")
+            key = _edge_key(edge)
+            if key not in edges_by_key:
+                edges_by_key[key] = edge
+
+    return {
+        "nodes": sorted(nodes_by_id.values(), key=lambda node: node["id"]),
+        "edges": [edges_by_key[key] for key in sorted(edges_by_key)],
+    }
+
+
+def _load_weak_edge_count(run_dir: Path) -> int:
+    weak_graph_path = run_dir / "05_weak_graph" / "weak_global_graph.json"
+    if not weak_graph_path.exists():
+        return 0
+    weak_graph = json.loads(weak_graph_path.read_text())
+    return len(weak_graph.get("edges", []))
+
+
+def run_stage_11_merge(run_dir: Path) -> None:
+    graph = merge_verified_graph_fragments(run_dir)
+    verified_graph_dir = run_dir / "11_verified_graph"
+    verified_graph_dir.mkdir(parents=True, exist_ok=True)
+
+    global_graph_path = verified_graph_dir / "global_graph.json"
+    global_graph_path.write_text(json.dumps(graph, indent=2, sort_keys=True) + "\n")
+
+    weak_edge_count = _load_weak_edge_count(run_dir)
+    report = "\n".join(
+        [
+            "# Verified graph report",
+            "",
+            f"Nodes count: {len(graph['nodes'])}",
+            f"Verified edges count: {len(graph['edges'])}",
+            f"Weak edges not promoted count: {weak_edge_count}",
+            "",
+        ]
+    )
+    (verified_graph_dir / "graph_report.md").write_text(report)
+
+    append_run_log(run_dir, "11", "merged", f"{len(graph['edges'])} verified edges")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if not args.topic and not args.run_id:
