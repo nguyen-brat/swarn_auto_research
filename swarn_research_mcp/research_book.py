@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy as _copy
 import json
 import re
 from collections import defaultdict
@@ -35,6 +36,8 @@ SECTION_HEADING_METHOD_ID_PATTERNS = re.compile(
 METHOD_REQUIRED_SOURCE_SECTIONS = {"theory", "algorithm", "example", "limitations"}
 METHOD_MIN_WORDS = 1500
 FAMILY_MIN_WORDS = 1000
+STANDALONE_GROUP_ID = "standalone"
+STANDALONE_PART_ID = "standalone_methods"
 COPIED_SOURCE_OUTLINE_PATTERN = re.compile(
     r"^\s*[-*]\s+(?:\d+(?:\.\d+)*\s+[A-Z]|[A-Z]\.\d+\s+)|^\s*[-*]\s+Baselines\.?\s*$",
     re.IGNORECASE,
@@ -213,6 +216,64 @@ def _write_markdown_preserving_front_matter(path: Path, body: str) -> None:
     path.write_text(prefix + body.rstrip() + "\n", encoding="utf-8")
 
 
+def _validate_parts(outline: dict[str, Any], families: list[dict[str, Any]]) -> list[dict[str, str]]:
+    issues: list[dict[str, str]] = []
+    parts = outline.get("parts")
+    if parts is None:
+        issues.append(
+            {
+                "severity": "error",
+                "code": "missing_parts",
+                "detail": "outline.json must define a 'parts' array (2..5 entries)",
+            }
+        )
+        return issues
+    # 2..5 normal parts, plus an optional standalone_methods part on top.
+    normal_parts = (
+        [p for p in parts if isinstance(p, dict) and p.get("id") != STANDALONE_PART_ID]
+        if isinstance(parts, list)
+        else []
+    )
+    if not isinstance(parts, list) or not (2 <= len(normal_parts) <= 5):
+        n = len(normal_parts) if isinstance(parts, list) else "non-list"
+        issues.append(
+            {
+                "severity": "error",
+                "code": "parts_count_out_of_range",
+                "detail": f"parts must have 2..5 entries (excluding {STANDALONE_PART_ID}), got {n}",
+            }
+        )
+        return issues
+    family_ids = {f.get("id") for f in families if f.get("id")}
+    seen_in: dict[str, str] = {}
+    for part in parts:
+        pid = part.get("id", "")
+        fids = part.get("family_ids", []) or []
+        if not fids:
+            issues.append({"severity": "error", "code": "empty_part", "detail": f"part {pid} has no families"})
+        for fid in fids:
+            if fid in seen_in:
+                issues.append(
+                    {
+                        "severity": "error",
+                        "code": "family_in_multiple_parts",
+                        "detail": f"family {fid} appears in parts {seen_in[fid]} and {pid}",
+                    }
+                )
+            else:
+                seen_in[fid] = pid
+    for fid in family_ids:
+        if fid not in seen_in:
+            issues.append(
+                {
+                    "severity": "error",
+                    "code": "family_unassigned_to_part",
+                    "detail": f"family {fid} is not in any part",
+                }
+            )
+    return issues
+
+
 def validate_research_book_run(run_dir: Path | str) -> list[dict[str, str]]:
     run_path = Path(run_dir)
     issues: list[dict[str, str]] = []
@@ -222,6 +283,7 @@ def validate_research_book_run(run_dir: Path | str) -> list[dict[str, str]]:
 
     methods = outline.get("methods", [])
     families = outline.get("families", [])
+    issues.extend(_validate_parts(outline, families))
     method_by_id = _method_by_id(outline)
     family_by_id = {family.get("id"): family for family in families if family.get("id")}
 
@@ -366,6 +428,8 @@ def validate_research_book_run(run_dir: Path | str) -> list[dict[str, str]]:
     taxonomy_path = run_path / "14_chapters" / "book" / BOOK_FILE_BY_ID["method_taxonomy"]
     taxonomy_text = taxonomy_path.read_text(encoding="utf-8") if taxonomy_path.exists() else ""
     for family in families:
+        if family.get("is_group"):
+            continue
         family_id = family.get("id")
         expected_link = f"../families/{family_id}.md"
         if family_id and expected_link not in taxonomy_text:
@@ -398,6 +462,8 @@ def validate_research_book_run(run_dir: Path | str) -> list[dict[str, str]]:
                 }
             )
     for family in families:
+        if family.get("is_group"):
+            continue
         family_id = family.get("id")
         if family_id and not (run_path / "14_chapters" / "families" / f"{family_id}.md").exists():
             issues.append(
@@ -432,6 +498,8 @@ def validate_research_book_run(run_dir: Path | str) -> list[dict[str, str]]:
             )
 
     for family in families:
+        if family.get("is_group"):
+            continue
         family_id = family.get("id")
         if not family_id:
             continue
@@ -564,6 +632,117 @@ def _method_by_id(outline: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {method["id"]: method for method in outline.get("methods", [])}
 
 
+def _graph_evidence_score(singleton: dict, candidate: dict, method_by_id: dict) -> int:
+    s_method = method_by_id[singleton["method_ids"][0]]
+    s_neighbor_methods = set(s_method.get("neighbor_method_ids", []) or [])
+    s_neighbor_families = set(singleton.get("neighbor_family_ids", []) or [])
+    cand_methods = set(candidate.get("method_ids", []) or [])
+    shared = len(s_neighbor_methods & cand_methods)
+    if shared >= 2:
+        return shared
+    if candidate["id"] in s_neighbor_families and shared >= 1:
+        return shared
+    return 0
+
+
+def _has_strong_graph_evidence(singleton: dict, candidate: dict, method_by_id: dict) -> bool:
+    return _graph_evidence_score(singleton, candidate, method_by_id) > 0
+
+
+def merge_singletons(outline: dict[str, Any]) -> dict[str, Any]:
+    """Stage 12.5 post-processor for singleton families."""
+    out = _copy.deepcopy(outline)
+    families: list[dict[str, Any]] = out["families"]
+    methods: list[dict[str, Any]] = out["methods"]
+    method_by_id = {m["id"]: m for m in methods}
+    parts = out.get("parts") or []
+
+    original_singletons = sorted(
+        (
+            f
+            for f in families
+            if len(f.get("method_ids", [])) == 1 and f["id"] != STANDALONE_GROUP_ID
+        ),
+        key=lambda f: f["id"],
+    )
+    if not original_singletons:
+        return out
+
+    for singleton in original_singletons:
+        sid = singleton["id"]
+        if not any(f["id"] == sid for f in families):
+            continue
+        s_method_id = singleton["method_ids"][0]
+
+        candidates = [
+            f
+            for f in families
+            if f["id"] != sid and f["id"] != STANDALONE_GROUP_ID and len(f.get("method_ids", [])) >= 2
+        ]
+
+        scored_candidates = []
+        for cand in candidates:
+            score = _graph_evidence_score(singleton, cand, method_by_id)
+            if score > 0:
+                scored_candidates.append((score, cand["id"], cand))
+        winner = None
+        if scored_candidates:
+            winner = sorted(scored_candidates, key=lambda item: (-item[0], item[1]))[0][2]
+
+        if winner is not None:
+            winner["method_ids"] = list(winner["method_ids"]) + [s_method_id]
+            method_by_id[s_method_id]["family_id"] = winner["id"]
+        else:
+            standalone = next((f for f in families if f["id"] == STANDALONE_GROUP_ID), None)
+            if standalone is None:
+                standalone = {
+                    "id": STANDALONE_GROUP_ID,
+                    "title": "Standalone / Emerging Methods",
+                    "method_ids": [],
+                    "neighbor_family_ids": [],
+                    "is_group": True,
+                }
+                families.append(standalone)
+                if not any(p["id"] == STANDALONE_PART_ID for p in parts):
+                    parts.append(
+                        {
+                            "id": STANDALONE_PART_ID,
+                            "title": "Standalone / Emerging Methods",
+                            "family_ids": [STANDALONE_GROUP_ID],
+                        }
+                    )
+                else:
+                    sp = next(p for p in parts if p["id"] == STANDALONE_PART_ID)
+                    if STANDALONE_GROUP_ID not in (sp.get("family_ids") or []):
+                        sp.setdefault("family_ids", []).append(STANDALONE_GROUP_ID)
+            standalone["method_ids"] = list(standalone["method_ids"]) + [s_method_id]
+            method_by_id[s_method_id]["family_id"] = STANDALONE_GROUP_ID
+
+        families = [f for f in families if f["id"] != sid]
+        for part in parts:
+            fids = part.get("family_ids", []) or []
+            part["family_ids"] = [fid for fid in fids if fid != sid]
+
+    parts = [p for p in parts if (p.get("family_ids") or []) or p.get("id") == STANDALONE_PART_ID]
+    out["families"] = families
+    out["parts"] = parts
+    return out
+
+
+def assert_no_singletons(outline: dict[str, Any]) -> None:
+    """Stage 18 precondition: single-method families must be the standalone group."""
+    bad = [
+        f["id"]
+        for f in outline.get("families", [])
+        if len(f.get("method_ids", [])) == 1 and f["id"] != STANDALONE_GROUP_ID
+    ]
+    if bad:
+        raise RuntimeError(
+            f"outline.json has singleton families {bad}; run --normalize-outline "
+            "(stage 12.5) before generate_book_artifacts."
+        )
+
+
 def _book_chapter_path(section_id: str) -> str:
     return f"14_chapters/book/{BOOK_FILE_BY_ID.get(section_id, section_id + '.md')}"
 
@@ -677,6 +856,7 @@ def _build_sidebar(outline: dict[str, Any]) -> dict[str, Any]:
 def generate_book_artifacts(run_dir: Path | str) -> dict[str, int]:
     run_path = Path(run_dir)
     outline = _outline(run_path)
+    assert_no_singletons(outline)
     taxonomy_path = run_path / "14_chapters" / "book" / BOOK_FILE_BY_ID["method_taxonomy"]
     appendices_path = run_path / "14_chapters" / "book" / BOOK_FILE_BY_ID["appendices"]
     _write_markdown_preserving_front_matter(taxonomy_path, _build_method_taxonomy(outline))
@@ -692,7 +872,23 @@ def main() -> None:
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("--validate", action="store_true")
     parser.add_argument("--generate", action="store_true")
+    parser.add_argument(
+        "--normalize-outline",
+        action="store_true",
+        help="Stage 12.5: read 12_taxonomy/outline.json, run merge_singletons, write back if changed.",
+    )
     args = parser.parse_args()
+
+    if args.normalize_outline:
+        run_path = Path(args.run_dir)
+        outline = _outline(run_path)
+        normalized = merge_singletons(outline)
+        if normalized != outline:
+            _write_json(run_path / "12_taxonomy" / "outline.json", normalized)
+            print(f"normalized: families {len(outline['families'])} -> {len(normalized['families'])}")
+        else:
+            print("normalized: no singletons to merge")
+        return
 
     if args.generate:
         result = generate_book_artifacts(args.run_dir)
