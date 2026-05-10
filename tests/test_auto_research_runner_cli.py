@@ -299,3 +299,34 @@ def test_main_resume_from_stage_11_calls_stage_11(tmp_path, monkeypatch):
 
     assert rc == 0
     assert calls == ["demo"]
+
+
+def test_main_rejects_from_stage_outside_phase(tmp_path, monkeypatch):
+    run = tmp_path / "research_runs" / "demo"
+    run.mkdir(parents=True)
+    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+
+    try:
+        main(["--run-id", "demo", "--phase", "draft", "--resume", "--from-stage", "14"])
+    except SystemExit as error:
+        assert "stage 14 is not available for phase draft" in str(error)
+    else:
+        raise AssertionError("expected invalid from-stage failure")
+
+
+def test_main_write_phase_defaults_to_stage_14(tmp_path, monkeypatch):
+    run = tmp_path / "research_runs" / "demo"
+    run.mkdir(parents=True)
+    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    calls = []
+
+    for stage in ("14", "15", "16", "17", "18"):
+        monkeypatch.setattr(
+            f"scripts.run_auto_research.run_stage_{stage}",
+            lambda run_dir, stage=stage: calls.append(stage),
+        )
+
+    rc = main(["--run-id", "demo", "--phase", "write"])
+
+    assert rc == 0
+    assert calls == ["14", "15", "16", "17", "18"]

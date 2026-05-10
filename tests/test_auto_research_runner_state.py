@@ -72,6 +72,8 @@ def test_main_preserves_existing_resume_state(tmp_path, monkeypatch):
     runs_root = tmp_path / "research_runs"
     run = runs_root / "demo"
     monkeypatch.setattr(runner, "RUNS_ROOT", runs_root)
+    calls = []
+    _patch_stage_handlers(monkeypatch, calls)
     save_run_state(
         run,
         {
@@ -88,16 +90,19 @@ def test_main_preserves_existing_resume_state(tmp_path, monkeypatch):
 
     state = load_run_state(run)
     assert state["topic"] == "Old topic"
-    assert state["current_stage"] == "11"
-    assert state["last_completed_stage"] == "10"
-    assert state["status"] == "ready"
+    assert state["current_stage"] == "18"
+    assert state["last_completed_stage"] == "18"
+    assert state["status"] == "completed"
     assert state["resume"] is True
+    assert calls == ["11", "12", "12.5", "13", "14", "15", "16", "17", "18"]
 
 
 def test_main_resets_progress_without_resume(tmp_path, monkeypatch):
     runs_root = tmp_path / "research_runs"
     run = runs_root / "demo"
     monkeypatch.setattr(runner, "RUNS_ROOT", runs_root)
+    calls = []
+    _patch_stage_handlers(monkeypatch, calls)
     save_run_state(
         run,
         {
@@ -105,8 +110,8 @@ def test_main_resets_progress_without_resume(tmp_path, monkeypatch):
             "phase": "draft",
             "topic": "Old topic",
             "status": "running",
-            "current_stage": "11",
-            "last_completed_stage": "10",
+            "current_stage": "15",
+            "last_completed_stage": "14",
         },
     )
 
@@ -114,6 +119,23 @@ def test_main_resets_progress_without_resume(tmp_path, monkeypatch):
 
     state = load_run_state(run)
     assert state["topic"] == "New topic"
-    assert state["current_stage"] == "0"
-    assert state["last_completed_stage"] is None
+    assert state["current_stage"] == "18"
+    assert state["last_completed_stage"] == "18"
+    assert state["status"] == "completed"
     assert state["resume"] is False
+    assert calls == ["11", "12", "12.5", "13", "14", "15", "16", "17", "18"]
+
+
+def _patch_stage_handlers(monkeypatch, calls):
+    for stage, name in (
+        ("11", "run_stage_11"),
+        ("12", "run_stage_12"),
+        ("12.5", "run_stage_12_5"),
+        ("13", "run_stage_13"),
+        ("14", "run_stage_14"),
+        ("15", "run_stage_15"),
+        ("16", "run_stage_16"),
+        ("17", "run_stage_17"),
+        ("18", "run_stage_18"),
+    ):
+        monkeypatch.setattr(runner, name, lambda run_dir, stage=stage: calls.append(stage))

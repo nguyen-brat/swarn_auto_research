@@ -837,7 +837,11 @@ def main(argv: list[str] | None = None) -> int:
             ]
         )
 
-    start = args.from_stage or state.get("current_stage") or handlers[0][0]
+    default_start = "14" if args.phase == "write" else handlers[0][0]
+    start = args.from_stage or (state.get("current_stage") if args.resume else None) or default_start
+    handler_stages = {stage for stage, _ in handlers}
+    if start not in handler_stages:
+        raise SystemExit(f"stage {start} is not available for phase {args.phase}")
     state.update(
         {
             "run_id": run_id,
@@ -845,6 +849,7 @@ def main(argv: list[str] | None = None) -> int:
             "topic": args.topic or state.get("topic", ""),
             "status": "running",
             "current_stage": start,
+            "resume": args.resume,
         }
     )
     save_run_state(run_dir, state)
