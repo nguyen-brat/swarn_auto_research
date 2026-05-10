@@ -60,7 +60,8 @@ Write `tests/fixtures/voice_lm_minimal/02_paper_pool/paper_pool.json`:
 ```json
 [
   {"arxiv_id": "2301.02111"},
-  {"arxiv_id": "2406.18009"}
+  {"arxiv_id": "2406.18009"},
+  {"arxiv_id": "2410.06885"}
 ]
 ```
 
@@ -76,6 +77,11 @@ Write `tests/fixtures/voice_lm_minimal/03_overviews/semantic_scholar/2301.02111.
 Write `tests/fixtures/voice_lm_minimal/03_overviews/semantic_scholar/2406.18009.json`:
 ```json
 {"arxiv_id": "2406.18009", "title": "Voicebox", "year": 2024}
+```
+
+Write `tests/fixtures/voice_lm_minimal/03_overviews/semantic_scholar/2410.06885.json`:
+```json
+{"arxiv_id": "2410.06885", "title": "F5-TTS", "year": 2024}
 ```
 
 - [ ] **Step 4: Write weak evidence (alternate metadata source)**
@@ -108,12 +114,12 @@ Write `tests/fixtures/voice_lm_minimal/12_taxonomy/outline.json`:
   "methods": [
     {"id": "m_valle", "title": "VALL-E", "arxiv_id": "2301.02111", "family_id": "fam_codec", "neighbor_method_ids": ["m_voicebox"]},
     {"id": "m_voicebox", "title": "Voicebox", "arxiv_id": "2406.18009", "family_id": "fam_flow", "neighbor_method_ids": ["m_valle"]},
-    {"id": "m_excluded", "title": "Broken Method", "arxiv_id": "2301.02111", "family_id": "fam_flow", "neighbor_method_ids": []}
+    {"id": "m_excluded", "title": "Broken Method", "arxiv_id": "2410.06885", "family_id": "fam_flow", "neighbor_method_ids": []}
   ]
 }
 ```
 
-(Note: `fam_codec` is a singleton; `m_excluded` shares an arxiv_id with `m_valle` to test duplicate detection.)
+(Note: `fam_codec` is a singleton; each method has a distinct `arxiv_id` so duplicate-detection logic does not fire on this fixture. Add a separate small fixture in any test that specifically exercises duplicate-arxiv handling.)
 
 - [ ] **Step 6: Write promoted_papers.json**
 
@@ -121,7 +127,8 @@ Write `tests/fixtures/voice_lm_minimal/07_scoring/promoted_papers.json`:
 ```json
 {"promoted_papers": [
   {"arxiv_id": "2301.02111"},
-  {"arxiv_id": "2406.18009"}
+  {"arxiv_id": "2406.18009"},
+  {"arxiv_id": "2410.06885"}
 ]}
 ```
 
@@ -558,12 +565,28 @@ def test_family_in_two_parts(voice_lm_minimal):
 
 def test_family_unassigned_to_part(voice_lm_minimal):
     outline = json.loads((voice_lm_minimal / "12_taxonomy" / "outline.json").read_text())
+    # Add a 3rd dummy family so the second part can hold something and we test only the "unassigned" path.
+    outline["families"].append({"id": "fam_dummy", "title": "Dummy", "method_ids": ["m_dummy_a", "m_dummy_b"]})
+    outline["methods"].extend([
+        {"id": "m_dummy_a", "title": "DA", "arxiv_id": "0001.0001", "family_id": "fam_dummy"},
+        {"id": "m_dummy_b", "title": "DB", "arxiv_id": "0001.0002", "family_id": "fam_dummy"},
+    ])
     _set_outline(voice_lm_minimal, _add_parts(outline, [
         {"id": "p1", "title": "P1", "family_ids": ["fam_codec"]},
-        {"id": "p2", "title": "P2", "family_ids": []},
+        {"id": "p2", "title": "P2", "family_ids": ["fam_dummy"]},
     ]))
     issues = validate_research_book_run(voice_lm_minimal)
     assert any(i["code"] == "family_unassigned_to_part" and "fam_flow" in i["detail"] for i in issues)
+
+
+def test_empty_part_is_error(voice_lm_minimal):
+    outline = json.loads((voice_lm_minimal / "12_taxonomy" / "outline.json").read_text())
+    _set_outline(voice_lm_minimal, _add_parts(outline, [
+        {"id": "p1", "title": "P1", "family_ids": ["fam_codec", "fam_flow"]},
+        {"id": "p2", "title": "P2", "family_ids": []},
+    ]))
+    issues = validate_research_book_run(voice_lm_minimal)
+    assert any(i["code"] == "empty_part" and "p2" in i["detail"] for i in issues)
 
 
 def test_valid_parts(voice_lm_minimal):
@@ -574,7 +597,7 @@ def test_valid_parts(voice_lm_minimal):
     ]))
     issues = validate_research_book_run(voice_lm_minimal)
     parts_codes = {"missing_parts", "parts_count_out_of_range",
-                   "family_in_multiple_parts", "family_unassigned_to_part"}
+                   "family_in_multiple_parts", "family_unassigned_to_part", "empty_part"}
     assert not any(i["code"] in parts_codes for i in issues)
 ```
 
@@ -604,7 +627,11 @@ def _validate_parts(outline: dict[str, Any], families: list[dict[str, Any]]) -> 
     seen_in: dict[str, str] = {}
     for part in parts:
         pid = part.get("id", "")
-        for fid in part.get("family_ids", []) or []:
+        fids = part.get("family_ids", []) or []
+        if not fids:
+            issues.append({"severity": "error", "code": "empty_part",
+                           "detail": f"part {pid} has no families"})
+        for fid in fids:
             if fid in seen_in:
                 issues.append({"severity": "error", "code": "family_in_multiple_parts",
                                "detail": f"family {fid} appears in parts {seen_in[fid]} and {pid}"})
@@ -625,7 +652,7 @@ In `validate_research_book_run`, after `families = outline.get("families", [])` 
 - [ ] **Step 4: Run tests**
 
 Run: `pytest tests/test_research_book_parts.py -v`
-Expected: PASS (5 tests).
+Expected: PASS (6 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -636,7 +663,9 @@ git commit -m "feat(research-book): validate outline.json parts (2..5, exclusive
 
 ---
 
-## Task 1.4: Deterministic singleton-merge post-processor
+## Task 1.4: Deterministic singleton-merge post-processor (Stage 12.5)
+
+This is a **named Stage 12.5 contract**. It runs immediately after `taxonomy-building` (Stage 12) and BEFORE pack/chapter generation (Stages 13/14/15). `generate_book_artifacts` (Stage 18) ASSERTS that no singletons remain — it does not mutate.
 
 **Files:**
 - Test: `tests/test_research_book_singleton_merge.py` (create)
@@ -721,6 +750,53 @@ def test_no_op_when_all_families_have_two_methods():
     before = _outline(families, methods)
     after = merge_singletons(before)
     assert after == before
+
+
+def test_catchall_is_not_re_processed_as_singleton():
+    """Regression: a catch-all created during the loop must NOT be merged again."""
+    families = [
+        {"id": "fam_a", "title": "A", "method_ids": ["m1"], "neighbor_family_ids": []},
+        {"id": "fam_b", "title": "B", "method_ids": ["m2", "m3"], "neighbor_family_ids": []},
+    ]
+    methods = [
+        {"id": "m1", "arxiv_id": "1.1", "family_id": "fam_a", "neighbor_method_ids": []},
+        {"id": "m2", "arxiv_id": "1.2", "family_id": "fam_b", "neighbor_method_ids": ["m3"]},
+        {"id": "m3", "arxiv_id": "1.3", "family_id": "fam_b", "neighbor_method_ids": ["m2"]},
+    ]
+    parts = [{"id": "p1", "title": "P1", "family_ids": ["fam_a"]},
+             {"id": "p2", "title": "P2", "family_ids": ["fam_b"]}]
+    merged = merge_singletons(_outline(families, methods, parts))
+    catchall = next((f for f in merged["families"] if f["id"] == "other_p1"), None)
+    assert catchall is not None
+    assert catchall["method_ids"] == ["m1"]
+    # Method's family_id resolves to the surviving catch-all.
+    method_by_id = {m["id"]: m for m in merged["methods"]}
+    assert method_by_id["m1"]["family_id"] == "other_p1"
+
+
+def test_assert_no_singletons_raises_on_unmerged_outline():
+    from swarn_research_mcp.research_book import assert_no_singletons
+    families = [
+        {"id": "fam_a", "title": "A", "method_ids": ["m1"]},
+        {"id": "fam_b", "title": "B", "method_ids": ["m2", "m3"]},
+    ]
+    methods = [{"id": "m1", "arxiv_id": "1.1", "family_id": "fam_a"},
+               {"id": "m2", "arxiv_id": "1.2", "family_id": "fam_b"},
+               {"id": "m3", "arxiv_id": "1.3", "family_id": "fam_b"}]
+    with pytest.raises(RuntimeError, match="singleton"):
+        assert_no_singletons(_outline(families, methods))
+
+
+def test_assert_no_singletons_allows_catchall_singletons():
+    from swarn_research_mcp.research_book import assert_no_singletons
+    families = [
+        {"id": "other_p1", "title": "Other (p1)", "method_ids": ["m1"]},
+        {"id": "fam_b", "title": "B", "method_ids": ["m2", "m3"]},
+    ]
+    methods = [{"id": "m1", "arxiv_id": "1.1", "family_id": "other_p1"},
+               {"id": "m2", "arxiv_id": "1.2", "family_id": "fam_b"},
+               {"id": "m3", "arxiv_id": "1.3", "family_id": "fam_b"}]
+    assert_no_singletons(_outline(families, methods))  # no raise
 ```
 
 - [ ] **Step 2: Run test**
@@ -737,20 +813,26 @@ import copy as _copy
 
 
 def merge_singletons(outline: dict[str, Any]) -> dict[str, Any]:
-    """Deterministic post-processor: merge every single-method family into its nearest non-singleton family.
+    """Deterministic Stage 12.5 post-processor: merge each single-method family into its nearest non-singleton.
+
+    Single-pass over the ORIGINAL singletons (snapshot before the loop). Catch-all families
+    created during merging are NOT re-processed; they are by definition the home of orphans
+    and may be singletons.
 
     Algorithm:
-      1. Score candidate non-singleton families by graph proximity to the singleton's method.
-         Primary: count of singleton's neighbor_method_ids that live in the candidate family.
-         Tiebreaker: presence of candidate.id in singleton.neighbor_family_ids.
-         Final tiebreaker: lexicographic family_id (deterministic).
-      2. Best candidate wins; the singleton method joins it; family_id is rewritten on the method.
-      3. If no non-singleton candidate has any graph connection AND no neighbor_family_ids match,
-         the singleton method goes into a catch-all family `other_{part_id}` (one per part as needed).
+      1. Snapshot the original singletons (excluding any pre-existing `other_*` catch-alls).
+      2. For each in deterministic id order:
+         a. Score candidates = non-singleton, non-catchall families.
+            Primary: count of singleton's neighbor_method_ids living in candidate's method_ids.
+            Tiebreaker: candidate.id in singleton.neighbor_family_ids.
+            Final tiebreaker: lexicographic candidate.id (deterministic).
+         b. If best score is (0, 0): no graph connection. Place method in catch-all `other_{part_id}`.
+         c. Otherwise merge into best.
+      3. Update method.family_id, drop the singleton family, drop its id from any part's family_ids.
     """
     out = _copy.deepcopy(outline)
-    families = out["families"]
-    methods = out["methods"]
+    families: list[dict[str, Any]] = out["families"]
+    methods: list[dict[str, Any]] = out["methods"]
     method_by_id = {m["id"]: m for m in methods}
 
     parts = out.get("parts") or []
@@ -759,44 +841,57 @@ def merge_singletons(outline: dict[str, Any]) -> dict[str, Any]:
         for fid in part.get("family_ids", []) or []:
             family_to_part[fid] = part["id"]
 
-    while True:
-        singletons = [f for f in families if len(f.get("method_ids", [])) == 1]
-        if not singletons:
-            break
+    # Snapshot ORIGINAL singletons; never re-process catch-alls created during the loop.
+    original_singletons = sorted(
+        (f for f in families
+         if len(f.get("method_ids", [])) == 1
+         and not f["id"].startswith("other_")),
+        key=lambda f: f["id"],
+    )
 
-        # Sort to make merge order deterministic.
-        singleton = sorted(singletons, key=lambda f: f["id"])[0]
+    for singleton in original_singletons:
+        sid = singleton["id"]
+        # Singleton may have been removed already? It can't — we never remove during this loop
+        # except for the singleton itself, exactly once. But guard for safety.
+        if not any(f["id"] == sid for f in families):
+            continue
         s_method_id = singleton["method_ids"][0]
         s_method = method_by_id[s_method_id]
         s_neighbor_methods = set(s_method.get("neighbor_method_ids", []) or [])
         s_neighbor_families = set(singleton.get("neighbor_family_ids", []) or [])
 
-        candidates = [f for f in families if f["id"] != singleton["id"] and len(f.get("method_ids", [])) >= 2]
+        candidates = [
+            f for f in families
+            if f["id"] != sid
+            and not f["id"].startswith("other_")
+            and len(f.get("method_ids", [])) >= 2
+        ]
 
-        def score(f):
+        def score(f: dict[str, Any]) -> tuple[int, int, str]:
             shared = sum(1 for mid in f.get("method_ids", []) if mid in s_neighbor_methods)
             neighbor_bonus = 1 if f["id"] in s_neighbor_families else 0
-            return (shared, neighbor_bonus, -ord(f["id"][0]) if f["id"] else 0)
+            # Negate id so the sort prefers lexicographically smaller ids on a tie.
+            return (shared, neighbor_bonus, f["id"])
 
         best = None
-        best_score = (0, 0, 0)
         for cand in candidates:
             sc = score(cand)
-            if sc > best_score:
-                best_score = sc
+            if sc[0] == 0 and sc[1] == 0:
+                continue  # no graph signal; skip
+            if best is None:
                 best = cand
-        if best is None or best_score == (0, 0, best_score[2]):
-            best = None  # no graph connection at all
+            else:
+                # Higher (shared, neighbor) wins; on tie, lexicographically smaller id wins.
+                bs = score(best)
+                if (sc[0], sc[1]) > (bs[0], bs[1]) or (
+                    (sc[0], sc[1]) == (bs[0], bs[1]) and sc[2] < bs[2]
+                ):
+                    best = cand
 
         if best is not None:
-            best["method_ids"] = list(best["method_ids"]) + [s_method_id]
-            s_method["family_id"] = best["id"]
-            families = [f for f in families if f["id"] != singleton["id"]]
-            for part in parts:
-                fids = part.get("family_ids", []) or []
-                part["family_ids"] = [fid for fid in fids if fid != singleton["id"]]
+            target_id = best["id"]
         else:
-            part_id = family_to_part.get(singleton["id"]) or (parts[0]["id"] if parts else "p1")
+            part_id = family_to_part.get(sid) or (parts[0]["id"] if parts else "p1")
             catchall_id = f"other_{part_id}"
             catchall = next((f for f in families if f["id"] == catchall_id), None)
             if catchall is None:
@@ -806,87 +901,156 @@ def merge_singletons(outline: dict[str, Any]) -> dict[str, Any]:
                 for part in parts:
                     if part["id"] == part_id and catchall_id not in (part.get("family_ids") or []):
                         part.setdefault("family_ids", []).append(catchall_id)
-            catchall["method_ids"] = list(catchall["method_ids"]) + [s_method_id]
-            s_method["family_id"] = catchall_id
-            families = [f for f in families if f["id"] != singleton["id"]]
-            for part in parts:
-                fids = part.get("family_ids", []) or []
-                part["family_ids"] = [fid for fid in fids if fid != singleton["id"]]
+            target_id = catchall_id
+
+        target = next(f for f in families if f["id"] == target_id)
+        target["method_ids"] = list(target["method_ids"]) + [s_method_id]
+        s_method["family_id"] = target_id
+
+        families = [f for f in families if f["id"] != sid]
+        for part in parts:
+            fids = part.get("family_ids", []) or []
+            part["family_ids"] = [fid for fid in fids if fid != sid]
 
     out["families"] = families
     out["parts"] = parts
     return out
+
+
+def assert_no_singletons(outline: dict[str, Any]) -> None:
+    """Stage 18 precondition: outline must already be normalized (no non-catch-all singletons)."""
+    bad = [f["id"] for f in outline.get("families", [])
+           if len(f.get("method_ids", [])) == 1 and not f["id"].startswith("other_")]
+    if bad:
+        raise RuntimeError(
+            f"outline.json has singleton families {bad}; run merge_singletons "
+            "(stage 12.5) before generate_book_artifacts."
+        )
 ```
 
-- [ ] **Step 4: Run tests**
+- [ ] **Step 4: Add `pytest` import to the test file**
+
+At the top of `tests/test_research_book_singleton_merge.py`, ensure `import pytest` is present (added implicitly by the new tests above).
+
+- [ ] **Step 5: Run tests**
 
 Run: `pytest tests/test_research_book_singleton_merge.py -v`
-Expected: PASS (4 tests).
+Expected: PASS (7 tests).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add tests/test_research_book_singleton_merge.py swarn_research_mcp/research_book.py
-git commit -m "feat(research-book): merge_singletons deterministic post-processor"
+git commit -m "feat(research-book): merge_singletons + assert_no_singletons (Stage 12.5)"
 ```
 
 ---
 
-## Task 1.5: Wire `merge_singletons` into `generate_book_artifacts`
+## Task 1.5: Stage 12.5 CLI entry point + Stage 18 assertion
+
+Stage 12.5 normalizes `outline.json` ONCE, immediately after Stage 12 emits it and BEFORE Stage 13 builds packs. `generate_book_artifacts` (Stage 18) only ASSERTS — no late mutation.
 
 **Files:**
-- Modify: `swarn_research_mcp/research_book.py:638` (`generate_book_artifacts`)
+- Modify: `swarn_research_mcp/research_book.py:651` (`main` CLI), `:638` (`generate_book_artifacts`)
+- Modify: `.agents/skills/auto-research-orchestrator/SKILL.md` (Stage 12.5 row in stage table)
 
-- [ ] **Step 1: Add the call + persist normalized outline**
+- [ ] **Step 1: Add `--normalize-outline` flag to the CLI**
+
+In `main` (around line 651), add to the argparse setup:
+
+```python
+    parser.add_argument(
+        "--normalize-outline",
+        action="store_true",
+        help="Stage 12.5: read 12_taxonomy/outline.json, run merge_singletons, write back if changed.",
+    )
+```
+
+In `main`'s body, BEFORE the `--generate` branch:
+
+```python
+    if args.normalize_outline:
+        run_path = Path(args.run_dir)
+        outline = _outline(run_path)
+        normalized = merge_singletons(outline)
+        if normalized != outline:
+            _write_json(run_path / "12_taxonomy" / "outline.json", normalized)
+            print(f"normalized: families {len(outline['families'])} -> {len(normalized['families'])}")
+        else:
+            print("normalized: no singletons to merge")
+        return
+```
+
+- [ ] **Step 2: Add the assertion inside `generate_book_artifacts`**
 
 In `generate_book_artifacts`, after `outline = _outline(run_path)` (line 640), add:
 
 ```python
-    normalized = merge_singletons(outline)
-    if normalized != outline:
-        _write_json(run_path / "12_taxonomy" / "outline.json", normalized)
-        outline = normalized
+    assert_no_singletons(outline)
 ```
 
-- [ ] **Step 2: Add an integration test**
+NO mutation. Stage 12.5 is responsible for normalizing.
+
+- [ ] **Step 3: Add tests**
 
 Append to `tests/test_research_book_singleton_merge.py`:
 
 ```python
-def test_generate_book_artifacts_normalizes_outline_in_place(voice_lm_minimal, monkeypatch):
-    """voice_lm_minimal has fam_codec singleton; after generate_book_artifacts it should be merged."""
-    # Add parts so the run is otherwise valid.
-    outline_path = voice_lm_minimal / "12_taxonomy" / "outline.json"
-    outline = json.loads(outline_path.read_text())
-    outline["parts"] = [
-        {"id": "p1", "title": "P1", "family_ids": ["fam_codec", "fam_flow"]},
-        {"id": "p2", "title": "P2", "family_ids": []},
-    ]
-    outline_path.write_text(json.dumps(outline))
-
-    # Stub verification_gate so it doesn't trip on the m_excluded chapter.
+def test_cli_normalize_outline(voice_lm_minimal, capsys, monkeypatch):
+    """Stage 12.5 CLI: --normalize-outline merges singletons and rewrites outline.json."""
     from swarn_research_mcp import research_book as rb
+    op = voice_lm_minimal / "12_taxonomy" / "outline.json"
+    monkeypatch.setattr("sys.argv", ["research_book", str(voice_lm_minimal), "--normalize-outline"])
+    rb.main()
+    after = json.loads(op.read_text())
+    fids = {f["id"] for f in after["families"]}
+    assert "fam_codec" not in fids  # singleton fam_codec merged into fam_flow
+
+
+def test_generate_book_artifacts_asserts_unnormalized_outline(voice_lm_minimal, monkeypatch):
+    """generate_book_artifacts MUST refuse to render a non-normalized outline."""
+    from swarn_research_mcp import research_book as rb
+    op = voice_lm_minimal / "12_taxonomy" / "outline.json"
+    outline = json.loads(op.read_text())
+    outline["parts"] = [
+        {"id": "p1", "title": "P1", "family_ids": ["fam_codec"]},
+        {"id": "p2", "title": "P2", "family_ids": ["fam_flow"]},
+    ]
+    op.write_text(json.dumps(outline))
     monkeypatch.setattr(rb, "verification_gate", lambda _: None)
-    monkeypatch.setattr(rb, "_paper_label",
-                        lambda aid, promoted, pool: f"[arxiv:{aid}] x (2024)")
-
-    rb.generate_book_artifacts(voice_lm_minimal)
-
-    after = json.loads(outline_path.read_text())
-    family_ids = {f["id"] for f in after["families"]}
-    assert "fam_codec" not in family_ids  # singleton merged away
+    with pytest.raises(RuntimeError, match="singleton"):
+        rb.generate_book_artifacts(voice_lm_minimal)
 ```
 
-- [ ] **Step 3: Run tests**
+- [ ] **Step 4: Update orchestrator SKILL stage table — add Stage 12.5**
+
+In `.agents/skills/auto-research-orchestrator/SKILL.md`, find the stage/artifact table. Insert AFTER the Stage 12 row:
+
+```markdown
+| 12.5 | `12_taxonomy/outline.json` (normalized — `python -m swarn_research_mcp.research_book {run_dir} --normalize-outline`) |
+```
+
+In the same file, document Stage 12.5 in the body:
+
+```markdown
+## Stage 12.5 — Normalize outline (deterministic)
+After Stage 12 writes `outline.json` and BEFORE Stage 13 builds packs, run:
+
+  `python -m swarn_research_mcp.research_book research_runs/{run_id} --normalize-outline`
+
+This calls `merge_singletons`, which deterministically merges every single-method family into its nearest non-singleton family (or into a `other_{part_id}` catch-all if no graph connection exists). Stage 13's pack-building reads the normalized outline; Stage 18's `generate_book_artifacts` asserts the outline is normalized and refuses to render otherwise.
+```
+
+- [ ] **Step 5: Run tests**
 
 Run: `pytest tests/test_research_book_singleton_merge.py -v`
-Expected: PASS (5 tests).
+Expected: PASS (9 tests).
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add tests/test_research_book_singleton_merge.py swarn_research_mcp/research_book.py
-git commit -m "feat(research-book): generate_book_artifacts auto-normalizes singletons before rendering"
+git add tests/test_research_book_singleton_merge.py swarn_research_mcp/research_book.py .agents/skills/auto-research-orchestrator/SKILL.md
+git commit -m "feat(stage-12.5): CLI normalizer + Stage 18 assertion (no late outline mutation)"
 ```
 
 ---
@@ -1333,9 +1497,12 @@ git commit -m "docs(book-section-writing): goals chapter requires 4 categories +
 
 ## Task 4.2: Switch `BOOK_FILE_BY_ID["appendices"]` to a directory marker
 
+**Decision (Stage 16 behavior for appendices):** The `appendices` directory contains four reference files (`glossary.md`, `notation.md`, `datasets.md`, `software.md`) generated deterministically by `_build_appendices_dir`. None of them carry chapter front matter, none receive a verification status, and none participate in the chapter manifest. The orchestrator skill MUST exclude `book:appendices` from the chapter-manifest target list in Stage 16; manifest rows for appendices are not written.
+
 **Files:**
 - Test: `tests/test_research_book_appendices_dir.py` (create)
 - Modify: `swarn_research_mcp/research_book.py` (`BOOK_FILE_BY_ID`, validator, summary, sidebar, generate)
+- Modify: `.agents/skills/chapter-manifest/SKILL.md` and `.agents/skills/auto-research-orchestrator/SKILL.md` — exclude `book:appendices` from manifest targets
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1528,11 +1695,28 @@ Run: `grep -n "99_appendices.md" tests/`. For each hit, update to `99_appendices
 Run: `pytest tests/ -v`
 Expected: PASS.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 10: Update `chapter-manifest` SKILL — exclude `book:appendices`**
+
+In `.agents/skills/chapter-manifest/SKILL.md`, find the section that enumerates `chapter_targets` (`book:{id}` / `family:{id}` / `method:{id}`). Add a hard rule:
+
+```markdown
+## Hard rules
+- `book:appendices` is NOT a manifest target. The appendices directory is generated deterministically (`99_appendices/`) and contains reference files without chapter front matter or verification status. Skip any `book:appendices` target passed to this stage and log `skipped: appendices is directory`.
+```
+
+- [ ] **Step 11: Update orchestrator SKILL — Stage 16 target list**
+
+In `.agents/skills/auto-research-orchestrator/SKILL.md`, find Stage 16 description. Add:
+
+```markdown
+Stage 16 chapter_targets EXCLUDE `book:appendices` — the appendices directory is generated by `_build_appendices_dir` (Stage 18) and has no per-file front matter. Do not dispatch `chapter_manifest_builder` for `book:appendices`.
+```
+
+- [ ] **Step 12: Commit**
 
 ```bash
-git add tests/ swarn_research_mcp/research_book.py
-git commit -m "feat(research-book): hard-switch appendices to 99_appendices/ directory with 4 files"
+git add tests/ swarn_research_mcp/research_book.py .agents/skills/chapter-manifest/SKILL.md .agents/skills/auto-research-orchestrator/SKILL.md
+git commit -m "feat(research-book): hard-switch appendices to 99_appendices/ directory; exclude from manifest"
 ```
 
 ---

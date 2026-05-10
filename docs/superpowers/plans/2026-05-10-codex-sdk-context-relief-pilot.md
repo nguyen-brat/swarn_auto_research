@@ -167,9 +167,11 @@ async def run_one_shot(
     If schema is given, parses JSON; retries up to max_parse_retries on
     parse/required-field failure, then raises ValueError.
 
-    Logs instrumentation: stage_id (if set in env), model, attempts, wall_clock_s,
-    input_chars, output_chars.
+    Logs instrumentation: stage_id (from env CODEX_STAGE_ID), model, attempts,
+    wall_clock_s, input_chars, output_chars.
     """
+    import os as _os
+    stage_id = _os.environ.get("CODEX_STAGE_ID", "unset")
     config = build_config()
     last_err: Exception | None = None
     attempts_total = max_parse_retries + 1
@@ -186,8 +188,8 @@ async def run_one_shot(
             result = await _asyncio.wait_for(thread.run(full_prompt), timeout=timeout)
             final_text = result.final_response
             if schema is None:
-                _LOG.info("run_one_shot ok model=%s attempts=%d wall=%.2fs in=%d out=%d",
-                          model, attempt + 1, _time.monotonic() - started,
+                _LOG.info("run_one_shot ok stage=%s model=%s attempts=%d wall=%.2fs in=%d out=%d",
+                          stage_id, model, attempt + 1, _time.monotonic() - started,
                           len(full_prompt), len(final_text))
                 return final_text
             try:
@@ -215,8 +217,8 @@ async def run_one_shot(
                       len(full_prompt), len(final_text))
             return parsed
 
-    _LOG.error("run_one_shot failed model=%s attempts=%d wall=%.2fs last_err=%s",
-               model, attempts_total, _time.monotonic() - started, last_err)
+    _LOG.error("run_one_shot failed stage=%s model=%s attempts=%d wall=%.2fs last_err=%s",
+               stage_id, model, attempts_total, _time.monotonic() - started, last_err)
     raise ValueError(f"run_one_shot failed to parse after {attempts_total} attempts: {last_err}")
 ```
 
@@ -392,30 +394,64 @@ Use small topics that exercise the planner without burning budget. Suggested:
 - `"transformer attention variants"`
 - `"contrastive image-text pretraining"`
 
-- [ ] **Step 2: Run the TOML sub-agent path (existing pipeline)**
+- [ ] **Step 2: Run the TOML sub-agent path (baseline)**
 
-For each topic, invoke the existing query_planner sub-agent via the orchestrator's stage 1. Save the resulting `00_input/search_plan.json` and the dispatch wall-clock + log to `docs/sdk_pilot_report.md` as the baseline.
+For each topic, dispatch the `query_planner` sub-agent directly via the Codex CLI, bypassing the full orchestrator so the baseline times only this stage. Run from the repo root:
+
+```bash
+mkdir -p /tmp/sdk_pilot/baseline_t1/00_input
+TIME=$(date +%s)
+codex --agent query_planner --input '{"run_id": "/tmp/sdk_pilot/baseline_t1", "topic": "transformer attention variants"}' \
+    > /tmp/sdk_pilot/baseline_t1.log 2>&1
+END=$(date +%s)
+echo "wall_clock=$((END - TIME))s"
+cat /tmp/sdk_pilot/baseline_t1/00_input/search_plan.json
+```
+
+Repeat for the second topic with `baseline_t2` and `"contrastive image-text pretraining"`. Capture:
+- wall-clock seconds
+- aspect count from `len(search_plan["aspects"])`
+- total `normal_queries` count summed across aspects
+
+If the exact `--agent` flag in the local Codex CLI differs, run `codex --help` to find the equivalent (it may be `codex run-agent`, `codex dispatch`, etc.). Record the actual command in the report.
 
 - [ ] **Step 3: Run the SDK path**
 
+Save this script as `/tmp/sdk_pilot/run_sdk.py`:
+
 ```python
-import asyncio, json, logging
+import asyncio, json, logging, os, sys, time
+sys.path.insert(0, ".")
 from sdk.codex import run_one_shot
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(message)s")
 prompt_text = open("swarn_research_mcp/config/sdk_prompts/query_planner.md").read()
 
-for topic in ("transformer attention variants", "contrastive image-text pretraining"):
+for tag, topic in [("sdk_t1", "transformer attention variants"),
+                   ("sdk_t2", "contrastive image-text pretraining")]:
+    os.environ["CODEX_STAGE_ID"] = tag
+    started = time.monotonic()
     result = asyncio.run(run_one_shot(
         prompt=json.dumps({"topic": topic}),
         system=prompt_text,
         model="gpt-5.4-mini",
         schema={"required": ["aspects", "global_negative_keywords"]},
     ))
-    print(json.dumps(result, indent=2))
+    wall = time.monotonic() - started
+    out_path = f"/tmp/sdk_pilot/{tag}_search_plan.json"
+    with open(out_path, "w") as f:
+        json.dump(result, f, indent=2)
+    print(f"{tag}: wall={wall:.1f}s aspects={len(result['aspects'])} "
+          f"queries={sum(len(a.get('normal_queries', [])) for a in result['aspects'])} "
+          f"-> {out_path}")
 ```
 
-Capture the `run_one_shot` log line (model used, attempts, wall-clock).
+Run it from repo root:
+```bash
+python /tmp/sdk_pilot/run_sdk.py
+```
+
+Capture the `run_one_shot` log line for each topic — it contains `stage`, `model`, `attempts`, `wall`, `in`, `out`.
 
 - [ ] **Step 4: Compare**
 
