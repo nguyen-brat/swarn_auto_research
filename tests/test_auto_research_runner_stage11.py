@@ -75,7 +75,16 @@ def test_run_stage_11_merge_writes_global_graph_report_and_log(tmp_path):
     )
     (run / "05_weak_graph").mkdir(parents=True)
     (run / "05_weak_graph" / "weak_global_graph.json").write_text(
-        json.dumps({"nodes": [], "edges": [{"src": "x", "dst": "y", "type": "USES"}]})
+        json.dumps(
+            {
+                "nodes": [],
+                "edges": [
+                    {"src": "x", "dst": "y", "type": "USES"},
+                    {"src": "a", "dst": "b", "type": "INTRODUCES"},
+                    {"src": "c", "dst": "d", "type": "MEASURES"},
+                ],
+            }
+        )
     )
 
     run_stage_11_merge(run)
@@ -88,5 +97,5 @@ def test_run_stage_11_merge_writes_global_graph_report_and_log(tmp_path):
     assert "Verified graph report" in report_text
     assert "- Nodes: 2" in report_text
     assert "- Verified edges: 1" in report_text
-    assert "- Weak edges not promoted: 1" in report_text
+    assert "- Weak edges not promoted: 2" in report_text
     assert "11,merged" in (run / "run_log.csv").read_text()

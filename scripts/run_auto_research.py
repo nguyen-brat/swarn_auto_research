@@ -153,20 +153,22 @@ def run_stage_11_merge(run_dir: Path) -> None:
     global_graph_path = verified_graph_dir / "global_graph.json"
     global_graph_path.write_text(json.dumps(graph, indent=2, sort_keys=True) + "\n")
 
-    weak_edge_count = _load_weak_edge_count(run_dir)
+    verified_edges = len(graph["edges"])
+    weak_edges = _load_weak_edge_count(run_dir)
+    dropped = max(weak_edges - verified_edges, 0)
     report = "\n".join(
         [
             "# Verified graph report",
             "",
             f"- Nodes: {len(graph['nodes'])}",
-            f"- Verified edges: {len(graph['edges'])}",
-            f"- Weak edges not promoted: {weak_edge_count}",
+            f"- Verified edges: {verified_edges}",
+            f"- Weak edges not promoted: {dropped}",
             "",
         ]
     )
     (verified_graph_dir / "graph_report.md").write_text(report)
 
-    append_run_log(run_dir, "11", "merged", f"{len(graph['edges'])} verified edges")
+    append_run_log(run_dir, "11", "merged", f"{verified_edges} verified edges")
 
 
 def main(argv: list[str] | None = None) -> int:
