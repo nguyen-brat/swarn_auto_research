@@ -125,7 +125,7 @@ def merge_verified_graph_fragments(run_dir: Path) -> dict[str, Any]:
                 raise ValueError(f"unverified edge in {fragment_path}")
             if not edge.get("source_node_id"):
                 raise ValueError(f"edge missing source_node_id in {fragment_path}")
-            if "source_lines" not in edge:
+            if not edge.get("source_lines"):
                 raise ValueError(f"edge missing source_lines in {fragment_path}")
             key = _edge_key(edge)
             if key not in edges_by_key:

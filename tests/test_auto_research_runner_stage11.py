@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from scripts.run_auto_research import merge_verified_graph_fragments, run_stage_11_merge
 
 
@@ -56,6 +58,26 @@ def test_merge_verified_graph_fragments_dedupes_nodes_and_edges(tmp_path):
     assert len(graph["edges"]) == 2
     assert all(e["confidence"] == "verified" for e in graph["edges"])
     assert all(e["source_node_id"] for e in graph["edges"])
+
+
+def test_merge_verified_graph_fragments_rejects_empty_source_lines(tmp_path):
+    run = tmp_path / "run"
+    _write_fragment(
+        run,
+        "1.1",
+        [{"id": "1.1", "type": "Paper"}, {"id": "m", "type": "Method"}],
+        [{
+            "src": "1.1",
+            "dst": "m",
+            "type": "INTRODUCES",
+            "confidence": "verified",
+            "source_node_id": "s.1",
+            "source_lines": [],
+        }],
+    )
+
+    with pytest.raises(ValueError):
+        merge_verified_graph_fragments(run)
 
 
 def test_run_stage_11_merge_writes_global_graph_report_and_log(tmp_path):
