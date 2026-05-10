@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import subprocess
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -33,6 +35,16 @@ PRIMARY_ARTIFACTS = {
         "16_book/appendices/references.md",
     ),
 }
+
+
+@dataclass
+class ShardSpec:
+    stage: str
+    shard_id: str
+    agent: str
+    model: str
+    prompt: str
+    expected_outputs: list[str]
 
 
 def now_iso() -> str:
@@ -180,6 +192,104 @@ def run_stage_11_merge(run_dir: Path) -> None:
     report_tmp_path.replace(report_path)
 
     append_run_log(run_dir, "11", "merged", f"{verified_edges} verified edges")
+
+
+def expected_outputs_exist(run_dir: Path, spec: ShardSpec) -> bool:
+    return all((run_dir / rel).exists() for rel in spec.expected_outputs)
+
+
+def _shard_dir(run_dir: Path, spec: ShardSpec) -> Path:
+    path = ensure_run_control(run_dir) / "stages" / spec.stage / "shards"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _write_shard_manifest(
+    run_dir: Path,
+    spec: ShardSpec,
+    *,
+    attempt: int,
+    status: str,
+    returncode: int | None,
+    stdout_path: Path,
+    stderr_path: Path,
+) -> None:
+    path = _shard_dir(run_dir, spec) / f"{spec.shard_id}.json"
+    payload = {
+        "stage": spec.stage,
+        "shard_id": spec.shard_id,
+        "agent": spec.agent,
+        "model": spec.model,
+        "attempt": attempt,
+        "expected_outputs": spec.expected_outputs,
+        "status": status,
+        "returncode": returncode,
+        "stdout_path": str(stdout_path.relative_to(run_dir)),
+        "stderr_path": str(stderr_path.relative_to(run_dir)),
+        "updated_at": now_iso(),
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def _codex_exec_command(spec: ShardSpec) -> list[str]:
+    return [
+        "codex",
+        "exec",
+        "--cd",
+        str(REPO_ROOT),
+        "--model",
+        spec.model,
+        "--ask-for-approval",
+        "never",
+        spec.prompt,
+    ]
+
+
+def run_shards(run_dir: Path, specs: list[ShardSpec], *, max_retries: int = 1) -> None:
+    for spec in specs:
+        if expected_outputs_exist(run_dir, spec):
+            continue
+
+        for attempt in range(1, max_retries + 2):
+            shard_dir = _shard_dir(run_dir, spec)
+            stdout_path = shard_dir / f"{spec.shard_id}.attempt-{attempt}.stdout.txt"
+            stderr_path = shard_dir / f"{spec.shard_id}.attempt-{attempt}.stderr.txt"
+            with stdout_path.open("w") as out, stderr_path.open("w") as err:
+                completed = subprocess.run(
+                    _codex_exec_command(spec),
+                    cwd=REPO_ROOT,
+                    text=True,
+                    stdout=out,
+                    stderr=err,
+                )
+
+            status = (
+                "completed"
+                if completed.returncode == 0 and expected_outputs_exist(run_dir, spec)
+                else "failed"
+            )
+            _write_shard_manifest(
+                run_dir,
+                spec,
+                attempt=attempt,
+                status=status,
+                returncode=completed.returncode,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+            )
+            if status == "completed":
+                break
+
+        if not expected_outputs_exist(run_dir, spec):
+            append_run_log(
+                run_dir,
+                spec.stage,
+                "failed",
+                f"{spec.shard_id} missing expected outputs",
+            )
+            raise RuntimeError(
+                f"Shard {spec.stage}/{spec.shard_id} did not produce expected outputs"
+            )
 
 
 def main(argv: list[str] | None = None) -> int:
