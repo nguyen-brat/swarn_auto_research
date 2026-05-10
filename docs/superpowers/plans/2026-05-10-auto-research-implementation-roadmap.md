@@ -44,6 +44,14 @@ The SDK pilot plan is independent:
 
 Run the SDK pilot first if you want to validate `run_one_shot`; otherwise it can wait until after the book shards.
 
+## Reliability Follow-Up
+
+Before running more long end-to-end pilots, implement:
+
+- `docs/superpowers/plans/2026-05-10-auto-research-durable-runner.md`
+
+This runner fixes the observed failure mode where an interactive parent session stops after one shard returns while later shard notifications arrive after task completion.
+
 ## Agent Strategy
 
 Use sequential subagent-driven development. Do not run implementation agents in parallel across shards because the shards repeatedly touch `swarn_research_mcp/research_book.py`, `tests/`, and `.agents/skills/`.

@@ -5,6 +5,17 @@ description: Run the auto-research pipeline end-to-end for one topic — Book_st
 
 # Auto Research Orchestrator
 
+## Preferred durable runner
+
+For end-to-end runs, prefer:
+
+```bash
+python scripts/run_auto_research.py --topic "<topic>" --phase draft
+python scripts/run_auto_research.py --run-id <run_id> --phase write --resume
+```
+
+The Python runner owns durable stage state, shard manifests, artifact checks, retries, and deterministic merges. This skill remains the behavioral contract for every stage, but an interactive parent Codex session should not be the long-running control plane for full end-to-end runs.
+
 ## Inputs
 - `topic` (required for `phase=draft|all`)
 - `phase` ∈ {`draft`, `write`, `all`}, default `all`
