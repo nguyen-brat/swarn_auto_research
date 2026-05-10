@@ -158,9 +158,9 @@ def run_stage_11_merge(run_dir: Path) -> None:
         [
             "# Verified graph report",
             "",
-            f"Nodes count: {len(graph['nodes'])}",
-            f"Verified edges count: {len(graph['edges'])}",
-            f"Weak edges not promoted count: {weak_edge_count}",
+            f"- Nodes: {len(graph['nodes'])}",
+            f"- Verified edges: {len(graph['edges'])}",
+            f"- Weak edges not promoted: {weak_edge_count}",
             "",
         ]
     )

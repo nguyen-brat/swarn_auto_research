@@ -30,14 +30,24 @@ def test_merge_verified_graph_fragments_dedupes_nodes_and_edges(tmp_path):
         run,
         "1.2",
         [{"id": "1.2", "type": "Paper"}, {"id": "looped-transformer", "type": "Method"}],
-        [{
-            "src": "1.2",
-            "dst": "looped-transformer",
-            "type": "USES",
-            "confidence": "verified",
-            "source_node_id": "s.2",
-            "source_lines": [3, 4],
-        }],
+        [
+            {
+                "src": "1.1",
+                "dst": "looped-transformer",
+                "type": "INTRODUCES",
+                "confidence": "verified",
+                "source_node_id": "s.1",
+                "source_lines": [1, 2],
+            },
+            {
+                "src": "1.2",
+                "dst": "looped-transformer",
+                "type": "USES",
+                "confidence": "verified",
+                "source_node_id": "s.2",
+                "source_lines": [3, 4],
+            },
+        ],
     )
 
     graph = merge_verified_graph_fragments(run)
@@ -74,5 +84,9 @@ def test_run_stage_11_merge_writes_global_graph_report_and_log(tmp_path):
     report = run / "11_verified_graph" / "graph_report.md"
     assert global_graph.exists()
     assert report.exists()
-    assert "Verified graph report" in report.read_text()
+    report_text = report.read_text()
+    assert "Verified graph report" in report_text
+    assert "- Nodes: 2" in report_text
+    assert "- Verified edges: 1" in report_text
+    assert "- Weak edges not promoted: 1" in report_text
     assert "11,merged" in (run / "run_log.csv").read_text()
