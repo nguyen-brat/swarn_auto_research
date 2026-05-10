@@ -256,6 +256,66 @@ def _write_markdown_preserving_front_matter(path: Path, body: str) -> None:
     path.write_text(prefix + body.rstrip() + "\n", encoding="utf-8")
 
 
+def collect_excluded(run_dir: Path | str) -> list[dict[str, str]]:
+    """Return chapters whose front-matter status starts with excluded_."""
+    run_path = Path(run_dir)
+    offenders: list[dict[str, str]] = []
+    for sub in ("families", "methods", "book"):
+        directory = run_path / "14_chapters" / sub
+        if not directory.exists():
+            continue
+        for path in sorted(directory.glob("*.md")):
+            front, _ = _split_front_matter(path.read_text(encoding="utf-8"))
+            if not front:
+                continue
+            chapter_id = ""
+            status = ""
+            reason = ""
+            for line in front.splitlines():
+                line = line.strip()
+                if line.startswith("chapter_id:"):
+                    chapter_id = line.split(":", 1)[1].strip().strip('"').strip("'")
+                elif line.startswith("status:"):
+                    status = line.split(":", 1)[1].strip().strip('"').strip("'")
+                elif line.startswith("status_reason:"):
+                    reason = line.split(":", 1)[1].strip().strip('"').strip("'")
+            if status.startswith("excluded_"):
+                offenders.append(
+                    {
+                        "type": sub,
+                        "id": chapter_id or path.stem,
+                        "status": status,
+                        "reason": reason,
+                    }
+                )
+    return offenders
+
+
+def write_needs_review(run_dir: Path | str, offenders: list[dict[str, str]]) -> None:
+    """Emit a review file for quarantined chapters and citation issues."""
+    out = Path(run_dir) / "16_book" / "NEEDS_REVIEW.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# Needs Review",
+        "",
+        "These chapters or citations need review. Excluded chapters are NOT linked from SUMMARY.md.",
+        "Excluded chapters remain on disk under `14_chapters/` and can be re-attempted with",
+        "`phase=write fix_excluded=true`.",
+        "Missing citation metadata is surfaced here while the book still renders.",
+        "",
+        "## Items",
+        "",
+    ]
+    if not offenders:
+        lines.append("_(none - every chapter and citation passed)_")
+    for offender in offenders:
+        lines.append(
+            f"- **{offender['type']}/{offender['id']}** - "
+            f"`{offender['status']}` ({offender['reason']})"
+        )
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _validate_parts(outline: dict[str, Any], families: list[dict[str, Any]]) -> list[dict[str, str]]:
     issues: list[dict[str, str]] = []
     parts = outline.get("parts")
@@ -928,12 +988,20 @@ def _build_appendices_dir(run_dir: Path, outline: dict[str, Any]) -> list[dict[s
     return citation_issues
 
 
-def _build_summary(outline: dict[str, Any]) -> str:
+def _build_summary(
+    outline: dict[str, Any],
+    excluded: set[str] | None = None,
+    excluded_book_ids: set[str] | None = None,
+) -> str:
+    excluded = excluded or set()
+    excluded_book_ids = excluded_book_ids or set()
     methods = _method_by_id(outline)
     family_by_id = {family["id"]: family for family in outline.get("families", [])}
     lines = ["# Summary", "", "## Book", ""]
     for section in outline.get("book_sections", []):
         section_id = section["id"]
+        if section_id in excluded_book_ids:
+            continue
         filename = BOOK_FILE_BY_ID.get(section_id)
         if not filename:
             continue
@@ -949,14 +1017,16 @@ def _build_summary(outline: dict[str, Any]) -> str:
             family = family_by_id.get(family_id)
             if not family:
                 continue
-            if family.get("is_group"):
-                for method_id in family.get("method_ids", []):
+            family_excluded = family_id in excluded
+            passed_methods = [method_id for method_id in (family.get("method_ids") or []) if method_id not in excluded]
+            if family.get("is_group") or family_excluded:
+                for method_id in passed_methods:
                     method = methods.get(method_id)
                     if method:
                         lines.append(f"- [{method['title']}](../14_chapters/methods/{method_id}.md)")
             else:
                 lines.append(f"- [{family['title']}](../14_chapters/families/{family_id}.md)")
-                for method_id in family.get("method_ids", []):
+                for method_id in passed_methods:
                     method = methods.get(method_id)
                     if method:
                         lines.append(f"  - [{method['title']}](../14_chapters/methods/{method_id}.md)")
@@ -1021,13 +1091,33 @@ def generate_book_artifacts(run_dir: Path | str) -> dict[str, int]:
     run_path = Path(run_dir)
     outline = _outline(run_path)
     assert_no_singletons(outline)
+    offenders = collect_excluded(run_path)
+    excluded_family_method_ids = {o["id"] for o in offenders if o["type"] in ("families", "methods")}
+    excluded_book_ids = {o["id"] for o in offenders if o["type"] == "book"}
+
     taxonomy_path = run_path / "14_chapters" / "book" / BOOK_FILE_BY_ID["method_taxonomy"]
-    _write_markdown_preserving_front_matter(taxonomy_path, _build_method_taxonomy(outline))
-    _citation_issues = _build_appendices_dir(run_path, outline)
+    _write_markdown_preserving_front_matter(
+        taxonomy_path, _build_method_taxonomy(outline, excluded_family_method_ids)
+    )
+    citation_issues = _build_appendices_dir(run_path, outline)
+    all_needs_review = offenders + citation_issues
+    write_needs_review(run_path, all_needs_review)
+
     (run_path / "16_book").mkdir(parents=True, exist_ok=True)
-    (run_path / "16_book" / "SUMMARY.md").write_text(_build_summary(outline) + "\n", encoding="utf-8")
-    _write_json(run_path / "16_book" / "sidebar.json", _build_sidebar(outline))
-    return {"families": len(outline.get("families", [])), "methods": len(outline.get("methods", []))}
+    (run_path / "16_book" / "SUMMARY.md").write_text(
+        _build_summary(outline, excluded_family_method_ids, excluded_book_ids) + "\n",
+        encoding="utf-8",
+    )
+    _write_json(
+        run_path / "16_book" / "sidebar.json",
+        _build_sidebar(outline, excluded_family_method_ids, excluded_book_ids),
+    )
+    return {
+        "families": len(outline.get("families", [])),
+        "methods": len(outline.get("methods", [])),
+        "quarantined": len(offenders),
+        "needs_review": len(all_needs_review),
+    }
 
 
 def main() -> None:
