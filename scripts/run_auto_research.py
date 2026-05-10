@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -418,6 +419,60 @@ def run_stage_11(run_dir: Path) -> None:
     if still_missing:
         raise RuntimeError(f"Stage 11 still missing fragments: {still_missing}")
     run_stage_11_merge(run_dir)
+
+
+def run_deterministic_command(run_dir: Path, stage: str, cmd: list[str]) -> None:
+    completed = subprocess.run(cmd, cwd=REPO_ROOT, text=True, capture_output=True)
+    detail = " ".join(cmd)
+    if completed.returncode != 0:
+        stage_dir = ensure_run_control(run_dir) / "stages" / stage
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        (stage_dir / "last_stdout.txt").write_text(completed.stdout)
+        (stage_dir / "last_stderr.txt").write_text(completed.stderr)
+        append_run_log(run_dir, stage, "failed", detail)
+        raise RuntimeError(f"stage {stage} command failed: {detail}")
+    append_run_log(run_dir, stage, "completed", detail)
+
+
+def run_stage_12_5(run_dir: Path) -> None:
+    run_deterministic_command(
+        run_dir,
+        "12.5",
+        [
+            sys.executable,
+            "-m",
+            "swarn_research_mcp.research_book",
+            str(run_dir),
+            "--normalize-outline",
+        ],
+    )
+
+
+def run_stage_18(run_dir: Path) -> None:
+    run_deterministic_command(
+        run_dir,
+        "18",
+        [
+            sys.executable,
+            "-m",
+            "swarn_research_mcp.research_book",
+            str(run_dir),
+            "--generate",
+        ],
+    )
+    run_deterministic_command(
+        run_dir,
+        "18",
+        [
+            sys.executable,
+            "-m",
+            "swarn_research_mcp.research_book",
+            str(run_dir),
+            "--validate",
+        ],
+    )
+    if not primary_artifact_exists(run_dir, "18"):
+        raise RuntimeError("Stage 18 did not produce book artifacts")
 
 
 def main(argv: list[str] | None = None) -> int:
