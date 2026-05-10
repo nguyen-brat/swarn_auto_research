@@ -147,6 +147,36 @@ def test_no_op_when_all_families_have_two_methods():
     assert after == before
 
 
+def test_merge_prunes_invalid_neighbor_links_even_without_singletons():
+    families = [
+        {
+            "id": "fam_a",
+            "title": "A",
+            "method_ids": ["m1", "m2"],
+            "neighbor_family_ids": ["fam_b", "removed_family"],
+        },
+        {
+            "id": "fam_b",
+            "title": "B",
+            "method_ids": ["m3", "m4"],
+            "neighbor_family_ids": ["fam_a", "unknown_family"],
+        },
+    ]
+    methods = [
+        {"id": "m1", "arxiv_id": "1.1", "family_id": "fam_a", "neighbor_method_ids": ["m3", "missing_method"]},
+        {"id": "m2", "arxiv_id": "1.2", "family_id": "fam_a"},
+        {"id": "m3", "arxiv_id": "1.3", "family_id": "fam_b", "neighbor_method_ids": ["m1"]},
+        {"id": "m4", "arxiv_id": "1.4", "family_id": "fam_b"},
+    ]
+    after = merge_singletons(_outline(families, methods))
+    family_by_id = {f["id"]: f for f in after["families"]}
+    method_by_id = {m["id"]: m for m in after["methods"]}
+
+    assert family_by_id["fam_a"]["neighbor_family_ids"] == ["fam_b"]
+    assert family_by_id["fam_b"]["neighbor_family_ids"] == ["fam_a"]
+    assert method_by_id["m1"]["neighbor_method_ids"] == ["m3"]
+
+
 def test_assert_no_singletons_raises_on_unmerged_outline():
     from swarn_research_mcp.research_book import assert_no_singletons
 

@@ -784,6 +784,25 @@ def _has_strong_graph_evidence(singleton: dict, candidate: dict, method_by_id: d
     return _graph_evidence_score(singleton, candidate, method_by_id) > 0
 
 
+def _prune_invalid_outline_links(outline: dict[str, Any]) -> dict[str, Any]:
+    families = outline.get("families", []) or []
+    methods = outline.get("methods", []) or []
+    family_ids = {family["id"] for family in families}
+    method_ids = {method["id"] for method in methods}
+
+    for family in families:
+        neighbors = family.get("neighbor_family_ids")
+        if neighbors is not None:
+            family["neighbor_family_ids"] = [fid for fid in neighbors if fid in family_ids and fid != family["id"]]
+
+    for method in methods:
+        neighbors = method.get("neighbor_method_ids")
+        if neighbors is not None:
+            method["neighbor_method_ids"] = [mid for mid in neighbors if mid in method_ids and mid != method["id"]]
+
+    return outline
+
+
 def merge_singletons(outline: dict[str, Any]) -> dict[str, Any]:
     """Stage 12.5 post-processor for singleton families."""
     out = _copy.deepcopy(outline)
@@ -801,7 +820,7 @@ def merge_singletons(outline: dict[str, Any]) -> dict[str, Any]:
         key=lambda f: f["id"],
     )
     if not original_singletons:
-        return out
+        return _prune_invalid_outline_links(out)
 
     for singleton in original_singletons:
         sid = singleton["id"]
@@ -861,7 +880,7 @@ def merge_singletons(outline: dict[str, Any]) -> dict[str, Any]:
     parts = [p for p in parts if (p.get("family_ids") or []) or p.get("id") == STANDALONE_PART_ID]
     out["families"] = families
     out["parts"] = parts
-    return out
+    return _prune_invalid_outline_links(out)
 
 
 def assert_no_singletons(outline: dict[str, Any]) -> None:
