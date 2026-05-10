@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -122,6 +123,20 @@ def _validate_shard_spec(spec: ShardSpec) -> None:
     _safe_component(spec.shard_id, field="shard_id")
     for rel in spec.expected_outputs:
         _safe_relative_path(rel, field="expected output")
+
+
+def verified_graph_fragment_filename(arxiv_id: str) -> str:
+    return f"{quote(str(arxiv_id), safe='')}.json"
+
+
+def verified_graph_fragment_relpath(arxiv_id: str) -> str:
+    return f"11_verified_graph/fragments/{verified_graph_fragment_filename(arxiv_id)}"
+
+
+def _stable_stage_11_shard_id(arxiv_id: str) -> str:
+    stem = verified_graph_fragment_filename(arxiv_id).removesuffix(".json")
+    safe_stem = stem.replace("%", "pct")
+    return f"vgraph-resume-{safe_stem}"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -347,6 +362,10 @@ def load_promoted_arxiv_ids(run_dir: Path) -> list[str]:
 
 
 def _stage_11_prompt(run_id: str, shard_id: str, arxiv_ids: list[str]) -> str:
+    output_files = {
+        arxiv_id: f"11_verified_graph/fragments/{verified_graph_fragment_filename(arxiv_id)}"
+        for arxiv_id in arxiv_ids
+    }
     return "\n".join(
         [
             "Read AGENTS.md first.",
@@ -356,7 +375,8 @@ def _stage_11_prompt(run_id: str, shard_id: str, arxiv_ids: list[str]) -> str:
             f"arxiv_ids={arxiv_ids}",
             "Follow .codex/agents/verified_graph_extractor.toml and .agents/skills/verified-graph-extraction/SKILL.md.",
             "Read 10_verified_evidence and 05_weak_graph/fragments for these ids.",
-            "Write only 11_verified_graph/fragments/{arxiv_id}.json.",
+            "Write only the 11_verified_graph/fragments/{arxiv_id}.json fragment files named below.",
+            f"Use these exact output files: {output_files}",
             "Do not write 11_verified_graph/global_graph.json.",
             "Return the standard short success string.",
         ]
@@ -373,18 +393,18 @@ def run_stage_11(run_dir: Path) -> None:
     missing = [
         aid
         for aid in promoted
-        if not (run_dir / "11_verified_graph" / "fragments" / f"{aid}.json").exists()
+        if not (run_dir / verified_graph_fragment_relpath(aid)).exists()
     ]
     specs = [
         ShardSpec(
             stage="11",
-            shard_id=f"vgraph-resume-{idx:03d}",
+            shard_id=_stable_stage_11_shard_id(aid),
             agent="verified_graph_extractor",
             model="gpt-5.4-mini",
-            prompt=_stage_11_prompt(run_id, f"vgraph-resume-{idx:03d}", [aid]),
-            expected_outputs=[f"11_verified_graph/fragments/{aid}.json"],
+            prompt=_stage_11_prompt(run_id, _stable_stage_11_shard_id(aid), [aid]),
+            expected_outputs=[verified_graph_fragment_relpath(aid)],
         )
-        for idx, aid in enumerate(missing, start=1)
+        for aid in missing
     ]
     if specs:
         append_run_log(run_dir, "11", "dispatching", f"{len(specs)} missing fragments")
@@ -393,7 +413,7 @@ def run_stage_11(run_dir: Path) -> None:
     still_missing = [
         aid
         for aid in promoted
-        if not (run_dir / "11_verified_graph" / "fragments" / f"{aid}.json").exists()
+        if not (run_dir / verified_graph_fragment_relpath(aid)).exists()
     ]
     if still_missing:
         raise RuntimeError(f"Stage 11 still missing fragments: {still_missing}")

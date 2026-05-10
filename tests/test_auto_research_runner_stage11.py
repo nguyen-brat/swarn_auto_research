@@ -198,7 +198,7 @@ def test_run_stage_11_dispatches_only_missing_fragments(tmp_path):
 
     def fake_run_shards(run_dir, specs, max_retries=1):
         assert len(specs) == 1
-        assert specs[0].shard_id == "vgraph-resume-001"
+        assert specs[0].shard_id == "vgraph-resume-1.2"
         assert specs[0].expected_outputs == ["11_verified_graph/fragments/1.2.json"]
         _write_fragment(
             run_dir,
@@ -212,6 +212,44 @@ def test_run_stage_11_dispatches_only_missing_fragments(tmp_path):
                 "source_node_id": "s.2",
                 "source_lines": [2],
             }],
+        )
+
+    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+        run_stage_11(run)
+
+    assert (run / "11_verified_graph" / "global_graph.json").exists()
+
+
+def test_run_stage_11_uses_flat_fragment_paths_for_old_arxiv_ids(tmp_path):
+    run = tmp_path / "run"
+    (run / "07_scoring").mkdir(parents=True)
+    (run / "07_scoring" / "promoted_papers.json").write_text(
+        json.dumps({"promoted_papers": [{"arxiv_id": "hep-th/9901001"}]})
+    )
+
+    def fake_run_shards(run_dir, specs, max_retries=1):
+        assert len(specs) == 1
+        assert specs[0].shard_id == "vgraph-resume-hep-thpct2F9901001"
+        assert specs[0].expected_outputs == [
+            "11_verified_graph/fragments/hep-th%2F9901001.json"
+        ]
+        path = run_dir / specs[0].expected_outputs[0]
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "arxiv_id": "hep-th/9901001",
+                    "nodes": [{"id": "hep-th/9901001", "type": "Paper"}],
+                    "edges": [{
+                        "src": "hep-th/9901001",
+                        "dst": "hep-th/9901001",
+                        "type": "USES",
+                        "confidence": "verified",
+                        "source_node_id": "s.1",
+                        "source_lines": [1],
+                    }],
+                }
+            )
         )
 
     with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
