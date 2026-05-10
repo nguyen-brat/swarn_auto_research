@@ -290,6 +290,7 @@ def run_shards(
         if expected_outputs_exist(run_dir, spec):
             continue
 
+        shard_completed = False
         for attempt in range(1, max_retries + 2):
             shard_dir = _shard_dir(run_dir, spec)
             stdout_path = shard_dir / f"{spec.shard_id}.attempt-{attempt}.stdout.txt"
@@ -324,9 +325,10 @@ def run_shards(
                 stderr_path=stderr_path,
             )
             if status == "completed":
+                shard_completed = True
                 break
 
-        if not expected_outputs_exist(run_dir, spec):
+        if not shard_completed:
             append_run_log(
                 run_dir,
                 spec.stage,
