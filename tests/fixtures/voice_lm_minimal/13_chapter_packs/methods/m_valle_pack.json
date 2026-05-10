@@ -1,0 +1,8 @@
+{
+  "method_id": "m_valle",
+  "structured": {
+    "equations": [{"latex": "p(c|x)", "symbols": [{"name": "c", "description": "codec token"}]}],
+    "datasets": [{"name": "LibriSpeech"}],
+    "artifacts": [{"name": "EnCodec"}, {"name": "WavLM-TDNN"}]
+  }
+}

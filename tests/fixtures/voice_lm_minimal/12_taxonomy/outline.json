@@ -1,0 +1,22 @@
+{
+  "topic": "voice language models",
+  "book_sections": [
+    {"id": "preface", "title": "Preface"},
+    {"id": "motivating_intro", "title": "Motivating Introduction"},
+    {"id": "core_concepts", "title": "Core Concepts"},
+    {"id": "goals", "title": "Goals"},
+    {"id": "method_taxonomy", "title": "Method Taxonomy"},
+    {"id": "shared_examples", "title": "Shared Examples"},
+    {"id": "evaluation_outlook", "title": "Evaluation and Outlook"},
+    {"id": "appendices", "title": "Appendices"}
+  ],
+  "families": [
+    {"id": "fam_codec", "title": "discrete codec tokens", "method_ids": ["m_valle"], "neighbor_family_ids": ["fam_flow"]},
+    {"id": "fam_flow", "title": "flow matching", "method_ids": ["m_voicebox", "m_excluded"], "neighbor_family_ids": ["fam_codec"]}
+  ],
+  "methods": [
+    {"id": "m_valle", "title": "VALL-E", "arxiv_id": "2301.02111", "family_id": "fam_codec", "neighbor_method_ids": ["m_voicebox"]},
+    {"id": "m_voicebox", "title": "Voicebox", "arxiv_id": "2406.18009", "family_id": "fam_flow", "neighbor_method_ids": ["m_valle"]},
+    {"id": "m_excluded", "title": "Broken Method", "arxiv_id": "2410.06885", "family_id": "fam_flow", "neighbor_method_ids": []}
+  ]
+}

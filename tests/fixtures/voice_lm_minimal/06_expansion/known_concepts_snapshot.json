@@ -1,0 +1,4 @@
+{"known_concepts": [
+  {"name": "transformer", "definition": "stack of self-attention blocks"},
+  {"name": "tokenizer", "definition": "discretizer mapping signal to symbols"}
+]}
