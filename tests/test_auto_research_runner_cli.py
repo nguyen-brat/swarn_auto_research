@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from scripts.run_auto_research import (
     build_chapter_targets,
+    main,
     run_deterministic_command,
     run_stage_13,
     run_stage_14,
@@ -278,3 +279,23 @@ def _write_outline(run, *, book_sections=None):
         "methods": [{"id": "m1", "title": "M1", "arxiv_id": "1.1", "family_id": "fam_a"}],
     }
     (run / "12_taxonomy" / "outline.json").write_text(json.dumps(outline))
+
+
+def test_main_resume_from_stage_11_calls_stage_11(tmp_path, monkeypatch):
+    run = tmp_path / "research_runs" / "demo"
+    run.mkdir(parents=True)
+    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    calls = []
+
+    def fake_stage(run_dir):
+        calls.append(run_dir.name)
+
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_11", fake_stage)
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_12", lambda run_dir: None)
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_12_5", lambda run_dir: None)
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_13", lambda run_dir: None)
+
+    rc = main(["--run-id", "demo", "--phase", "draft", "--resume", "--from-stage", "11"])
+
+    assert rc == 0
+    assert calls == ["demo"]

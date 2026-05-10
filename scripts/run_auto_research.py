@@ -810,31 +810,64 @@ def main(argv: list[str] | None = None) -> int:
     if not args.topic and not args.run_id:
         raise SystemExit("one of --topic or --run-id is required")
 
-    run_id = args.run_id or "pending-topic-run"
+    run_id = args.run_id
+    if run_id is None:
+        raise SystemExit(
+            "new-run creation is not implemented until Task 8; pass --run-id for now"
+        )
     run_dir = RUNS_ROOT / run_id
-    ensure_run_control(run_dir)
-    state = load_run_state(run_dir)
-    topic = args.topic or state.get("topic", "")
-    if args.resume:
-        current_stage = args.from_stage or state.get("current_stage", "0")
-        last_completed_stage = state.get("last_completed_stage")
-    else:
-        current_stage = args.from_stage or "0"
-        last_completed_stage = None
+    if not run_dir.exists():
+        raise SystemExit(f"run directory does not exist: {run_dir}")
 
-    save_run_state(
-        run_dir,
+    state = load_run_state(run_dir)
+    handlers = [
+        ("11", run_stage_11),
+        ("12", run_stage_12),
+        ("12.5", run_stage_12_5),
+        ("13", run_stage_13),
+    ]
+    if args.phase in {"write", "all"}:
+        handlers.extend(
+            [
+                ("14", run_stage_14),
+                ("15", run_stage_15),
+                ("16", run_stage_16),
+                ("17", run_stage_17),
+                ("18", run_stage_18),
+            ]
+        )
+
+    start = args.from_stage or state.get("current_stage") or handlers[0][0]
+    state.update(
         {
             "run_id": run_id,
             "phase": args.phase,
-            "topic": topic,
-            "status": "ready",
-            "current_stage": current_stage,
-            "last_completed_stage": last_completed_stage,
-            "resume": args.resume,
-        },
+            "topic": args.topic or state.get("topic", ""),
+            "status": "running",
+            "current_stage": start,
+        }
     )
-    print("runner ready")
+    save_run_state(run_dir, state)
+
+    active = False
+    for stage, handler in handlers:
+        if stage == start:
+            active = True
+        if not active:
+            continue
+
+        save_run_state(
+            run_dir,
+            {**load_run_state(run_dir), "current_stage": stage, "status": "running"},
+        )
+        handler(run_dir)
+        save_run_state(
+            run_dir,
+            {**load_run_state(run_dir), "last_completed_stage": stage},
+        )
+
+    save_run_state(run_dir, {**load_run_state(run_dir), "status": "completed"})
+    print(f"{args.phase} phase complete. run_id={run_id}")
     return 0
 
 
