@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from scripts.run_auto_research import (
     bootstrap_new_run,
+    build_deterministic_stage_13_packs,
     build_chapter_targets,
     main,
     run_deterministic_command,
@@ -144,7 +145,10 @@ def test_run_stage_13_uses_pack_suffixes_and_stable_shard_ids(tmp_path):
     def fake_run_shards(run_dir, specs, max_retries=1):
         captured.extend(specs)
 
-    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+    with (
+        patch("scripts.run_auto_research.build_deterministic_stage_13_packs"),
+        patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards),
+    ):
         run_stage_13(run)
 
     assert [spec.shard_id for spec in captured] == ["pack-001", "pack-002"]
@@ -160,7 +164,10 @@ def test_run_stage_13_uses_pack_suffixes_and_stable_shard_ids(tmp_path):
     (run / "13_chapter_packs" / "book").mkdir(parents=True)
     (run / "13_chapter_packs" / "book" / "preface_pack.json").write_text("{}")
     captured.clear()
-    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+    with (
+        patch("scripts.run_auto_research.build_deterministic_stage_13_packs"),
+        patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards),
+    ):
         run_stage_13(run)
 
     assert [spec.shard_id for spec in captured] == ["pack-001", "pack-002"]
@@ -168,6 +175,150 @@ def test_run_stage_13_uses_pack_suffixes_and_stable_shard_ids(tmp_path):
         "13_chapter_packs/book/preface_pack.json",
         "13_chapter_packs/families/fam_a_pack.json",
     ]
+
+
+def test_build_deterministic_stage_13_packs_from_verified_evidence(tmp_path):
+    run = tmp_path / "run"
+    _write_outline(run)
+    _write_stage_13_sources(run)
+
+    result = build_deterministic_stage_13_packs(run)
+
+    assert result == {"book": 1, "families": 1, "methods": 1, "skipped": 0}
+    method_pack = json.loads(
+        (run / "13_chapter_packs" / "methods" / "m1_pack.json").read_text()
+    )
+    assert method_pack["pack_type"] == "method"
+    assert method_pack["method_id"] == "m1"
+    assert method_pack["arxiv_id"] == "1.1"
+    assert method_pack["structured"]["equations"] == [
+        {
+            "latex": "x = y",
+            "purpose": "core equation",
+            "symbols": [],
+            "source_node_id": "s.02",
+            "source_lines": [3, 4],
+        }
+    ]
+    assert [section["section_title"] for section in method_pack["section_plan"]] == [
+        "Summary",
+        "Motivation",
+        "Intuition",
+        "Theory",
+        "Algorithm",
+        "Example",
+        "Interpretation",
+        "Strengths",
+        "Limitations",
+        "Software",
+        "Related Methods",
+    ]
+    sections = {
+        section["section_title"]: section["source_nodes"]
+        for section in method_pack["section_plan"]
+    }
+    for required in ("Theory", "Algorithm", "Example", "Limitations"):
+        assert sections[required]
+        assert sections[required][0]["section_text"].strip()
+        assert sections[required][0]["arxiv_id"] == "1.1"
+
+    family_pack = json.loads(
+        (run / "13_chapter_packs" / "families" / "fam_a_pack.json").read_text()
+    )
+    assert family_pack["pack_type"] == "family"
+    assert family_pack["method_ids"] == [
+        {"id": "m1", "title": "M1", "arxiv_id": "1.1"}
+    ]
+    assert family_pack["comparison_rows"][0]["source_node_id"] == "s.02"
+    assert family_pack["data"]["method_ids"] == [
+        {"id": "m1", "title": "M1", "arxiv_id": "1.1"}
+    ]
+    assert family_pack["data"]["comparison_rows"][0]["source_node_id"] == "s.02"
+
+    book_pack = json.loads(
+        (run / "13_chapter_packs" / "book" / "preface_pack.json").read_text()
+    )
+    assert book_pack["pack_type"] == "book"
+    assert book_pack["section_id"] == "preface"
+    assert book_pack["data"]["topic"] == "Fixture topic"
+
+
+def test_run_stage_13_uses_deterministic_builder_before_codex_shards(tmp_path):
+    run = tmp_path / "run"
+    _write_outline(run)
+    _write_stage_13_sources(run)
+
+    with patch("scripts.run_auto_research.run_shards") as run_shards:
+        run_stage_13(run)
+
+    run_shards.assert_not_called()
+    assert (run / "13_chapter_packs" / "book" / "preface_pack.json").exists()
+    assert (run / "13_chapter_packs" / "families" / "fam_a_pack.json").exists()
+    assert (run / "13_chapter_packs" / "methods" / "m1_pack.json").exists()
+
+
+def test_build_deterministic_stage_13_reads_wrapped_pageindex_nodes(tmp_path):
+    run = tmp_path / "run"
+    _write_outline(run)
+    _write_stage_13_sources(run, wrap_nodes=True)
+
+    build_deterministic_stage_13_packs(run)
+
+    method_pack = json.loads(
+        (run / "13_chapter_packs" / "methods" / "m1_pack.json").read_text()
+    )
+    theory_nodes = [
+        section["source_nodes"]
+        for section in method_pack["section_plan"]
+        if section["section_title"] == "Theory"
+    ][0]
+    assert theory_nodes[0]["section_title"] == "Method"
+    assert theory_nodes[0]["section_text"] == "## Method\nThe method uses x = y to update state.\n"
+
+
+def test_build_deterministic_stage_13_does_not_write_invalid_method_pack(tmp_path):
+    run = tmp_path / "run"
+    _write_outline(run)
+    _write_stage_13_sources(run, omit_required_specific_sources=True)
+
+    result = build_deterministic_stage_13_packs(run)
+
+    assert result == {"book": 1, "families": 1, "methods": 0, "skipped": 0}
+    assert not (run / "13_chapter_packs" / "methods" / "m1_pack.json").exists()
+
+
+def test_build_deterministic_stage_13_repairs_invalid_existing_method_pack(tmp_path):
+    run = tmp_path / "run"
+    _write_outline(run)
+    _write_stage_13_sources(run)
+    invalid_pack = run / "13_chapter_packs" / "methods" / "m1_pack.json"
+    invalid_pack.parent.mkdir(parents=True, exist_ok=True)
+    invalid_pack.write_text(
+        json.dumps({"pack_type": "method", "method_id": "m1", "section_plan": []})
+    )
+
+    result = build_deterministic_stage_13_packs(run)
+
+    assert result["methods"] == 1
+    repaired = json.loads(invalid_pack.read_text())
+    assert [section["section_title"] for section in repaired["section_plan"]] == [
+        "Summary",
+        "Motivation",
+        "Intuition",
+        "Theory",
+        "Algorithm",
+        "Example",
+        "Interpretation",
+        "Strengths",
+        "Limitations",
+        "Software",
+        "Related Methods",
+    ]
+    assert all(
+        section["source_nodes"][0]["section_text"].strip()
+        for section in repaired["section_plan"]
+        if section["section_title"] in {"Theory", "Algorithm", "Example", "Limitations"}
+    )
 
 
 def test_run_stage_14_groups_targets_by_type_and_uses_book_filenames(tmp_path):
@@ -282,6 +433,7 @@ def test_run_stage_16_merges_manifest_shards_in_canonical_order(tmp_path):
 def _write_outline(run, *, book_sections=None):
     (run / "12_taxonomy").mkdir(parents=True, exist_ok=True)
     outline = {
+        "topic": "Fixture topic",
         "book_sections": book_sections
         or [
             {"id": "preface", "title": "Preface"},
@@ -291,6 +443,131 @@ def _write_outline(run, *, book_sections=None):
         "methods": [{"id": "m1", "title": "M1", "arxiv_id": "1.1", "family_id": "fam_a"}],
     }
     (run / "12_taxonomy" / "outline.json").write_text(json.dumps(outline))
+
+
+def _write_stage_13_sources(run, *, wrap_nodes=False, omit_required_specific_sources=False):
+    (run / "00_input").mkdir(parents=True, exist_ok=True)
+    (run / "00_input" / "topic.md").write_text("# Fixture topic\n")
+    (run / "06_expansion").mkdir(parents=True, exist_ok=True)
+    (run / "06_expansion" / "known_concepts_snapshot.json").write_text(
+        json.dumps({"known_concepts": [{"id": "accuracy", "definition": "Correctness."}]})
+    )
+    (run / "06_expansion" / "knowledge_gap_report.json").write_text(
+        json.dumps({"knowledge_gaps": [{"name": "latent reasoning"}]})
+    )
+    (run / "10_verified_evidence").mkdir(parents=True, exist_ok=True)
+    (run / "10_verified_evidence" / "1.1.json").write_text(
+        json.dumps(
+            {
+                "arxiv_id": "1.1",
+                "title": "Fixture Paper",
+                "year": 2026,
+                "claims": [
+                    {
+                        "text": "The method solves the fixture problem.",
+                        "source_node_id": "s.01",
+                        "source_lines": [1, 2],
+                        "claim_type": "motivation",
+                        "confidence": "high",
+                    },
+                    {
+                        "text": "The algorithm applies the equation to update state.",
+                        "source_node_id": "s.02",
+                        "source_lines": [3, 4],
+                        "claim_type": "method",
+                        "confidence": "high",
+                    },
+                ]
+                + (
+                    []
+                    if omit_required_specific_sources
+                    else [
+                        {
+                            "text": "The evaluation uses a small worked example.",
+                            "source_node_id": "s.03",
+                            "source_lines": [5, 6],
+                            "claim_type": "result",
+                            "confidence": "high",
+                        },
+                        {
+                            "text": "The method is limited by noisy supervision.",
+                            "source_node_id": "s.04",
+                            "source_lines": [7, 8],
+                            "claim_type": "limitation",
+                            "confidence": "high",
+                        },
+                    ]
+                ),
+                "equations": []
+                if omit_required_specific_sources
+                else [
+                    {
+                        "latex": "x = y",
+                        "purpose": "core equation",
+                        "symbols": [],
+                        "source_node_id": "s.02",
+                        "source_lines": [3, 4],
+                    }
+                ],
+                "algorithms": []
+                if omit_required_specific_sources
+                else [
+                    {
+                        "name": "Fixture update",
+                        "pseudocode": "state <- update(state)",
+                        "steps": ["Read state", "Update state", "Return state"],
+                        "source_node_id": "s.02",
+                        "source_lines": [3, 4],
+                    }
+                ],
+                "hyperparameters": []
+                if omit_required_specific_sources
+                else [
+                    {"name": "steps", "value": "3", "purpose": "depth", "source_node_id": "s.03"}
+                ],
+                "complexity": [
+                    {"text": "Linear in sequence length.", "regime": "inference", "source_node_id": "s.02"}
+                ],
+                "datasets": [{"name": "FixtureSet", "source_node_id": "s.03"}],
+                "limitations": []
+                if omit_required_specific_sources
+                else [
+                    {"text": "Noisy supervision can hurt.", "source_node_id": "s.04", "source_lines": [7, 8]}
+                ],
+                "neighbors": [],
+            }
+        )
+    )
+    (run / "09_pageindex" / "nodes").mkdir(parents=True, exist_ok=True)
+    nodes = {
+        "s.01": {"id": "s.01", "title": "Introduction", "start_line": 1, "end_line": 2},
+        "s.02": {"id": "s.02", "title": "Method", "start_line": 3, "end_line": 4},
+        "s.03": {"id": "s.03", "title": "Experiments", "start_line": 5, "end_line": 6},
+        "s.04": {"id": "s.04", "title": "Limitations", "start_line": 7, "end_line": 8},
+    }
+    if wrap_nodes:
+        nodes_payload = {"arxiv_id": "1.1", "nodes": nodes}
+    else:
+        nodes_payload = nodes
+    (run / "09_pageindex" / "nodes" / "1.1.nodes.json").write_text(
+        json.dumps(nodes_payload)
+    )
+    (run / "08_full_markdown").mkdir(parents=True, exist_ok=True)
+    (run / "08_full_markdown" / "1.1.md").write_text(
+        "\n".join(
+            [
+                "## Introduction",
+                "The fixture problem motivates the method.",
+                "## Method",
+                "The method uses x = y to update state.",
+                "## Experiments",
+                "A worked example uses three update steps.",
+                "## Limitations",
+                "Noisy supervision can hurt the method.",
+            ]
+        )
+        + "\n"
+    )
 
 
 def test_main_resume_from_stage_11_calls_stage_11(tmp_path, monkeypatch):
