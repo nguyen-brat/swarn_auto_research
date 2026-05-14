@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
+import scripts.run_auto_research as runner
 from scripts.run_auto_research import (
     ShardSpec,
     bootstrap_new_run,
@@ -1105,6 +1106,29 @@ def test_run_stage_16_treats_high_word_count_as_non_blocking(tmp_path):
     statuses = {chapter["chapter_id"]: chapter["status"] for chapter in manifest["chapters"]}
     assert statuses["m_long"] == "passed"
     assert statuses["m_bad"] == "excluded_form_issues"
+
+
+def test_verification_status_accepts_summary_passed_for_backward_compat():
+    target = {"type": "families", "id": "evaluation_benchmarks"}
+    verification = {
+        "summary": {
+            "passed": True,
+            "claims_unsupported": 0,
+            "claims_overstated": 0,
+            "gaps_missing": 0,
+            "form_issue_count": 0,
+            "word_count": 1400,
+        }
+    }
+
+    status, reason = runner._verification_status(
+        target,
+        verification,
+        chapter_word_count=1400,
+    )
+
+    assert status == "passed"
+    assert reason == ""
 
 
 def _write_outline(run, *, book_sections=None, methods=None):

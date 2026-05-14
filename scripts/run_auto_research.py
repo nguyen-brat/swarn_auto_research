@@ -1883,7 +1883,7 @@ def _write_verification_summary(run_dir: Path, targets: list[dict[str, str]]) ->
             {
                 "target_type": target["type"],
                 "target_id": target["id"],
-                "passed": data.get("passed"),
+                "passed": _verification_passed(data),
                 "claims_total": summary.get("claims_total", 0),
                 "claims_unsupported": summary.get("claims_unsupported", 0),
                 "claims_overstated": summary.get("claims_overstated", 0),
@@ -1987,6 +1987,13 @@ def _write_chapter_front_matter_and_references(
     )
 
 
+def _verification_passed(verification: dict[str, Any]) -> bool:
+    summary = verification.get("summary")
+    return verification.get("passed") is True or (
+        isinstance(summary, dict) and summary.get("passed") is True
+    )
+
+
 def _verification_status(
     target: dict[str, str],
     verification: dict[str, Any] | None,
@@ -2006,7 +2013,7 @@ def _verification_status(
     if target["type"] == "families" and word_count < 1000:
         return "excluded_too_short", f"family chapter has {word_count} words"
 
-    if verification.get("passed") is True:
+    if _verification_passed(verification):
         return "passed", ""
     claims_unsupported = int(summary.get("claims_unsupported") or 0)
     claims_overstated = int(summary.get("claims_overstated") or 0)
