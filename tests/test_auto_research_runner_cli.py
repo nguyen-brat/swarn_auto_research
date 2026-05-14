@@ -1811,7 +1811,7 @@ def test_validate_bootstrap_contract_ignores_legacy_target_seed_papers(tmp_path)
 def test_validate_bootstrap_contract_rejects_missing_raw_seed_paper(tmp_path):
     run = tmp_path / "run"
     raw_ids = [f"2501.{idx:05d}" for idx in range(60)]
-    selected_ids = raw_ids[:-1]
+    selected_ids = raw_ids[:-1] + ["2502.99999"]
     _write_valid_bootstrap_contract(run, ids=raw_ids)
     (run / "02_paper_pool" / "paper_pool.json").write_text(
         json.dumps(
