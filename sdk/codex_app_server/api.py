@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import AsyncIterator, Iterator
 
@@ -35,6 +36,21 @@ from .generated.v2_all import (
     TurnStartParams,
     TurnSteerResponse,
 )
+
+STREAM_NOTIFICATION_POLL_SECONDS = 60.0
+
+
+def _next_notification_timeout(
+    deadline: float | None,
+    *,
+    poll_seconds: float = STREAM_NOTIFICATION_POLL_SECONDS,
+) -> float | None:
+    if deadline is None:
+        return None
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("Timed out waiting for turn notification")
+    return min(poll_seconds, remaining)
 from .models import InitializeResponse, JsonObject, JsonValue, Notification, ServerInfo
 from ._inputs import (
     ImageInput,
@@ -671,9 +687,21 @@ class TurnHandle:
     def stream(self, notification_timeout_s: float | None = 600.0) -> Iterator[Notification]:
         # TODO: replace this client-wide experimental guard with per-turn event demux.
         self._client.acquire_turn_consumer(self.id)
+        deadline = (
+            None
+            if notification_timeout_s is None
+            else time.monotonic() + notification_timeout_s
+        )
         try:
             while True:
-                event = self._client.next_notification(timeout_s=notification_timeout_s)
+                try:
+                    event = self._client.next_notification(
+                        timeout_s=_next_notification_timeout(deadline)
+                    )
+                except TimeoutError:
+                    if deadline is not None and time.monotonic() < deadline:
+                        continue
+                    raise
                 yield event
                 if (
                     event.method == "turn/completed"
@@ -728,11 +756,21 @@ class AsyncTurnHandle:
         await self._codex._ensure_initialized()
         # TODO: replace this client-wide experimental guard with per-turn event demux.
         self._codex._client.acquire_turn_consumer(self.id)
+        deadline = (
+            None
+            if notification_timeout_s is None
+            else time.monotonic() + notification_timeout_s
+        )
         try:
             while True:
-                event = await self._codex._client.next_notification(
-                    timeout_s=notification_timeout_s
-                )
+                try:
+                    event = await self._codex._client.next_notification(
+                        timeout_s=_next_notification_timeout(deadline)
+                    )
+                except TimeoutError:
+                    if deadline is not None and time.monotonic() < deadline:
+                        continue
+                    raise
                 yield event
                 if (
                     event.method == "turn/completed"

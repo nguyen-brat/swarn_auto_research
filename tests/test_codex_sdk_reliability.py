@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from sdk.codex_app_server import client as client_module
+from sdk.codex_app_server import api as api_module
 from sdk.codex_app_server.api import AsyncCodex, Codex
 from sdk.codex_app_server.client import AppServerClient
 from sdk.codex_app_server.errors import ServerBusyError
@@ -69,6 +70,18 @@ def test_next_notification_raises_timeout(monkeypatch: pytest.MonkeyPatch) -> No
         sdk_client.next_notification(timeout_s=0.01)
 
     assert observed_timeouts == [0.01]
+
+
+def test_stream_notification_timeout_uses_bounded_poll_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api_module.time, "monotonic", lambda: 100.0)
+
+    assert api_module._next_notification_timeout(200.0) == 60.0
+    assert api_module._next_notification_timeout(120.0) == 20.0
+
+    with pytest.raises(TimeoutError, match="Timed out waiting for turn notification"):
+        api_module._next_notification_timeout(99.0)
 
 
 def test_sdk_public_type_hints_resolve() -> None:
