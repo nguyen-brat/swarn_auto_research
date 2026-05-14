@@ -405,6 +405,24 @@ def test_summary_method_label_includes_slug_when_title_and_id_differ(tmp_path: P
     assert "../14_chapters/methods/attention-routing.md" not in summary
 
 
+def test_summary_method_label_does_not_treat_slug_as_inner_substring(tmp_path: Path):
+    run_dir = minimal_run(tmp_path)
+    outline = json.loads((run_dir / "12_taxonomy" / "outline.json").read_text())
+    outline["methods"][0]["id"] = "rid"
+    outline["methods"][0]["title"] = "Grid Attention"
+    outline["families"][0]["method_ids"][0] = "rid"
+    (run_dir / "14_chapters" / "methods" / "rid.md").write_text(
+        "# Grid Attention\n\nPlaceholder.\n",
+        encoding="utf-8",
+    )
+    write_json(run_dir / "12_taxonomy" / "outline.json", outline)
+
+    generate_book_artifacts(run_dir)
+
+    summary = (run_dir / "16_book" / "SUMMARY.md").read_text(encoding="utf-8")
+    assert "- [Grid Attention (rid)](../14_chapters/methods/rid.md)" in summary
+
+
 def test_sidebar_method_label_includes_slug_when_title_and_id_differ(tmp_path: Path):
     run_dir = minimal_run(tmp_path)
     outline = json.loads((run_dir / "12_taxonomy" / "outline.json").read_text())

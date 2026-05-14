@@ -178,7 +178,14 @@ def _paper_label(arxiv_id: str, promoted: dict[str, dict[str, Any]], pool: dict[
 def _method_display_title(method: dict[str, Any], method_id: str) -> str:
     title = str(method.get("title") or method_id)
     readable_id = method_id.replace("-", " ")
-    if readable_id.lower() in title.lower() or method_id.lower() in title.lower():
+    normalized_title = title.lower()
+    has_method_id = re.search(rf"(?<!\w){re.escape(method_id.lower())}(?!\w)", normalized_title)
+    readable_pattern = r"\s+".join(re.escape(part) for part in readable_id.lower().split())
+    has_readable_id = re.search(
+        rf"(?<!\w){readable_pattern}(?!\w)",
+        normalized_title,
+    )
+    if has_method_id or has_readable_id:
         return title
     return f"{title} ({method_id})"
 
