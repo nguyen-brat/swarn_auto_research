@@ -1503,10 +1503,18 @@ def _write_stage_13_sources(run, *, wrap_nodes=False, omit_required_specific_sou
     )
 
 
+def _skip_stage_1_start_preflight(monkeypatch):
+    monkeypatch.setattr(
+        "scripts.run_auto_research._validate_stage_1_before_later_start",
+        lambda run_dir, start: None,
+    )
+
+
 def test_main_resume_from_stage_11_calls_stage_11(tmp_path, monkeypatch):
     run = tmp_path / "research_runs" / "demo"
     run.mkdir(parents=True)
     monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    _skip_stage_1_start_preflight(monkeypatch)
     calls = []
 
     def fake_stage(run_dir):
@@ -1527,6 +1535,7 @@ def test_main_all_resume_from_stage_7_includes_bootstrap_handlers(tmp_path, monk
     run = tmp_path / "research_runs" / "demo"
     run.mkdir(parents=True)
     monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    _skip_stage_1_start_preflight(monkeypatch)
     calls = []
 
     monkeypatch.setattr("scripts.run_auto_research.run_stage_7", lambda run_dir: calls.append("7"))
@@ -1549,6 +1558,26 @@ def test_main_all_resume_from_stage_7_includes_bootstrap_handlers(tmp_path, monk
     assert calls[:5] == ["7", "8", "9", "10", "11"]
 
 
+def test_main_resume_from_stage_7_validates_stage_1_keep_all_contract(tmp_path, monkeypatch):
+    run = tmp_path / "research_runs" / "demo"
+    _write_valid_bootstrap_contract(run)
+    kept_ids = [f"2501.{idx:05d}" for idx in range(200)]
+    selected_ids = kept_ids[:50]
+    (run / "02_paper_pool" / "paper_pool.json").write_text(
+        json.dumps(
+            [{"arxiv_id": arxiv_id, "title": f"Paper {arxiv_id}"} for arxiv_id in selected_ids]
+        )
+    )
+    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    calls = []
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_7", lambda run_dir: calls.append("7"))
+
+    with pytest.raises(RuntimeError, match="paper_pool.json must contain every paper kept"):
+        main(["--run-id", "demo", "--phase", "all", "--resume", "--from-stage", "7"])
+
+    assert calls == []
+
+
 def test_main_rejects_from_stage_outside_phase(tmp_path, monkeypatch):
     run = tmp_path / "research_runs" / "demo"
     run.mkdir(parents=True)
@@ -1566,6 +1595,7 @@ def test_main_write_phase_defaults_to_stage_14(tmp_path, monkeypatch):
     run = tmp_path / "research_runs" / "demo"
     run.mkdir(parents=True)
     monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    _skip_stage_1_start_preflight(monkeypatch)
     calls = []
 
     for stage in ("14", "15", "16", "17", "18"):
@@ -1584,6 +1614,7 @@ def test_main_write_phase_passes_max_workers_20_to_parallel_stages(tmp_path, mon
     run = tmp_path / "research_runs" / "demo"
     run.mkdir(parents=True)
     monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    _skip_stage_1_start_preflight(monkeypatch)
     calls = []
 
     def fake_parallel_stage(run_dir, *, max_workers=1):
@@ -1639,6 +1670,7 @@ def test_main_write_phase_rejects_saved_draft_current_stage(tmp_path, monkeypatc
 
 def test_main_with_topic_starts_new_run_before_requested_stage(tmp_path, monkeypatch):
     monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    _skip_stage_1_start_preflight(monkeypatch)
 
     def fake_start_run(topic, phase):
         run = tmp_path / "research_runs" / "demo-run"
@@ -1819,14 +1851,14 @@ def test_validate_bootstrap_contract_rejects_too_many_search_aspects(tmp_path):
             "survey_queries": [f"survey query {idx}"],
             "positive_keywords": [f"keyword {idx}"],
         }
-        for idx in range(7)
+        for idx in range(9)
     ]
     (run / "00_input" / "search_plan.json").write_text(json.dumps({"aspects": aspects}))
 
     try:
         validate_bootstrap_stage_0_10_contract(run)
     except RuntimeError as error:
-        assert "4..6 aspects" in str(error)
+        assert "4..8 aspects" in str(error)
     else:
         raise AssertionError("expected too many aspects failure")
 

@@ -405,8 +405,8 @@ def normalize_stage_7_promoted_json(
 def validate_stage_1_keep_all_contract(run_dir: Path) -> list[str]:
     search_plan = _load_json(run_dir / "00_input" / "search_plan.json")
     aspects = search_plan.get("aspects") if isinstance(search_plan, dict) else None
-    if not isinstance(aspects, list) or not (4 <= len(aspects) <= 6):
-        raise RuntimeError("Stage 1 search_plan.json must contain 4..6 aspects")
+    if not isinstance(aspects, list) or not (4 <= len(aspects) <= 8):
+        raise RuntimeError("Stage 1 search_plan.json must contain 4..8 aspects")
     for idx, aspect in enumerate(aspects):
         if not isinstance(aspect, dict):
             raise RuntimeError("Stage 1 search_plan aspects must be objects")
@@ -2994,6 +2994,15 @@ def _run_stage_handler(
     handler(run_dir, **kwargs)
 
 
+def _validate_stage_1_before_later_start(run_dir: Path, start: str) -> None:
+    try:
+        start_stage = float(start)
+    except ValueError:
+        return
+    if start_stage > 1:
+        validate_stage_1_keep_all_contract(run_dir)
+
+
 def _latest_shard_manifest(run_dir: Path) -> dict[str, Any] | None:
     manifests = [
         path
@@ -3123,6 +3132,7 @@ def main(argv: list[str] | None = None) -> int:
     handler_stages = {stage for stage, _ in handlers}
     if start not in handler_stages:
         raise SystemExit(f"stage {start} is not available for phase {args.phase}")
+    _validate_stage_1_before_later_start(run_dir, start)
     state.update(
         {
             "run_id": run_id,

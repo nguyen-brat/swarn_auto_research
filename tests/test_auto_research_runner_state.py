@@ -127,6 +127,11 @@ def test_main_resets_progress_without_resume(tmp_path, monkeypatch):
 
 
 def _patch_stage_handlers(monkeypatch, calls):
+    monkeypatch.setattr(
+        runner,
+        "_validate_stage_1_before_later_start",
+        lambda run_dir, start: None,
+    )
     for stage, name in (
         ("11", "run_stage_11"),
         ("12", "run_stage_12"),
