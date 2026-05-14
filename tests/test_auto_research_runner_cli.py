@@ -227,7 +227,7 @@ def test_run_stage_1_dispatches_query_planner_and_requires_pool_report(tmp_path,
             for idx in range(4)
         ]
         (run / "00_input" / "search_plan.json").write_text(
-            json.dumps({"topic": "Demo", "target_seed_papers": 200, "aspects": aspects})
+            json.dumps({"topic": "Demo", "aspects": aspects})
         )
         bulk_path = run / "01_seed_pool" / "bulk_search_results_123.json"
         ids = [f"2501.{idx:05d}" for idx in range(40)]
@@ -251,9 +251,9 @@ def test_run_stage_1_dispatches_query_planner_and_requires_pool_report(tmp_path,
             json.dumps(
                 {
                     "raw_kept": 40,
-                    "target_seed_papers": 200,
                     "selected_total": 40,
-                    "per_aspect_selected": {f"aspect_{idx}": 10 for idx in range(4)},
+                    "selection_policy": "keep_all_bulk_search_results",
+                    "per_aspect_selected": {},
                 }
             )
         )
@@ -267,6 +267,8 @@ def test_run_stage_1_dispatches_query_planner_and_requires_pool_report(tmp_path,
     assert calls[0].agent == "query_planner"
     assert "Run Stage 1 only" in calls[0].prompt
     assert "candidate_pool_report.json" in calls[0].prompt
+    assert "from every paper in seed_pool_raw" in calls[0].prompt
+    assert "Build a stratified" not in calls[0].prompt
 
 
 def test_run_stage_2_chunks_paper_pool_into_weak_evidence_specs(tmp_path, monkeypatch):
@@ -1635,8 +1637,9 @@ def test_main_topic_all_uses_stage_scoped_bootstrap_handlers(tmp_path, monkeypat
     ]
 
 
-def _write_valid_bootstrap_contract(run):
-    ids = [f"2501.{idx:05d}" for idx in range(200)]
+def _write_valid_bootstrap_contract(run, ids=None):
+    if ids is None:
+        ids = [f"2501.{idx:05d}" for idx in range(200)]
     (run / "00_input").mkdir(parents=True)
     (run / "01_seed_pool").mkdir(parents=True)
     (run / "02_paper_pool").mkdir(parents=True)
@@ -1656,7 +1659,7 @@ def _write_valid_bootstrap_contract(run):
         for idx in range(4)
     ]
     (run / "00_input" / "search_plan.json").write_text(
-        json.dumps({"target_seed_papers": 200, "aspects": aspects})
+        json.dumps({"aspects": aspects})
     )
     bulk_path = run / "01_seed_pool" / "bulk_search_results_123.json"
     bulk_path.write_text(json.dumps({arxiv_id: "abstract" for arxiv_id in ids}))
@@ -1676,9 +1679,9 @@ def _write_valid_bootstrap_contract(run):
         json.dumps(
             {
                 "raw_kept": len(ids),
-                "target_seed_papers": 200,
                 "selected_total": len(ids),
-                "per_aspect_selected": {f"aspect_{idx}": 50 for idx in range(4)},
+                "selection_policy": "keep_all_bulk_search_results",
+                "per_aspect_selected": {},
             }
         )
     )
@@ -1769,7 +1772,7 @@ def test_validate_bootstrap_contract_rejects_truncated_large_seed_pool(tmp_path)
     try:
         validate_bootstrap_stage_0_10_contract(run)
     except RuntimeError as error:
-        assert "must contain at least 200 papers when bulk search kept 220" in str(error)
+        assert "paper_pool.json must contain every paper kept by bulk search" in str(error)
     else:
         raise AssertionError("expected truncated large seed pool failure")
 
@@ -1792,6 +1795,49 @@ def test_validate_bootstrap_contract_accepts_real_discovery_shape(tmp_path):
     _write_valid_bootstrap_contract(run)
 
     validate_bootstrap_stage_0_10_contract(run)
+
+
+def test_validate_bootstrap_contract_ignores_legacy_target_seed_papers(tmp_path):
+    run = tmp_path / "run"
+    ids = [f"2501.{idx:05d}" for idx in range(60)]
+    _write_valid_bootstrap_contract(run, ids=ids)
+    search_plan = json.loads((run / "00_input" / "search_plan.json").read_text())
+    search_plan["target_seed_papers"] = 40
+    (run / "00_input" / "search_plan.json").write_text(json.dumps(search_plan))
+
+    validate_bootstrap_stage_0_10_contract(run)
+
+
+def test_validate_bootstrap_contract_rejects_missing_raw_seed_paper(tmp_path):
+    run = tmp_path / "run"
+    raw_ids = [f"2501.{idx:05d}" for idx in range(60)]
+    selected_ids = raw_ids[:-1]
+    _write_valid_bootstrap_contract(run, ids=raw_ids)
+    (run / "02_paper_pool" / "paper_pool.json").write_text(
+        json.dumps(
+            [
+                {"arxiv_id": arxiv_id, "title": f"Paper {arxiv_id}"}
+                for arxiv_id in selected_ids
+            ]
+        )
+    )
+    (run / "02_paper_pool" / "candidate_pool_report.json").write_text(
+        json.dumps(
+            {
+                "raw_kept": len(raw_ids),
+                "selected_total": len(selected_ids),
+                "selection_policy": "keep_all_bulk_search_results",
+                "per_aspect_selected": {},
+            }
+        )
+    )
+
+    try:
+        validate_bootstrap_stage_0_10_contract(run)
+    except RuntimeError as error:
+        assert "paper_pool.json must contain every paper kept by bulk search" in str(error)
+    else:
+        raise AssertionError("expected missing raw seed paper failure")
 
 
 def test_validate_bootstrap_contract_rejects_stage7_without_score_files(tmp_path):
