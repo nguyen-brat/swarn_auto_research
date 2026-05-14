@@ -36,6 +36,7 @@ from scripts.run_auto_research import (
     run_stage_18,
     save_run_state,
     validate_bootstrap_stage_0_10_contract,
+    validate_stage_1_keep_all_contract,
 )
 
 
@@ -269,6 +270,86 @@ def test_run_stage_1_dispatches_query_planner_and_requires_pool_report(tmp_path,
     assert "candidate_pool_report.json" in calls[0].prompt
     assert "from every paper in seed_pool_raw" in calls[0].prompt
     assert "Build a stratified" not in calls[0].prompt
+
+
+def _write_stage_1_contract_artifacts(run, *, raw_count=45, selected_count=None):
+    if selected_count is None:
+        selected_count = raw_count
+    (run / "00_input").mkdir(parents=True, exist_ok=True)
+    (run / "01_seed_pool").mkdir(parents=True, exist_ok=True)
+    (run / "02_paper_pool").mkdir(parents=True, exist_ok=True)
+    aspects = [
+        {
+            "aspect_id": f"aspect_{idx}",
+            "normal_queries": [f"normal {idx}"],
+            "survey_queries": [f"survey {idx}"],
+            "positive_keywords": [f"keyword {idx}"],
+        }
+        for idx in range(4)
+    ]
+    (run / "00_input" / "search_plan.json").write_text(
+        json.dumps({"topic": "Demo", "aspects": aspects})
+    )
+    raw_ids = [f"2501.{idx:05d}" for idx in range(raw_count)]
+    selected_ids = raw_ids[:selected_count]
+    bulk_path = run / "01_seed_pool" / "bulk_search_results_123.json"
+    bulk_path.write_text(json.dumps({"papers": raw_ids}))
+    (run / "01_seed_pool" / "seed_pool_raw.json").write_text(
+        json.dumps(
+            {
+                "papers": {arxiv_id: "abstract" for arxiv_id in raw_ids},
+                "total_kept": len(raw_ids),
+                "output_path": str(bulk_path),
+            }
+        )
+    )
+    (run / "02_paper_pool" / "paper_pool.json").write_text(
+        json.dumps([{"arxiv_id": arxiv_id} for arxiv_id in selected_ids])
+    )
+    (run / "02_paper_pool" / "paper_pool.csv").write_text(
+        "arxiv_id\n" + "\n".join(selected_ids) + "\n"
+    )
+    (run / "02_paper_pool" / "candidate_pool_report.json").write_text(
+        json.dumps(
+            {
+                "raw_kept": len(raw_ids),
+                "selected_total": len(selected_ids),
+                "selection_policy": "keep_all_bulk_search_results",
+                "per_aspect_selected": {},
+            }
+        )
+    )
+
+
+def test_run_stage_1_rejects_downselected_pool_after_shard(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+
+    def fake_run_shards(run_dir, specs, **kwargs):
+        _write_stage_1_contract_artifacts(run, raw_count=45, selected_count=40)
+
+    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+
+    with pytest.raises(RuntimeError) as error:
+        run_stage_1(run)
+
+    assert "paper_pool.json must contain every paper kept by bulk search" in str(error.value)
+
+
+def test_run_stage_1_validates_existing_primary_artifacts_before_skip(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    _write_stage_1_contract_artifacts(run, raw_count=45, selected_count=40)
+
+    def fail_run_shards(*args, **kwargs):
+        raise AssertionError("run_shards should not be called for existing primary artifacts")
+
+    monkeypatch.setattr("scripts.run_auto_research.run_shards", fail_run_shards)
+
+    with pytest.raises(RuntimeError) as error:
+        run_stage_1(run)
+
+    assert "paper_pool.json must contain every paper kept by bulk search" in str(error.value)
 
 
 def test_run_stage_2_chunks_paper_pool_into_weak_evidence_specs(tmp_path, monkeypatch):
@@ -1675,6 +1756,9 @@ def _write_valid_bootstrap_contract(run, ids=None):
     (run / "02_paper_pool" / "paper_pool.json").write_text(
         json.dumps([{"arxiv_id": arxiv_id, "title": f"Paper {arxiv_id}"} for arxiv_id in ids])
     )
+    (run / "02_paper_pool" / "paper_pool.csv").write_text(
+        "arxiv_id\n" + "\n".join(ids) + "\n"
+    )
     (run / "02_paper_pool" / "candidate_pool_report.json").write_text(
         json.dumps(
             {
@@ -1817,6 +1901,21 @@ def test_validate_bootstrap_contract_accepts_real_discovery_shape(tmp_path):
     _write_valid_bootstrap_contract(run)
 
     validate_bootstrap_stage_0_10_contract(run)
+
+
+def test_validate_stage_1_keep_all_contract_requires_pool_csv_matches_json(tmp_path):
+    run = tmp_path / "run"
+    ids = [f"2501.{idx:05d}" for idx in range(40)]
+    _write_valid_bootstrap_contract(run, ids=ids)
+    csv_ids = ids[:-1] + ["2502.99999"]
+    (run / "02_paper_pool" / "paper_pool.csv").write_text(
+        "arxiv_id\n" + "\n".join(csv_ids) + "\n"
+    )
+
+    with pytest.raises(RuntimeError) as error:
+        validate_stage_1_keep_all_contract(run)
+
+    assert "paper_pool.csv must contain exactly every paper_pool arxiv_id" in str(error.value)
 
 
 def test_validate_bootstrap_contract_rejects_duplicate_raw_seed_ids(tmp_path):

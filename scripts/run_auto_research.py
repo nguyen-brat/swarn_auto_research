@@ -38,7 +38,9 @@ PRIMARY_ARTIFACTS = {
     "0": ("run_config.json",),
     "1": (
         "00_input/search_plan.json",
+        "01_seed_pool/seed_pool_raw.json",
         "02_paper_pool/paper_pool.json",
+        "02_paper_pool/paper_pool.csv",
         "02_paper_pool/candidate_pool_report.json",
     ),
     "3": ("05_weak_graph/weak_global_graph.json",),
@@ -392,32 +394,26 @@ def normalize_stage_7_promoted_json(
     return True
 
 
-def validate_bootstrap_stage_0_10_contract(run_dir: Path) -> None:
-    """Fail closed if a bootstrap child skipped real discovery.
-
-    The Stage 0-10 child runs inside a Codex session, so the parent must verify
-    the contract from durable artifacts before continuing into outline/chapter
-    work. This prevents fixture or hand-written seed pools from being accepted
-    as a real research run.
-    """
+def validate_stage_1_keep_all_contract(run_dir: Path) -> list[str]:
     search_plan = _load_json(run_dir / "00_input" / "search_plan.json")
     aspects = search_plan.get("aspects") if isinstance(search_plan, dict) else None
     if not isinstance(aspects, list) or not (4 <= len(aspects) <= 6):
         raise RuntimeError("Stage 1 search_plan.json must contain 4..6 aspects")
-    normal_queries: set[str] = set()
-    survey_queries: set[str] = set()
-    positive_keywords: set[str] = set()
     for idx, aspect in enumerate(aspects):
         if not isinstance(aspect, dict):
             raise RuntimeError("Stage 1 search_plan aspects must be objects")
-        aspect_id = str(aspect.get("aspect_id") or aspect.get("id") or f"aspect_{idx}").strip()
+        aspect_id = str(aspect.get("aspect_id") or aspect.get("id") or "").strip()
         if not aspect_id:
             raise RuntimeError("Stage 1 search_plan aspects must include non-empty ids")
-        normal_queries.update(str(q).strip() for q in aspect.get("normal_queries", []) if str(q).strip())
-        survey_queries.update(str(q).strip() for q in aspect.get("survey_queries", []) if str(q).strip())
-        positive_keywords.update(str(q).strip() for q in aspect.get("positive_keywords", []) if str(q).strip())
-    if not normal_queries or not survey_queries or not positive_keywords:
-        raise RuntimeError("Stage 1 search_plan must include normal, survey, and positive keyword unions")
+        query_terms = set()
+        for field in ("normal_queries", "survey_queries", "positive_keywords"):
+            values = aspect.get(field, [])
+            if isinstance(values, list):
+                query_terms.update(str(value).strip() for value in values if str(value).strip())
+        if not query_terms:
+            raise RuntimeError(
+                "Stage 1 search_plan aspects must include normal, survey, or positive keyword terms"
+            )
 
     seed_pool = _load_json(run_dir / "01_seed_pool" / "seed_pool_raw.json")
     if not isinstance(seed_pool, dict):
@@ -478,6 +474,44 @@ def validate_bootstrap_stage_0_10_contract(run_dir: Path) -> None:
     selection_policy = candidate_report.get("selection_policy")
     if selection_policy is not None and selection_policy != "keep_all_bulk_search_results":
         raise RuntimeError("candidate_pool_report.json selection_policy must be keep_all_bulk_search_results")
+
+    csv_path = run_dir / "02_paper_pool" / "paper_pool.csv"
+    if not csv_path.exists():
+        try:
+            display_path = csv_path.relative_to(REPO_ROOT)
+        except ValueError:
+            display_path = csv_path
+        raise RuntimeError(f"missing required bootstrap artifact: {display_path}")
+    with csv_path.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None or "arxiv_id" not in reader.fieldnames:
+            raise RuntimeError("paper_pool.csv must include arxiv_id column")
+        csv_ids = [str(row.get("arxiv_id", "")).strip() for row in reader]
+    csv_duplicates = _duplicate_ids(csv_ids)
+    if csv_duplicates:
+        raise RuntimeError(
+            f"paper_pool.csv must not contain duplicate arxiv_id values: {csv_duplicates[:10]}"
+        )
+    if set(csv_ids) != set(paper_ids):
+        missing = sorted(set(paper_ids) - set(csv_ids))
+        extra = sorted(set(csv_ids) - set(paper_ids))
+        raise RuntimeError(
+            "paper_pool.csv must contain exactly every paper_pool arxiv_id; "
+            f"missing={missing[:10]}, extra={extra[:10]}"
+        )
+
+    return paper_ids
+
+
+def validate_bootstrap_stage_0_10_contract(run_dir: Path) -> None:
+    """Fail closed if a bootstrap child skipped real discovery.
+
+    The Stage 0-10 child runs inside a Codex session, so the parent must verify
+    the contract from durable artifacts before continuing into outline/chapter
+    work. This prevents fixture or hand-written seed pools from being accepted
+    as a real research run.
+    """
+    paper_ids = validate_stage_1_keep_all_contract(run_dir)
     validate_stage_7_outputs(run_dir, paper_ids=paper_ids)
 
     weak_dir = run_dir / "04_weak_evidence"
@@ -2457,6 +2491,7 @@ def start_new_run(topic: str, phase: str) -> str:
 
 def run_stage_1(run_dir: Path, *, executor: str = DEFAULT_EXECUTOR) -> None:
     if primary_artifact_exists(run_dir, "1"):
+        validate_stage_1_keep_all_contract(run_dir)
         append_run_log(run_dir, "1", "skipped", "paper pool already present")
         return
     topic_path = run_dir / "00_input" / "topic.md"
@@ -2492,10 +2527,7 @@ def run_stage_1(run_dir: Path, *, executor: str = DEFAULT_EXECUTOR) -> None:
         ],
     )
     run_shards(run_dir, [spec], executor=executor, timeout_seconds=BOOTSTRAP_TIMEOUT_SECONDS)
-    paper_pool = _load_json(run_dir / "02_paper_pool" / "paper_pool.json")
-    paper_ids = _paper_pool_ids(paper_pool)
-    if len(paper_ids) < MIN_BOOTSTRAP_PAPER_POOL:
-        raise RuntimeError(f"Stage 1 produced too few papers: {len(paper_ids)}")
+    paper_ids = validate_stage_1_keep_all_contract(run_dir)
     append_run_log(run_dir, "1", "completed", f"paper pool contains {len(paper_ids)} papers")
 
 
