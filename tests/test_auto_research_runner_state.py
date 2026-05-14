@@ -97,6 +97,39 @@ def test_main_preserves_existing_resume_state(tmp_path, monkeypatch):
     assert calls == ["11", "12", "12.5", "13", "14", "15", "16", "17", "18"]
 
 
+def test_main_resume_saved_later_stage_validates_stage_1_before_handlers(tmp_path, monkeypatch):
+    runs_root = tmp_path / "research_runs"
+    run = runs_root / "demo"
+    monkeypatch.setattr(runner, "RUNS_ROOT", runs_root)
+    calls = []
+    monkeypatch.setattr(runner, "run_stage_11", lambda run_dir: calls.append("11"))
+    monkeypatch.setattr(
+        runner,
+        "validate_stage_1_keep_all_contract",
+        lambda run_dir: (_ for _ in ()).throw(RuntimeError("stage 1 invalid")),
+    )
+    save_run_state(
+        run,
+        {
+            "run_id": "demo",
+            "phase": "draft",
+            "topic": "Old topic",
+            "status": "running",
+            "current_stage": "11",
+            "last_completed_stage": "10",
+        },
+    )
+
+    try:
+        main(["--run-id", "demo", "--phase", "all", "--resume"])
+    except RuntimeError as error:
+        assert "stage 1 invalid" in str(error)
+    else:
+        raise AssertionError("expected Stage 1 preflight failure")
+
+    assert calls == []
+
+
 def test_main_resets_progress_without_resume(tmp_path, monkeypatch):
     runs_root = tmp_path / "research_runs"
     run = runs_root / "demo"
