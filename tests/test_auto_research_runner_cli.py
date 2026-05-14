@@ -39,6 +39,10 @@ from scripts.run_auto_research import (
 )
 
 
+def test_default_shard_timeout_allows_long_verifier_turns():
+    assert runner.DEFAULT_SHARD_TIMEOUT_SECONDS == 3 * 3600
+
+
 def test_run_deterministic_command_logs_failure(tmp_path):
     run = tmp_path / "research_runs" / "demo"
     run.mkdir(parents=True)

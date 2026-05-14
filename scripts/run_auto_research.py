@@ -21,7 +21,7 @@ from swarn_research_mcp.research_book import BOOK_FILE_BY_ID
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNS_ROOT = REPO_ROOT / "research_runs"
-DEFAULT_SHARD_TIMEOUT_SECONDS = 3600
+DEFAULT_SHARD_TIMEOUT_SECONDS = 3 * 3600
 BOOTSTRAP_TIMEOUT_SECONDS = 6 * 3600
 DEFAULT_EXECUTOR = "sdk"
 DEFAULT_TARGET_SEED_PAPERS = 200
