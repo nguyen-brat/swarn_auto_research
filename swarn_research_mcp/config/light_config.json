@@ -1,5 +1,5 @@
 {
-  "_comment": "MVP-light budgets for bulk_normal_start_search. Override path via SWARN_BULK_SEARCH_CONFIG. The tool may keep hundreds of raw papers; Stage 1 then selects a stratified candidate pool around target_seed_papers.",
+  "_comment": "MVP-light budgets for bulk_normal_start_search. Override path via SWARN_BULK_SEARCH_CONFIG. The tool may keep hundreds of raw papers; Stage 1 keeps every paper returned by the bulk search relevance gates.",
   "trending_months": 2,
   "trending_month_limit": 5,
   "influence_windows": [

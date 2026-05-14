@@ -1,6 +1,6 @@
 ---
 name: query-planning
-description: Expand a single topic into 4–8 distinct aspects with per-aspect queries and keywords, so Stage 1 search covers the whole topic instead of one popular angle.
+description: Expand a single topic into 4–6 distinct aspects with per-aspect queries and keywords, so Stage 1 search covers the whole topic instead of one popular angle.
 ---
 
 # Query Planning
