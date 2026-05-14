@@ -1180,6 +1180,30 @@ def test_verification_status_accepts_summary_passed_for_backward_compat():
     assert reason == ""
 
 
+def test_verification_status_prefers_explicit_top_level_failed_flag():
+    target = {"type": "families", "id": "evaluation_benchmarks"}
+    verification = {
+        "passed": False,
+        "summary": {
+            "passed": True,
+            "claims_unsupported": 0,
+            "claims_overstated": 0,
+            "gaps_missing": 0,
+            "form_issue_count": 0,
+            "word_count": 1400,
+        },
+    }
+
+    status, reason = runner._verification_status(
+        target,
+        verification,
+        chapter_word_count=1400,
+    )
+
+    assert status == "excluded_verification_failed"
+    assert reason == "verification did not pass"
+
+
 def _write_outline(run, *, book_sections=None, methods=None):
     (run / "12_taxonomy").mkdir(parents=True, exist_ok=True)
     outline = {

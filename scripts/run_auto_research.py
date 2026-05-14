@@ -2003,10 +2003,10 @@ def _write_chapter_front_matter_and_references(
 
 
 def _verification_passed(verification: dict[str, Any]) -> bool:
+    if "passed" in verification:
+        return verification.get("passed") is True
     summary = verification.get("summary")
-    return verification.get("passed") is True or (
-        isinstance(summary, dict) and summary.get("passed") is True
-    )
+    return isinstance(summary, dict) and summary.get("passed") is True
 
 
 def _verification_status(
