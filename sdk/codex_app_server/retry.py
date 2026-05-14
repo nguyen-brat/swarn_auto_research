@@ -12,9 +12,9 @@ T = TypeVar("T")
 def retry_on_overload(
     op: Callable[[], T],
     *,
-    max_attempts: int = 3,
-    initial_delay_s: float = 0.25,
-    max_delay_s: float = 2.0,
+    max_attempts: int = 6,
+    initial_delay_s: float = 2.0,
+    max_delay_s: float = 30.0,
     jitter_ratio: float = 0.2,
 ) -> T:
     """Retry helper for transient server-overload errors."""

@@ -167,9 +167,9 @@ class AsyncAppServerClient:
         params: JsonObject | None,
         *,
         response_model: type[ModelT],
-        max_attempts: int = 3,
-        initial_delay_s: float = 0.25,
-        max_delay_s: float = 2.0,
+        max_attempts: int = 6,
+        initial_delay_s: float = 2.0,
+        max_delay_s: float = 30.0,
     ) -> ModelT:
         return await self._call_sync(
             self._sync.request_with_retry_on_overload,
@@ -181,8 +181,8 @@ class AsyncAppServerClient:
             max_delay_s=max_delay_s,
         )
 
-    async def next_notification(self) -> Notification:
-        return await self._call_sync(self._sync.next_notification)
+    async def next_notification(self, timeout_s: float | None = 600.0) -> Notification:
+        return await self._call_sync(self._sync.next_notification, timeout_s=timeout_s)
 
     async def wait_for_turn_completed(self, turn_id: str) -> TurnCompletedNotification:
         return await self._call_sync(self._sync.wait_for_turn_completed, turn_id)

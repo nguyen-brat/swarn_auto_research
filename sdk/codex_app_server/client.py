@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import subprocess
 import threading
 import uuid
@@ -273,12 +274,12 @@ class AppServerClient:
     def notify(self, method: str, params: JsonObject | None = None) -> None:
         self._write_message({"method": method, "params": params or {}})
 
-    def next_notification(self) -> Notification:
+    def next_notification(self, timeout_s: float | None = 600.0) -> Notification:
         if self._pending_notifications:
             return self._pending_notifications.popleft()
 
         while True:
-            msg = self._read_message()
+            msg = self._read_message(timeout_s=timeout_s)
             if "method" in msg and "id" in msg:
                 response = self._handle_server_request(msg)
                 self._write_message({"id": msg["id"], "result": response})
@@ -399,9 +400,9 @@ class AppServerClient:
         params: JsonObject | None,
         *,
         response_model: type[ModelT],
-        max_attempts: int = 3,
-        initial_delay_s: float = 0.25,
-        max_delay_s: float = 2.0,
+        max_attempts: int = 6,
+        initial_delay_s: float = 2.0,
+        max_delay_s: float = 30.0,
     ) -> ModelT:
         return retry_on_overload(
             lambda: self.request(method, params, response_model=response_model),
@@ -517,9 +518,17 @@ class AppServerClient:
             self._proc.stdin.write(json.dumps(payload) + "\n")
             self._proc.stdin.flush()
 
-    def _read_message(self) -> dict[str, JsonValue]:
+    def _read_message(self, timeout_s: float | None = None) -> dict[str, JsonValue]:
         if self._proc is None or self._proc.stdout is None:
             raise TransportClosedError("app-server is not running")
+
+        if timeout_s is not None:
+            ready, _, _ = select.select([self._proc.stdout], [], [], timeout_s)
+            if not ready:
+                raise TimeoutError(
+                    "Timed out waiting for app-server message "
+                    f"after {timeout_s:.3f}s. stderr_tail={self._stderr_tail()[:2000]}"
+                )
 
         line = self._proc.stdout.readline()
         if not line:
