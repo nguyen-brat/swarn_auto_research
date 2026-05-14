@@ -18,6 +18,7 @@ research_runs/*/
 
 # Debug dumps and ad-hoc data
 .tmp/
+.worktrees/
 data/
 graphify-out/
 semantic_scholar_debug.json
