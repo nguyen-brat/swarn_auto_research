@@ -16,6 +16,7 @@ from .generated.v2_all import (
     SandboxMode,
     SandboxPolicy,
     ServiceTier,
+    SortDirection,
     ThreadArchiveResponse,
     ThreadCompactStartResponse,
     ThreadForkParams,
@@ -26,6 +27,7 @@ from .generated.v2_all import (
     ThreadSetNameResponse,
     ThreadSortKey,
     ThreadSourceKind,
+    ThreadStartSource,
     ThreadStartParams,
     Turn as AppServerTurn,
     TurnCompletedNotification,
@@ -33,7 +35,7 @@ from .generated.v2_all import (
     TurnStartParams,
     TurnSteerResponse,
 )
-from .models import InitializeResponse, JsonObject, Notification, ServerInfo
+from .models import InitializeResponse, JsonObject, JsonValue, Notification, ServerInfo
 from ._inputs import (
     ImageInput,
     Input,

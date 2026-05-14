@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import typing
 from types import SimpleNamespace
 
 import pytest
 
 from sdk.codex_app_server import client as client_module
+from sdk.codex_app_server.api import AsyncCodex, Codex
 from sdk.codex_app_server.client import AppServerClient
 from sdk.codex_app_server.errors import ServerBusyError
 from sdk.codex_app_server.retry import retry_on_overload
@@ -67,3 +69,10 @@ def test_next_notification_raises_timeout(monkeypatch: pytest.MonkeyPatch) -> No
         sdk_client.next_notification(timeout_s=0.01)
 
     assert observed_timeouts == [0.01]
+
+
+def test_sdk_public_type_hints_resolve() -> None:
+    assert typing.get_type_hints(Codex.thread_start)
+    assert typing.get_type_hints(Codex.thread_list)
+    assert typing.get_type_hints(AsyncCodex.thread_start)
+    assert typing.get_type_hints(AsyncCodex.thread_list)
