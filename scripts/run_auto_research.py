@@ -402,8 +402,8 @@ def validate_bootstrap_stage_0_10_contract(run_dir: Path) -> None:
     """
     search_plan = _load_json(run_dir / "00_input" / "search_plan.json")
     aspects = search_plan.get("aspects") if isinstance(search_plan, dict) else None
-    if not isinstance(aspects, list) or not (4 <= len(aspects) <= 8):
-        raise RuntimeError("Stage 1 search_plan.json must contain 4..8 aspects")
+    if not isinstance(aspects, list) or not (4 <= len(aspects) <= 6):
+        raise RuntimeError("Stage 1 search_plan.json must contain 4..6 aspects")
     normal_queries: set[str] = set()
     survey_queries: set[str] = set()
     positive_keywords: set[str] = set()

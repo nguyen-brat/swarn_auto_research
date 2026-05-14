@@ -1725,6 +1725,28 @@ def test_validate_bootstrap_contract_requires_real_bulk_search_artifact(tmp_path
         raise AssertionError("expected missing bulk output_path failure")
 
 
+def test_validate_bootstrap_contract_rejects_too_many_search_aspects(tmp_path):
+    run = tmp_path / "run"
+    _write_valid_bootstrap_contract(run)
+    aspects = [
+        {
+            "id": f"aspect_{idx}",
+            "normal_queries": [f"normal query {idx}"],
+            "survey_queries": [f"survey query {idx}"],
+            "positive_keywords": [f"keyword {idx}"],
+        }
+        for idx in range(7)
+    ]
+    (run / "00_input" / "search_plan.json").write_text(json.dumps({"aspects": aspects}))
+
+    try:
+        validate_bootstrap_stage_0_10_contract(run)
+    except RuntimeError as error:
+        assert "4..6 aspects" in str(error)
+    else:
+        raise AssertionError("expected too many aspects failure")
+
+
 def test_validate_bootstrap_contract_rejects_tiny_paper_pool(tmp_path):
     run = tmp_path / "run"
     _write_valid_bootstrap_contract(run)
