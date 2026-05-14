@@ -19,7 +19,7 @@ Turn the markdown output of an auto-research run (`research_runs/<run>/14_chapte
 - Auto cross-linking of bare method names in body prose (`cross-link-extractor`) — deferred to v2.
 - Per-family comparison tables (`comparison-table-builder`) — deferred to v2.
 - Reader features that need a server (comments, annotations, progress tracking) — site stays fully static.
-- Re-running the research pipeline. Stage 18 only consumes existing artifacts.
+- Re-running the research pipeline. Stage 19 only consumes existing artifacts.
 
 ## Decisions Locked in Brainstorming
 
@@ -28,7 +28,7 @@ Turn the markdown output of an auto-research run (`research_runs/<run>/14_chapte
 | Deployment target | Static site via **Astro Starlight** |
 | Rewrite scope | **Level 4** — render method pages as-is + augment with TLDR/callouts/glossary/diagrams; full web rewrite only for the 7 book-level chapters |
 | Site organization | **Hybrid C** — one self-contained Starlight site per research run, plus an umbrella site at repo root linking them |
-| Pipeline integration | **Both** — new Stage 18 in `run_auto_research.py` and a standalone `scripts/build_handbook.py`, both calling into a shared `handbook_builder/` module |
+| Pipeline integration | **Both** — new Stage 19 in `run_auto_research.py` and a standalone `scripts/build_handbook.py`, both calling into a shared `handbook_builder/` module |
 | v1 skills | `web-design-curator`, `web-tldr-writer`, `web-book-rewriter`, `diagram-author`, `glossary-builder`, `verification-web` |
 | Visual style | **Developer-dark** — Tokyo Night palette, monospace headings, sans body, code-doc feel |
 
@@ -37,7 +37,7 @@ Turn the markdown output of an auto-research run (`research_runs/<run>/14_chapte
 ```
 swarn_auto_research/
 ├── scripts/
-│   ├── run_auto_research.py         # adds Stage 18 dispatch
+│   ├── run_auto_research.py         # adds Stage 19 dispatch
 │   └── build_handbook.py            # NEW, standalone; rebuilds web layer without rerunning research
 ├── handbook_builder/                 # NEW shared module
 │   ├── __init__.py
@@ -63,7 +63,7 @@ swarn_auto_research/
 
 # Per research run:
 research_runs/<run>/
-└── 18_handbook/                      # NEW per-run Astro project
+└── 19_handbook/                      # NEW per-run Astro project
     ├── astro.config.mjs
     ├── package.json
     ├── src/content/docs/             # augmented copies of 14_chapters/**
@@ -78,18 +78,18 @@ Module boundaries:
 - Each skill takes pack/markdown in, returns strict JSON or MDX out. No agent reads sibling pages.
 - `dispatch.py` reuses the hardened locked-CSV-write, traceback-capture, nested-`passed`-flag plumbing from the existing runner.
 
-## Stage 18 Sub-Stages
+## Stage 19 Sub-Stages
 
 | Sub-stage | Agent(s) | Calls | Workers | Output |
 |---|---|---|---|---|
-| 18.0 scaffold | `web-design-curator` | 1 | 1 | `astro.config.mjs`, theme CSS, `package.json`, base sidebar, `index.mdx` |
-| 18.1 glossary | `glossary-builder` | 1 | 1 | `public/glossary.json` (terms not in `knowledge_base.md` get tooltips) |
-| 18.2 diagrams | `diagram-author` | ~30 | 8 | `.mmd` per family chapter + per method-pack architecture sketch |
-| 18.3 augment methods | `web-tldr-writer` + `verification-web` | ~150 | 12 | per-page `{tldr, key_idea, when_to_use, tags}` JSON, gated by verifier |
-| 18.4 rewrite book | `web-book-rewriter` + `verification-web` | 7 | 7 | MDX rewrites for preface/intro/goals/taxonomy/shared-examples/eval-outlook/glossary |
-| 18.5 assemble + build | in-process, no agent | — | — | splice MDX, rewrite sidebar, run `pnpm install && pnpm build` → `dist/` |
+| 19.0 scaffold | `web-design-curator` | 1 | 1 | `astro.config.mjs`, theme CSS, `package.json`, base sidebar, `index.mdx` |
+| 19.1 glossary | `glossary-builder` | 1 | 1 | `public/glossary.json` (terms not in `knowledge_base.md` get tooltips) |
+| 19.2 diagrams | `diagram-author` | ~30 | 8 | `.mmd` per family chapter + per method-pack architecture sketch |
+| 19.3 augment methods | `web-tldr-writer` + `verification-web` | ~150 | 12 | per-page `{tldr, key_idea, when_to_use, tags}` JSON, gated by verifier |
+| 19.4 rewrite book | `web-book-rewriter` + `verification-web` | 7 | 7 | MDX rewrites for preface/intro/goals/taxonomy/shared-examples/eval-outlook/glossary |
+| 19.5 assemble + build | in-process, no agent | — | — | splice MDX, rewrite sidebar, run `pnpm install && pnpm build` → `dist/` |
 
-Wall-time budget: **~12 minutes** total. 18.3 dominates (~7 min at 12 workers).
+Wall-time budget: **~12 minutes** total. 19.3 dominates (~7 min at 12 workers).
 
 ## Agent Contracts
 
@@ -106,7 +106,7 @@ Wall-time budget: **~12 minutes** total. 18.3 dominates (~7 min at 12 workers).
   }
   ```
 - **Hard rules:** `starlight()` + `expressiveCode` plugins present; sidebar covers every file in `14_chapters/`; package.json pins exact versions.
-- **Static assets (not agent-generated):** the four reusable Astro components (`src/components/Tldr.astro`, `KeyIdea.astro`, `Diagram.astro`, `Term.astro`) live in the repo under `handbook_builder/templates/components/` and are **copied verbatim** by `scaffold.py` into each run's `18_handbook/src/components/`. They are part of the codebase, version-controlled, not regenerated per run. The agent does not author them.
+- **Static assets (not agent-generated):** the four reusable Astro components (`src/components/Tldr.astro`, `KeyIdea.astro`, `Diagram.astro`, `Term.astro`) live in the repo under `handbook_builder/templates/components/` and are **copied verbatim** by `scaffold.py` into each run's `19_handbook/src/components/`. They are part of the codebase, version-controlled, not regenerated per run. The agent does not author them.
 
 ### `web-tldr-writer` (per method page, sharded)
 - **Input:** method-page markdown + its chapter_pack JSON + glossary.
@@ -141,7 +141,7 @@ Wall-time budget: **~12 minutes** total. 18.3 dominates (~7 min at 12 workers).
   ```
 - **Hard rules:** `kb_known: true` entries emitted but not rendered as tooltips (already known to user); every `<Term name="X">` reference in any MDX must resolve.
 
-### `verification-web` (gate for 18.3 and 18.4)
+### `verification-web` (gate for 19.3 and 19.4)
 - **Input:** original chapter markdown + candidate augmented MDX/JSON.
 - **Output:** `{passed: bool, claims: [...], rejection_reason: "..."}` — top-level `passed` flag (matches the runner fix already shipped).
 - **Hard rules:** any claim not in original → `partially_supported` or worse → fail → augmentation discarded, page falls back to original markdown.
@@ -257,7 +257,7 @@ Target: full `pytest tests/` stays under 30s. New stage tests add ~5s.
 
 ## Performance and Caching
 
-- `18_handbook/.cache/manifest.json` stores `{source_path: sha256}` per page.
+- `19_handbook/.cache/manifest.json` stores `{source_path: sha256}` per page.
 - Re-run skips pages whose source markdown is unchanged.
 - Diagrams cached by pack-hash.
 - `--rebuild-all` forces full regeneration. `--rebuild-scaffold` regenerates scaffold + umbrella only.
