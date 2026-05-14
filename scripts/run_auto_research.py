@@ -241,6 +241,16 @@ def _seed_pool_ids(seed_pool: dict[str, Any]) -> list[str]:
     raise RuntimeError("seed_pool_raw.json must include papers as an object or list")
 
 
+def _duplicate_ids(ids: list[str]) -> list[str]:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for arxiv_id in ids:
+        if arxiv_id in seen:
+            duplicates.add(arxiv_id)
+        seen.add(arxiv_id)
+    return sorted(duplicates)
+
+
 def _promoted_ids(promoted: Any) -> list[str]:
     if not isinstance(promoted, dict):
         raise RuntimeError("promoted_papers.json must be an object")
@@ -429,9 +439,19 @@ def validate_bootstrap_stage_0_10_contract(run_dir: Path) -> None:
         raise RuntimeError(
             "seed_pool_raw.json total_kept must match the number of papers in papers"
         )
+    raw_duplicates = _duplicate_ids(raw_seed_ids)
+    if raw_duplicates:
+        raise RuntimeError(
+            f"seed_pool_raw.json papers must not contain duplicate arxiv_id values: {raw_duplicates[:10]}"
+        )
 
     paper_pool = _load_json(run_dir / "02_paper_pool" / "paper_pool.json")
     paper_ids = _paper_pool_ids(paper_pool)
+    paper_duplicates = _duplicate_ids(paper_ids)
+    if paper_duplicates:
+        raise RuntimeError(
+            f"paper_pool.json must not contain duplicate arxiv_id values: {paper_duplicates[:10]}"
+        )
     if len(paper_ids) < MIN_BOOTSTRAP_PAPER_POOL:
         raise RuntimeError(
             f"paper_pool.json must contain at least {MIN_BOOTSTRAP_PAPER_POOL} papers, got {len(paper_ids)}"

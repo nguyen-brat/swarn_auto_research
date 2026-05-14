@@ -1797,6 +1797,61 @@ def test_validate_bootstrap_contract_accepts_real_discovery_shape(tmp_path):
     validate_bootstrap_stage_0_10_contract(run)
 
 
+def test_validate_bootstrap_contract_rejects_duplicate_raw_seed_ids(tmp_path):
+    run = tmp_path / "run"
+    ids = [f"2501.{idx:05d}" for idx in range(40)]
+    _write_valid_bootstrap_contract(run, ids=ids)
+    duplicate_raw_ids = ids + [ids[0]]
+    (run / "01_seed_pool" / "seed_pool_raw.json").write_text(
+        json.dumps(
+            {
+                "papers": duplicate_raw_ids,
+                "total_kept": len(duplicate_raw_ids),
+                "output_path": str(run / "01_seed_pool" / "bulk_search_results_123.json"),
+            }
+        )
+    )
+
+    try:
+        validate_bootstrap_stage_0_10_contract(run)
+    except RuntimeError as error:
+        assert "seed_pool_raw.json papers must not contain duplicate arxiv_id" in str(error)
+    else:
+        raise AssertionError("expected duplicate raw seed failure")
+
+
+def test_validate_bootstrap_contract_rejects_duplicate_paper_pool_ids(tmp_path):
+    run = tmp_path / "run"
+    ids = [f"2501.{idx:05d}" for idx in range(40)]
+    _write_valid_bootstrap_contract(run, ids=ids)
+    duplicate_pool_ids = ids + [ids[0]]
+    (run / "02_paper_pool" / "paper_pool.json").write_text(
+        json.dumps(
+            [
+                {"arxiv_id": arxiv_id, "title": f"Paper {arxiv_id}"}
+                for arxiv_id in duplicate_pool_ids
+            ]
+        )
+    )
+    (run / "02_paper_pool" / "candidate_pool_report.json").write_text(
+        json.dumps(
+            {
+                "raw_kept": len(ids),
+                "selected_total": len(duplicate_pool_ids),
+                "selection_policy": "keep_all_bulk_search_results",
+                "per_aspect_selected": {},
+            }
+        )
+    )
+
+    try:
+        validate_bootstrap_stage_0_10_contract(run)
+    except RuntimeError as error:
+        assert "paper_pool.json must not contain duplicate arxiv_id" in str(error)
+    else:
+        raise AssertionError("expected duplicate paper pool failure")
+
+
 def test_validate_bootstrap_contract_ignores_legacy_target_seed_papers(tmp_path):
     run = tmp_path / "run"
     ids = [f"2501.{idx:05d}" for idx in range(60)]
