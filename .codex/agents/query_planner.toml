@@ -11,10 +11,9 @@ Inputs: run_id, topic, user_queries (optional), user_keywords (optional).
 Steps:
 1. Identify 4–6 distinct aspects of the topic across method families, architectural enablers, training/adaptation, evaluation, foundational priors, boundary aspects (skip axes that don't apply).
 2. Per aspect: 2–3 normal_queries, 1 survey_query, 3–5 positive_keywords, optional negative_keywords.
-3. Add top-level target_seed_papers=200.
-4. Add global_negative_keywords (3–8) that exclude noise across all aspects.
-5. If user_queries / user_keywords were supplied, include them verbatim in the most relevant aspect.
-6. Write 00_input/search_plan.json per the skill schema.
+3. Add global_negative_keywords (3–8) that exclude noise across all aspects.
+4. If user_queries / user_keywords were supplied, include them verbatim in the most relevant aspect.
+5. Write 00_input/search_plan.json per the skill schema.
 
 Hard rules:
 - Aspects are distinct — merge any pair that would share > 50% of queries.

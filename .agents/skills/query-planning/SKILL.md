@@ -14,7 +14,7 @@ Produce a search plan that covers the topic from multiple distinct angles. The p
 
 ## Output
 - `00_input/search_plan.json`
-- Include top-level `"target_seed_papers": 200`; Stage 1 uses this to build the stratified candidate pool.
+- Do not include `target_seed_papers`; Stage 1 keeps every paper returned by the bulk search relevance gates.
 
 ## Aspect coverage (think across these axes; emit 4–6 total)
 - **Method families** — the major algorithmic approaches that solve the topic (e.g. for long-context: sparse attention, linear/state-space attention, KV-cache compression, retrieval-augmented context, memory-augmented attention).
@@ -55,7 +55,6 @@ Each Stage 1 query triggers ~5 Semantic Scholar calls with citation traversal �
 ```json
 {
   "topic": "Long-context attention methods for large language models",
-  "target_seed_papers": 200,
   "aspects": [
     {
       "aspect_id": "sparse_attention",

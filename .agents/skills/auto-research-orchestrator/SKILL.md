@@ -66,7 +66,7 @@ At stage 18, `generate_book_artifacts` ALWAYS produces `SUMMARY.md`, `sidebar.js
 
 ## Budgets
 ```
-target_seed_papers = 200  # Stage 1 candidate pool target
+Stage 1 paper policy: keep every paper returned by bulk_normal_start_search
 max_expansion_gaps = 5    # gap-topic count, not paper count
 max_expansion_rounds = 1
 min_gap_importance = 0.70
@@ -79,7 +79,7 @@ shard_size_chapters = 2       # Stages 13 (book/family), 14, 15, 16 — read sli
 verified_sections_per_paper = 20
 ```
 
-**Cap policy:** Stage 1 targets `target_seed_papers` selected papers from the raw bulk-search result. If the raw result has fewer kept papers, keep them all. If it has more, select a stratified pool across search aspects instead of taking the first/global top papers. After that, no paper-count caps anywhere. Stage 6 keeps every paper meeting the acceptance rules; Stage 7 promotes every paper with `final_score ≥ min_promote_score`. Quality drops out via the relevance gate, not truncation.
+**Cap policy:** Stage 1 does not apply a paper-count cap after `bulk_normal_start_search`. The raw kept papers from `01_seed_pool/seed_pool_raw.json` are copied into `02_paper_pool/paper_pool.json` and `.csv` without downselection. Stage 6 keeps every paper meeting the acceptance rules; Stage 7 promotes every paper with `final_score >= min_promote_score`. Quality drops out via relevance gates and scoring, not Stage 1 truncation.
 
 ## Sharded parallel execution (any stage marked PARALLEL)
 1. Build ordered item list.
@@ -127,21 +127,18 @@ Cap: ≤ 50 concurrent sub-agents per stage. If a stage has more than 50 shards,
 
 Call MCP `bulk_normal_start_search` ONCE with these unioned lists and `output_dir=01_seed_pool/`. The tool dedupes results internally.
 
-**1c. Build the pool.** Save the raw response as `01_seed_pool/seed_pool_raw.json`. Build `02_paper_pool/paper_pool.{json,csv}` from the kept papers:
-- If raw kept papers ≤ `target_seed_papers`, keep every paper.
-- If raw kept papers > `target_seed_papers`, select `target_seed_papers` papers with stratified coverage across the `search_plan.json` aspects. Assign papers to aspects by matching aspect queries / positive keywords against title, abstract, venue, and metadata; round-robin non-empty aspects first, then fill any remaining slots by global relevance/order.
-- Do not silently collapse a large raw pool to 50 papers. For broad topics, a 150–200 paper candidate pool is expected.
+**1c. Build the pool.** Save the raw response as `01_seed_pool/seed_pool_raw.json`. Build `02_paper_pool/paper_pool.{json,csv}` from every paper in `seed_pool_raw["papers"]`:
+- Do not downselect to a fixed target.
+- Do not stratify or round-robin papers out of the pool.
+- Preserve every arXiv ID kept by `bulk_normal_start_search`.
 
 Write `02_paper_pool/candidate_pool_report.json`:
 ```json
 {
   "raw_kept": 391,
-  "target_seed_papers": 200,
-  "selected_total": 200,
-  "per_aspect_selected": {
-    "speech_to_speech_models": 48,
-    "full_duplex_dialogue": 44
-  }
+  "selected_total": 391,
+  "selection_policy": "keep_all_bulk_search_results",
+  "per_aspect_selected": {}
 }
 ```
 
