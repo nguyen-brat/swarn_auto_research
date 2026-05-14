@@ -49,6 +49,6 @@ A trailing `## References` is allowed but not required.
 
 ## Success
 - File starts with `# `; all 10 `##` sections present in exact order.
-- `## Main Variants` contains a comparison table with ≥ 1 row per method.
+- `## Main Variants` contains a comparison table whose rows equal `pack.method_ids` exactly.
 - `## Strengths` and `## Limitations` each have ≥ 3 bullets.
 - Word count 1000–1800.

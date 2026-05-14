@@ -153,6 +153,7 @@ def test_family_writer_contract_forbids_out_of_pack_names():
         assert "main variants" in normalized
         assert "table rows" in normalized
         assert "equal pack.method_ids exactly" in normalized
+        assert "≥ 1 row per method" not in source
 
 
 def test_verifier_contract_allows_family_and_book_synthesis():
