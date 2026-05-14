@@ -23,7 +23,7 @@ BOOK_FILE_BY_ID = {
 NOISY_TITLE_PATTERNS = re.compile(
     r"([.!?])|(\d+(?:\.\d+)?\s*(?:x|%|k|m|b)\b)|"
     r"\b(reports?|reported|achieves?|outperforms?|reaches?|improves?|"
-    r"evaluation|benchmark|speedup|acceleration|trained with|uses? \d+|"
+    r"speedup|acceleration|trained with|uses? \d+|"
     r"on \d+|with \d+)\b",
     re.IGNORECASE,
 )
@@ -822,11 +822,38 @@ def merge_singletons(outline: dict[str, Any]) -> dict[str, Any]:
     if not original_singletons:
         return _prune_invalid_outline_links(out)
 
+    original_singleton_method_ids = {f["id"]: f["method_ids"][0] for f in original_singletons}
+    multi_method_families = [
+        f
+        for f in families
+        if f["id"] != STANDALONE_GROUP_ID and len(f.get("method_ids", [])) >= 2
+    ]
+    reserved_singleton_ids: set[str] = set()
+    reserved_family_id: str | None = None
+    if len(multi_method_families) == 1 and len(original_singletons) >= 2:
+        reserved = original_singletons[-2:]
+        reserved_singleton_ids = {f["id"] for f in reserved}
+        reserved_family_id = reserved[0]["id"]
+        reserved[0]["title"] = "Complementary Methods"
+        reserved[0]["method_ids"] = []
+        reserved[0]["neighbor_family_ids"] = []
+
     for singleton in original_singletons:
         sid = singleton["id"]
         if not any(f["id"] == sid for f in families):
             continue
-        s_method_id = singleton["method_ids"][0]
+        s_method_id = original_singleton_method_ids[sid]
+
+        if sid in reserved_singleton_ids and reserved_family_id is not None:
+            reserve_family = next(f for f in families if f["id"] == reserved_family_id)
+            reserve_family["method_ids"] = list(reserve_family.get("method_ids", [])) + [s_method_id]
+            method_by_id[s_method_id]["family_id"] = reserved_family_id
+            if sid != reserved_family_id:
+                families = [f for f in families if f["id"] != sid]
+                for part in parts:
+                    fids = part.get("family_ids", []) or []
+                    part["family_ids"] = [fid for fid in fids if fid != sid]
+            continue
 
         candidates = [
             f

@@ -58,11 +58,11 @@ class PaperSearchToolTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             [call.kwargs["depth"] for call in calls],
-            [1, 2, 3],
+            [1, 1, 2],
         )
         self.assertEqual(
             [call.kwargs["citation_limit_per_level"] for call in calls],
-            [20, 30, 20],
+            [15, 20, 15],
         )
         self.assertEqual(
             [call.kwargs["min_citation_depth"] for call in calls],

@@ -49,6 +49,7 @@ def _load_bulk_search_config():
 from swarn_research_mcp.services.semantic_scholar import (
     paper_batch,
     paper_metadata_simple,
+    paper_metadata_simple_batch,
     paper_relevance_search,
     recommendations_multi,
 )
@@ -162,16 +163,49 @@ async def validate_related_papers_with_codex(
     return related_ids
 
 
+def _coerce_string_list(value, *, field_name: str) -> list[str]:
+    """Accept either a list[str] or a single newline/comma-delimited string.
+
+    Agents connecting through MCP often serialize list parameters as one
+    string. Split on newlines first; if there is only one resulting item
+    AND it contains commas, fall back to comma-splitting. Strip and drop
+    empties so we never produce blank queries (which made Hugging Face
+    return 400 for q=+).
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parts = [line.strip() for line in value.splitlines() if line.strip()]
+        if len(parts) <= 1 and "," in value:
+            parts = [p.strip() for p in value.split(",") if p.strip()]
+        return parts
+    if isinstance(value, (list, tuple)):
+        cleaned = [str(item).strip() for item in value if str(item).strip()]
+        return cleaned
+    raise TypeError(
+        f"{field_name} must be a list of strings or a newline/comma "
+        f"delimited string, got {type(value).__name__}"
+    )
+
+
 async def bulk_normal_start_search(
-    queries, 
-    survey_queries, 
-    positive_keywords,
-    negative_keywords,
-    output_dir
+    queries: list[str],
+    survey_queries: list[str],
+    positive_keywords: list[str],
+    negative_keywords: list[str],
+    output_dir: str | None = None,
 ):
+    queries = _coerce_string_list(queries, field_name="queries")
+    survey_queries = _coerce_string_list(survey_queries, field_name="survey_queries")
+    positive_keywords = _coerce_string_list(positive_keywords, field_name="positive_keywords")
+    negative_keywords = _coerce_string_list(negative_keywords, field_name="negative_keywords")
+    if not queries:
+        raise ValueError("queries must contain at least one non-empty string")
+
     cfg = _load_bulk_search_config()
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = Path(output_dir) if output_dir is not None else None
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
     current_date = datetime.datetime.now()
     current_year = current_date.year
     start_year = str(current_year - 4)
@@ -356,21 +390,38 @@ async def bulk_normal_start_search(
         f"related={selected_results['total_kept']} from {len(keyword_filtered_papers)}"
     )
 
-    output_path = output_dir / f"bulk_search_results_{int(time())}.json"
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(selected_results["papers"], f, ensure_ascii=False, indent=2)
+    if output_dir is not None:
+        output_path = output_dir / f"bulk_search_results_{int(time())}.json"
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(selected_results["papers"], f, ensure_ascii=False, indent=2)
+        selected_results["output_path"] = str(output_path)
     print("Bulk search done")
-    selected_results["output_path"] = str(output_path)
     return selected_results
 
 
-async def get_paper_markdown(arxiv_id: str) -> dict:
+def _ensure_output_dir(output_dir):
+    if output_dir is None:
+        return None
+    path = Path(output_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _section_filename_slug(section: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", section).strip("_").lower()
+    return slug or "section"
+
+
+async def get_paper_markdown(arxiv_id: str, output_dir: str | None = None) -> dict:
     """Return the full Markdown content for an arXiv paper.
 
-    Returns {"arxiv_id", "markdown"} on success.
-    Returns {"arxiv_id", "markdown": "", "error": "<TypeName: msg>"}
-    on any failure (bad ID, upstream 4xx/5xx, network error) so the
-    caller never has to invent a fallback.
+    When `output_dir` is None: returns {"arxiv_id", "markdown"}.
+    When `output_dir` is provided: writes the markdown to
+    `{output_dir}/{arxiv_id}.md` and returns {"arxiv_id", "output_path"}
+    instead of the full text.
+    On any failure (bad ID, upstream 4xx/5xx, network error) returns
+    {"arxiv_id", "markdown": "", "error": "<TypeName: msg>"} and does
+    NOT write a file even if output_dir was given.
     """
     try:
         markdown = await get_arxiv_markdown(arxiv_id, remove_toc=False)
@@ -380,17 +431,27 @@ async def get_paper_markdown(arxiv_id: str) -> dict:
             "markdown": "",
             "error": f"{type(exc).__name__}: {exc}",
         }
-    return {"arxiv_id": arxiv_id, "markdown": markdown}
+    out = _ensure_output_dir(output_dir)
+    if out is None:
+        return {"arxiv_id": arxiv_id, "markdown": markdown}
+    output_path = out / f"{arxiv_id}.md"
+    output_path.write_text(markdown, encoding="utf-8")
+    return {"arxiv_id": arxiv_id, "output_path": str(output_path)}
 
 
-async def get_paper_section(arxiv_id: str, section: str) -> dict:
+async def get_paper_section(
+    arxiv_id: str, section: str, output_dir: str | None = None
+) -> dict:
     """Return a single Markdown section from an arXiv paper.
 
-    Returns {"arxiv_id", "section_path", "section"} on success.
-    Returns {"arxiv_id", "section_path", "section": "",
-    "error": "<TypeName: msg>"} on any failure (bad ID, missing
-    heading, upstream error). Heading lookup is case-insensitive
-    and ignores leading numeric prefixes like "1 Introduction".
+    When `output_dir` is None: returns {"arxiv_id", "section_path", "section"}.
+    When `output_dir` is provided: writes the section text to
+    `{output_dir}/{arxiv_id}__{slug}.md` and returns
+    {"arxiv_id", "section_path", "output_path"}.
+    On any failure (bad ID, missing heading, upstream error) returns
+    {"arxiv_id", "section_path", "section": "", "error": ...} and does
+    NOT write a file. Heading lookup is case-insensitive and ignores
+    leading numeric prefixes like "1 Introduction".
     """
     try:
         markdown = await get_arxiv_markdown(arxiv_id, remove_toc=False)
@@ -402,46 +463,95 @@ async def get_paper_section(arxiv_id: str, section: str) -> dict:
             "section": "",
             "error": f"{type(exc).__name__}: {exc}",
         }
+    out = _ensure_output_dir(output_dir)
+    if out is None:
+        return {
+            "arxiv_id": arxiv_id,
+            "section_path": section,
+            "section": section_text,
+        }
+    output_path = out / f"{arxiv_id}__{_section_filename_slug(section)}.md"
+    output_path.write_text(section_text, encoding="utf-8")
     return {
         "arxiv_id": arxiv_id,
         "section_path": section,
-        "section": section_text,
+        "output_path": str(output_path),
     }
 
 
-async def get_paper_metadata(arxiv_id: str) -> dict:
-    """Fetch Semantic Scholar metadata for one arXiv paper.
+async def get_paper_metadata(
+    arxiv_ids: list[str], output_dir: str | None = None
+) -> dict:
+    """Fetch Semantic Scholar metadata for one or more arXiv papers.
 
-    Returns a flat dict with title, year, abstract, citationCount,
-    and referenceCount on success.
-    Returns {"arxiv_id", "found": False} when Semantic Scholar has
-    no record for the ID.
-    Returns {"arxiv_id", "found": False, "error": "<TypeName: msg>"}
-    on network/HTTP failure so the caller never has to invent a
-    fallback.
+    Sends the whole id list in a single POST to /paper/batch. On HTTP
+    429 the batch is split in half and each half retried, recursively,
+    until every sub-batch either succeeds or shrinks to a single id
+    that still 429s (in which case that id gets a structured error).
+
+    Accepts either a list of arxiv ids or a single id string for
+    convenience.
+
+    When `output_dir` is None: returns {"results": [...]} where each
+    entry is the flat metadata dict, {arxiv_id, found: False}, or
+    {arxiv_id, found: False, error: ...}. Result order matches input.
+
+    When `output_dir` is provided: writes one file per id to
+    `{output_dir}/{arxiv_id}.json` (containing that id's record) and
+    returns {"results": [{arxiv_id, output_path}, ...]} for successful
+    or not-found rows. Error rows still carry the error in-line and
+    are NOT written to disk.
     """
+    if isinstance(arxiv_ids, str):
+        arxiv_ids = [arxiv_ids]
+    arxiv_ids = list(arxiv_ids)
+    if not arxiv_ids:
+        return {"results": []}
+
     try:
-        row = await paper_metadata_simple(arxiv_id)
+        rows = await paper_metadata_simple_batch(arxiv_ids)
     except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
         return {
-            "arxiv_id": arxiv_id,
-            "found": False,
-            "error": f"{type(exc).__name__}: {exc}",
+            "results": [
+                {"arxiv_id": arxiv_id, "found": False, "error": error}
+                for arxiv_id in arxiv_ids
+            ],
         }
-    if not row:
-        return {"arxiv_id": arxiv_id, "found": False}
-    row.setdefault("arxiv_id", arxiv_id)
-    return row
+
+    out = _ensure_output_dir(output_dir)
+    results = []
+    for arxiv_id, row in zip(arxiv_ids, rows):
+        if not row:
+            row = {"arxiv_id": arxiv_id, "found": False}
+        elif row.get("found") is not False:
+            row.setdefault("arxiv_id", arxiv_id)
+        if out is None or "error" in row:
+            results.append(row)
+            continue
+        output_path = out / f"{arxiv_id}.json"
+        output_path.write_text(
+            json.dumps(row, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        entry = {"arxiv_id": arxiv_id, "output_path": str(output_path)}
+        if row.get("found") is False:
+            entry["found"] = False
+        results.append(entry)
+    return {"results": results}
 
 
-async def get_alphaxiv_overview(arxiv_id: str) -> dict:
+async def get_alphaxiv_overview(
+    arxiv_id: str, output_dir: str | None = None
+) -> dict:
     """Fetch the alphaXiv overview Markdown for an arXiv paper.
 
-    Returns a dict with arxiv_id and markdown when the fetch succeeds.
-    On any failure (paper has no alphaXiv overview, network error,
-    upstream API change), returns {"arxiv_id": ..., "markdown": "",
-    "error": "<actual reason>"} so the caller never has to invent a
-    fallback message.
+    When `output_dir` is None: returns {"arxiv_id", "markdown"}.
+    When `output_dir` is provided: writes the full result to
+    `{output_dir}/{arxiv_id}.json` and returns
+    {"arxiv_id", "output_path"} instead of the markdown body.
+    On any failure (no alphaXiv overview, network error, upstream API
+    change), returns {"arxiv_id", "markdown": "", "error": ...} and
+    does NOT write a file.
     """
     try:
         markdown = await get_alphaxiv_overview_markdown(arxiv_id)
@@ -451,7 +561,16 @@ async def get_alphaxiv_overview(arxiv_id: str) -> dict:
             "markdown": "",
             "error": f"{type(exc).__name__}: {exc}",
         }
-    return {"arxiv_id": arxiv_id, "markdown": markdown}
+    out = _ensure_output_dir(output_dir)
+    if out is None:
+        return {"arxiv_id": arxiv_id, "markdown": markdown}
+    output_path = out / f"{arxiv_id}.json"
+    output_path.write_text(
+        json.dumps({"arxiv_id": arxiv_id, "markdown": markdown},
+                   ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return {"arxiv_id": arxiv_id, "output_path": str(output_path)}
 
 if __name__ == "__main__":
     queries = [

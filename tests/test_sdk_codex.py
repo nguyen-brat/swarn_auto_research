@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -54,6 +56,59 @@ class SdkCodexScriptTest(unittest.TestCase):
             with patch("shutil.which", return_value=None):
                 with self.assertRaisesRegex(RuntimeError, "Could not find a `codex` binary"):
                     module.resolve_codex_bin()
+
+    def test_run_one_shot_returns_thread_and_turn_ids(self) -> None:
+        module = load_sdk_codex_module()
+
+        class FakeTurn:
+            id = "turn-123"
+
+            def stream(self):
+                return object()
+
+        class FakeThread:
+            id = "thread-abc"
+
+            async def turn(self, prompt, **kwargs):
+                self.prompt = prompt
+                self.kwargs = kwargs
+                return FakeTurn()
+
+        class FakeCodex:
+            def __init__(self, config):
+                self.config = config
+                self.thread = FakeThread()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return False
+
+            async def thread_start(self, **kwargs):
+                self.thread_start_kwargs = kwargs
+                return self.thread
+
+        async def fake_collect(_stream, *, turn_id):
+            return SimpleNamespace(final_response="done", usage=None, items=[])
+
+        async def go():
+            with (
+                patch.object(module, "AsyncCodex", FakeCodex),
+                patch.object(module, "_collect_async_run_result", side_effect=fake_collect),
+            ):
+                return await module.run_one_shot(
+                    prompt="hello",
+                    model="gpt-5.4-mini",
+                    cwd=module.REPO_ROOT,
+                    timeout=12,
+                )
+
+        result = asyncio.run(go())
+
+        self.assertEqual(result.thread_id, "thread-abc")
+        self.assertEqual(result.turn_id, "turn-123")
+        self.assertEqual(result.final_response, "done")
 
 
 if __name__ == "__main__":

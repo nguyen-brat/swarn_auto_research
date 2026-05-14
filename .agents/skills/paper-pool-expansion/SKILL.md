@@ -1,45 +1,38 @@
 ---
 name: paper-pool-expansion
-description: Expand the paper pool only to cover important unknown concepts.
+description: Add foundational papers that EXPLAIN unknown concepts. Relevance is the only filter — no count cap.
 ---
 
 # Paper Pool Expansion
 
-## Goal
-For each item in the expansion queue, find a small number of foundational papers that explain the unknown concept, and add only the accepted ones to the pool.
-
 ## Inputs
-- `06_expansion/expansion_need_queue.json`
-- `02_paper_pool/paper_pool.json` (to dedupe)
+- `gap_items` — sharded slice of `06_expansion/expansion_need_queue.json` items
+- `02_paper_pool/paper_pool.json` (read-only; for dedupe)
 
-## Outputs
-- `06_expansion/expansion_round_01.json` — full search log for the round
-- `06_expansion/accepted_candidates.csv`
-- `06_expansion/rejected_candidates.csv`
-- updated `02_paper_pool/paper_pool.json` and `02_paper_pool/paper_pool.csv`
+## Outputs (per shard)
+- `06_expansion/expansion_round_01_shard_{shard_id}.json` (status='completed' when slice had items, even if zero accepted)
+- `06_expansion/accepted_candidates_shard_{shard_id}.csv`
+- `06_expansion/rejected_candidates_shard_{shard_id}.csv`
+
+## Outputs (orchestrator merge)
+- `06_expansion/expansion_round_01.json`, `accepted_candidates.csv`, `rejected_candidates.csv`
+- Updated `02_paper_pool/paper_pool.json` and `.csv`
 
 ## Rules
-- Run exactly ONE expansion round in MVP.
-- **If `expansion_need_queue.json.items` is non-empty, you MUST run a search for every queue item.** Skipping the round is not an option at this stage. The decision to skip Stage 6 entirely is the orchestrator's, and it only applies when the queue is empty.
-- **"Seed papers mention the concept" is NOT a reason to skip.** Papers that USE a concept assume the reader already knows it; expansion adds papers that EXPLAIN the concept (foundational/survey/canonical). These are different sets. Confusing them defeats the purpose of expansion.
-- For each queue item, run `bulk_normal_start_search` with the item's `search_queries`. Even if every result gets rejected, write the search results to `expansion_round_01.json` so the audit trail shows the round actually ran.
-- Accept a candidate only if ALL hold:
-  - directly explains the unknown concept (foundational paper, survey, or canonical reference)
-  - has an arXiv ID
-  - is not already in the pool
-  - is needed to understand a key paper in the run
-- Reject if loosely related, application-specific, duplicate, or low relevance. Record every rejection in `rejected_candidates.csv` with a `why_rejected`.
-- Cap: at most `max_papers_to_add` papers per gap (default 3). Stop early when reached.
-- Total cap across the round: ≤ 15 new papers (5 gaps × 3 papers).
-- Every accepted paper record must include `added_for_gap` and `why_needed`.
-- `expansion_round_01.json` `status` must be `"completed"` whenever the queue had items, even if zero candidates were accepted. `"skipped"` is only permitted when the queue itself was empty (and in that case the orchestrator should never have dispatched you).
+- Exactly ONE round in MVP.
+- Non-empty slice → MUST search every item. Skipping is never valid.
+- "Seed papers mention X" ≠ "seed papers explain X" — only the second substitutes for expansion.
+- Per item: `bulk_normal_start_search(search_queries)` and log raw results into the round file even when every result is rejected.
+- Accept only when ALL hold: directly explains the concept (foundational/survey/canonical) AND has arxiv_id AND not already in pool AND needed for a key paper.
+- No paper-count cap. Reject loosely-related / application-specific / duplicate / low-relevance with `why_rejected`.
+- Every acceptance has `added_for_gap` and `why_needed`.
 
 ## Accepted CSV columns
 ```
 arxiv_id,gap_id,unknown_concept,title,candidate_role,score,why_needed
 ```
 
-## Pool record extension for expansion papers
+## Pool record extension
 ```json
 {
   "arxiv_id": "2103.00020",
@@ -53,8 +46,5 @@ arxiv_id,gap_id,unknown_concept,title,candidate_role,score,why_needed
 }
 ```
 
-## Success check
-- `accepted_candidates.csv` and `rejected_candidates.csv` exist.
-- Updated `paper_pool.json` has no duplicate arxiv_ids.
-- Every new paper has `added_for_gap` and `why_needed`.
-- Total new papers ≤ 15.
+## Success
+- Both CSVs exist; `paper_pool.json` has no duplicates; every new paper has `added_for_gap` + `why_needed`.

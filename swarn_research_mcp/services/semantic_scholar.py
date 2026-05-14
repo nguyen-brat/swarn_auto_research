@@ -24,6 +24,7 @@ from time import sleep
 
 from dotenv import load_dotenv
 
+from . import persistent_cache
 from .utils import http_get, http_post, run_blocking, safe_get
 
 load_dotenv()
@@ -186,20 +187,32 @@ def _paper_cache_keys_from_paper(paper):
 
 
 def _get_cached_paper_detail(paper_id):
+    keys = _paper_cache_keys_from_id(paper_id)
     with PAPER_DETAIL_CACHE_LOCK:
-        for key in _paper_cache_keys_from_id(paper_id):
+        for key in keys:
             paper = PAPER_DETAIL_CACHE.get(key)
             if paper:
                 return paper
+    # Fall back to persistent disk cache.
+    paper = persistent_cache.get(keys)
+    if paper:
+        # Promote to in-memory cache so subsequent hits skip the file read.
+        with PAPER_DETAIL_CACHE_LOCK:
+            for key in _paper_cache_keys_from_paper(paper):
+                PAPER_DETAIL_CACHE[key] = paper
+        return paper
     return None
 
 
 def _cache_paper_detail(paper):
     if not paper:
         return
+    keys = _paper_cache_keys_from_paper(paper)
     with PAPER_DETAIL_CACHE_LOCK:
-        for key in _paper_cache_keys_from_paper(paper):
+        for key in keys:
             PAPER_DETAIL_CACHE[key] = paper
+    # Persist to disk cache (batched flush, atomic write).
+    persistent_cache.put(keys, paper)
 
 
 def _normalize_exclude_paper_ids(exclude_paper_ids):
@@ -773,11 +786,27 @@ def _paper_relevance_search_models_sync(
         f"  S2 relevance search start: query={query!r}, limit={limit}, "
         f"year={params['year']}, minCitationCount={min_citation_count}, depth={depth}"
     )
-    data = _semantic_scholar_get(
-        f"{GRAPH_BASE}/paper/search",
-        params=params,
-        headers=HEADERS,
-    )
+    # Search-result cache lookup. Key combines the parameters that
+    # determine S2's ranked output. Citation traversal still happens
+    # downstream (and goes through the paper-detail cache); we only
+    # short-circuit the /paper/search call itself here.
+    search_cache_key = "|".join([
+        str(query),
+        str(params.get("year") or ""),
+        str(params.get("minCitationCount") or ""),
+        str(params.get("limit") or ""),
+    ])
+    data = persistent_cache.get_search(search_cache_key)
+    if data is not None:
+        print(f"  S2 relevance search cache HIT: query={query!r}")
+    else:
+        data = _semantic_scholar_get(
+            f"{GRAPH_BASE}/paper/search",
+            params=params,
+            headers=HEADERS,
+        )
+        if data:
+            persistent_cache.put_search(search_cache_key, data)
     result = []
     if data:
         raw_count = len(data.get("data", []))
@@ -1125,28 +1154,9 @@ PAPER_METADATA_SIMPLE_FIELDS = (
 )
 
 
-def _paper_metadata_simple_sync(arxiv_id: str) -> dict:
-    """Fetch one paper's metadata using a small field list.
-
-    The full PAPER_WITH_LINKED_FIELDS list (used by paper_batch) makes
-    Semantic Scholar return HTTP 400 for single-paper batch lookups.
-    The MCP-tool consumer only needs scalar metadata plus citation/
-    reference counts, so use the smaller search-fields set instead.
-    """
-    payload = {"ids": [f"ArXiv:{arxiv_id}"]}
-    params = {"fields": PAPER_METADATA_SIMPLE_FIELDS}
-    data = _semantic_scholar_post(
-        f"{GRAPH_BASE}/paper/batch",
-        payload,
-        params=params,
-        headers=HEADERS,
-    )
-    rows = _normalize_batch_response(data)
-    if not rows or not rows[0]:
-        return {}
-    paper = rows[0]
+def _row_to_simple_metadata(paper: dict, fallback_arxiv_id: str) -> dict:
     return {
-        "arxiv_id": safe_get(paper, "externalIds.ArXiv") or arxiv_id,
+        "arxiv_id": safe_get(paper, "externalIds.ArXiv") or fallback_arxiv_id,
         "scholar_semantic_id": paper.get("paperId"),
         "title": paper.get("title"),
         "year": paper.get("year"),
@@ -1156,8 +1166,87 @@ def _paper_metadata_simple_sync(arxiv_id: str) -> dict:
     }
 
 
+def _paper_metadata_simple_post(arxiv_ids: list[str]) -> list:
+    """One POST against /paper/batch for the given arxiv_ids slice.
+
+    Caller is responsible for chunking. Lets the underlying 429 raise
+    propagate so the batch-with-split helper can react.
+    """
+    payload = {"ids": [f"ArXiv:{arxiv_id}" for arxiv_id in arxiv_ids]}
+    params = {"fields": PAPER_METADATA_SIMPLE_FIELDS}
+    data = _semantic_scholar_post(
+        f"{GRAPH_BASE}/paper/batch",
+        payload,
+        params=params,
+        headers=HEADERS,
+    )
+    return _normalize_batch_response(data)
+
+
+def _paper_metadata_simple_batch_sync(arxiv_ids: list[str]) -> list[dict]:
+    """Fetch metadata for many arxiv_ids in one POST, halving on 429.
+
+    Returns a list aligned with the input order. Each entry is either
+    the simple-metadata dict or {"arxiv_id": id, "found": False[, "error"]}.
+
+    On HTTP 429, recursively split the batch in half until success or
+    until a single-id batch still 429s — at which point the failure is
+    recorded per id rather than crashing the whole call.
+    """
+    if not arxiv_ids:
+        return []
+
+    try:
+        rows = _paper_metadata_simple_post(arxiv_ids)
+    except Exception as exc:
+        if not _is_rate_limit_error(exc):
+            raise
+        if len(arxiv_ids) == 1:
+            return [{
+                "arxiv_id": arxiv_ids[0],
+                "found": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }]
+        mid = len(arxiv_ids) // 2
+        left = _paper_metadata_simple_batch_sync(arxiv_ids[:mid])
+        right = _paper_metadata_simple_batch_sync(arxiv_ids[mid:])
+        return left + right
+
+    by_arxiv_id: dict[str, dict] = {}
+    for paper in rows:
+        if not paper:
+            continue
+        resolved_id = safe_get(paper, "externalIds.ArXiv")
+        if resolved_id:
+            by_arxiv_id[str(resolved_id)] = paper
+
+    results: list[dict] = []
+    for index, arxiv_id in enumerate(arxiv_ids):
+        paper = by_arxiv_id.get(arxiv_id)
+        if paper is None and index < len(rows):
+            paper = rows[index] or None
+        if not paper:
+            results.append({"arxiv_id": arxiv_id, "found": False})
+            continue
+        results.append(_row_to_simple_metadata(paper, arxiv_id))
+    return results
+
+
+def _paper_metadata_simple_sync(arxiv_id: str) -> dict:
+    """Single-paper helper. Raises on transport/HTTP errors so the
+    MCP tool wrapper can format a structured-error response."""
+    rows = _paper_metadata_simple_post([arxiv_id])
+    if not rows or not rows[0]:
+        return {}
+    return _row_to_simple_metadata(rows[0], arxiv_id)
+
+
 async def paper_metadata_simple(arxiv_id: str) -> dict:
     return await run_blocking(_paper_metadata_simple_sync, arxiv_id)
+
+
+async def paper_metadata_simple_batch(arxiv_ids: list[str]) -> list[dict]:
+    return await run_blocking(_paper_metadata_simple_batch_sync, list(arxiv_ids))
 
 
 # ---------------------------------------------------------------------------

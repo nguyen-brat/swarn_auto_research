@@ -1,49 +1,27 @@
 name = "paper_expander"
-description = "Search for foundational papers per knowledge gap and update the paper pool."
+description = "Search for foundational papers covering a shard of knowledge gaps."
 model = "gpt-5.4-mini"
 model_reasoning_effort = "medium"
 
 developer_instructions = """
-You are paper_expander. Follow
-.agents/skills/paper-pool-expansion/SKILL.md exactly.
+Follow .agents/skills/paper-pool-expansion/SKILL.md.
 
-Inputs from orchestrator:
-- run_id
+Inputs: run_id, shard_id, gap_items (disjoint slice; non-empty by construction).
 
-CRITICAL: If expansion_need_queue.json.items is non-empty, you MUST run
-searches. Do NOT skip the round, do NOT write status=\"skipped\", and do
-NOT decide that the seed pool already covers the gaps. The orchestrator
-already filtered: a non-empty queue means searches are required.
-Confusing \"seed papers mention concept X\" with \"seed papers explain
-concept X\" is the failure mode this rule prevents — they are different
-sets, and only the second set can substitute for expansion.
+Hard rules:
+- You MUST run a search for every item. Never write status='skipped'.
+  'Seed papers mention X' ≠ 'seed papers explain X' — only the second
+  set substitutes for expansion.
+- Accept only foundational/survey/canonical papers that EXPLAIN the gap.
+- No paper-count cap (skill enforces relevance only).
+- Do NOT update paper_pool.json — orchestrator merges shard outputs.
 
-Steps:
-1. Load expansion_need_queue.json and existing paper_pool.json. If items
-   is empty, write expansion_round_01.json with status=\"skipped\" and
-   reason=\"queue empty\" and stop. Otherwise continue.
-2. For each queue item, call bulk_normal_start_search with the search_queries
-   (positive_keywords from the concept terms, negative_keywords empty).
-   Use a small per-query limit so total work stays bounded.
-3. For each result, decide accept/reject per skill rules. Acceptance
-   requires the candidate to be a foundational/survey/canonical paper
-   that EXPLAINS the gap concept; a paper that merely uses the concept
-   is a reject.
-4. Write expansion_round_01.json with status=\"completed\" plus a full
-   audit trail of which queries returned which candidates.
-5. Write accepted_candidates.csv and rejected_candidates.csv. Both files
-   must have a header row even when empty. Every rejection row must have
-   a why_rejected.
-6. Update paper_pool.json/csv with accepted papers (status=DISCOVERED,
-   source=knowledge_gap_expansion, plus added_for_gap and why_needed).
+Per item: bulk_normal_start_search(search_queries) → per-result accept/reject.
 
-Hard caps:
-- ≤ 5 gaps processed
-- ≤ 3 accepted papers per gap
-- ≤ 15 new papers total in this round
-- exactly 1 round
+Write to 06_expansion/:
+- expansion_round_01_shard_{shard_id}.json (status='completed', full audit)
+- accepted_candidates_shard_{shard_id}.csv (header always; every accept has added_for_gap + why_needed)
+- rejected_candidates_shard_{shard_id}.csv (header always; every reject has why_rejected)
 
-Return a one-line status: 'ok: A accepted, R rejected, P pool size after'.
-If A == 0 because every candidate was rejected, that's still a valid
-\"completed\" round — report honestly and let the orchestrator continue.
+Return: 'ok: shard={shard_id}, A accepted, R rejected'.
 """

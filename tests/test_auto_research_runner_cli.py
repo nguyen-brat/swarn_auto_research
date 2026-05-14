@@ -2,21 +2,36 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
 from scripts.run_auto_research import (
+    ShardSpec,
     bootstrap_new_run,
     build_deterministic_stage_13_packs,
     build_chapter_targets,
     main,
     run_deterministic_command,
+    run_shards,
+    run_stage_1,
+    run_stage_2,
+    run_stage_3,
+    run_stage_4,
+    run_stage_5,
+    run_stage_6,
+    run_stage_7,
+    run_stage_8,
+    run_stage_9,
+    run_stage_10,
     run_stage_13,
     run_stage_14,
     run_stage_15,
     run_stage_16,
     run_stage_18,
     save_run_state,
+    validate_bootstrap_stage_0_10_contract,
 )
 
 
@@ -64,6 +79,47 @@ def test_run_deterministic_command_logs_launch_error(tmp_path):
     assert "18,failed,missing-command" in (run / "run_log.csv").read_text()
 
 
+def test_run_shards_honors_max_workers_20(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    active = 0
+    max_seen = 0
+    lock = threading.Lock()
+
+    def fake_run(cmd, cwd, text, stdout, stderr, timeout):
+        nonlocal active, max_seen
+        with lock:
+            active += 1
+            max_seen = max(max_seen, active)
+        try:
+            output_path = run / cmd[-1]
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text("ok\n")
+            time.sleep(0.03)
+            return subprocess.CompletedProcess(cmd, 0)
+        finally:
+            with lock:
+                active -= 1
+
+    specs = [
+        ShardSpec(
+            stage="14",
+            shard_id=f"parallel-{idx:03d}",
+            agent="method_chapter_writer",
+            model="gpt-5.4",
+            prompt=f"out/{idx}.txt",
+            expected_outputs=[f"out/{idx}.txt"],
+        )
+        for idx in range(20)
+    ]
+
+    with patch("scripts.run_auto_research.subprocess.run", side_effect=fake_run):
+        run_shards(run, specs, max_workers=20, executor="cli")
+
+    assert max_seen > 1
+    assert all((run / f"out/{idx}.txt").exists() for idx in range(20))
+
+
 def test_run_stage_18_runs_generate_then_validate(tmp_path):
     run = tmp_path / "research_runs" / "demo"
     run.mkdir(parents=True)
@@ -95,6 +151,391 @@ def test_run_stage_18_runs_generate_then_validate(tmp_path):
         str(run),
         "--validate",
     ]
+
+
+def test_run_stage_1_dispatches_query_planner_and_requires_pool_report(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    calls = []
+
+    def fake_run_shards(run_dir, specs, **kwargs):
+        calls.extend(specs)
+        (run / "00_input").mkdir(parents=True, exist_ok=True)
+        (run / "01_seed_pool").mkdir(parents=True, exist_ok=True)
+        (run / "02_paper_pool").mkdir(parents=True, exist_ok=True)
+        aspects = [
+            {
+                "aspect_id": f"aspect_{idx}",
+                "normal_queries": [f"normal {idx}"],
+                "survey_queries": [f"survey {idx}"],
+                "positive_keywords": [f"keyword {idx}"],
+            }
+            for idx in range(4)
+        ]
+        (run / "00_input" / "search_plan.json").write_text(
+            json.dumps({"topic": "Demo", "target_seed_papers": 200, "aspects": aspects})
+        )
+        bulk_path = run / "01_seed_pool" / "bulk_search_results_123.json"
+        ids = [f"2501.{idx:05d}" for idx in range(40)]
+        bulk_path.write_text(json.dumps({"papers": ids}))
+        (run / "01_seed_pool" / "seed_pool_raw.json").write_text(
+            json.dumps(
+                {
+                    "papers": {arxiv_id: "abstract" for arxiv_id in ids},
+                    "total_kept": 40,
+                    "output_path": str(bulk_path),
+                }
+            )
+        )
+        (run / "02_paper_pool" / "paper_pool.json").write_text(
+            json.dumps([{"arxiv_id": arxiv_id} for arxiv_id in ids])
+        )
+        (run / "02_paper_pool" / "paper_pool.csv").write_text(
+            "arxiv_id\n" + "\n".join(ids) + "\n"
+        )
+        (run / "02_paper_pool" / "candidate_pool_report.json").write_text(
+            json.dumps(
+                {
+                    "raw_kept": 40,
+                    "target_seed_papers": 200,
+                    "selected_total": 40,
+                    "per_aspect_selected": {f"aspect_{idx}": 10 for idx in range(4)},
+                }
+            )
+        )
+
+    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+
+    run_stage_1(run)
+
+    assert len(calls) == 1
+    assert calls[0].stage == "1"
+    assert calls[0].agent == "query_planner"
+    assert "Run Stage 1 only" in calls[0].prompt
+    assert "candidate_pool_report.json" in calls[0].prompt
+
+
+def test_run_stage_2_chunks_paper_pool_into_weak_evidence_specs(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    (run / "02_paper_pool").mkdir(parents=True)
+    ids = [f"2501.{idx:05d}" for idx in range(12)]
+    (run / "02_paper_pool" / "paper_pool.json").write_text(
+        json.dumps([{"arxiv_id": arxiv_id} for arxiv_id in ids])
+    )
+    captured = []
+
+    def fake_run_shards(run_dir, specs, **kwargs):
+        captured.extend(specs)
+        for spec in specs:
+            for rel_path in spec.expected_outputs:
+                out = run_dir / rel_path
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(json.dumps({"reader_needed_concepts": ["concept"]}))
+
+    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+
+    run_stage_2(run, max_workers=20)
+
+    assert [len(spec.expected_outputs) for spec in captured] == [5, 5, 2]
+    assert all(spec.agent == "weak_evidence_extractor" for spec in captured)
+    assert all("Run Stage 2 only" in spec.prompt for spec in captured)
+    assert all("arxiv_ids" in spec.prompt for spec in captured)
+
+
+def test_run_stage_3_chunks_paper_pool_and_merges_weak_graph_fragments(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    (run / "02_paper_pool").mkdir(parents=True)
+    ids = [f"2501.{idx:05d}" for idx in range(12)]
+    (run / "02_paper_pool" / "paper_pool.json").write_text(
+        json.dumps([{"arxiv_id": arxiv_id} for arxiv_id in ids])
+    )
+    captured = []
+
+    def fake_run_shards(run_dir, specs, **kwargs):
+        captured.extend(specs)
+        for spec in specs:
+            for rel_path in spec.expected_outputs:
+                arxiv_id = Path(rel_path).stem
+                out = run_dir / rel_path
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(
+                    json.dumps(
+                        {
+                            "nodes": [
+                                {"id": arxiv_id, "type": "Paper"},
+                                {"id": "shared-method", "type": "Method"},
+                            ],
+                            "edges": [
+                                {
+                                    "src": arxiv_id,
+                                    "dst": "shared-method",
+                                    "type": "USES",
+                                    "confidence": "weak",
+                                }
+                            ],
+                        }
+                    )
+                )
+
+    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+
+    run_stage_3(run, max_workers=20)
+
+    assert [len(spec.expected_outputs) for spec in captured] == [5, 5, 2]
+    assert all(spec.agent == "weak_graph_extractor" for spec in captured)
+    graph = json.loads((run / "05_weak_graph" / "weak_global_graph.json").read_text())
+    assert len(graph["nodes"]) == 13
+    assert len(graph["edges"]) == 12
+
+
+def test_run_stage_4_dispatches_knowledge_base_reader(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    captured = []
+
+    def fake_run_shards(run_dir, specs, **kwargs):
+        captured.extend(specs)
+        out = run_dir / "06_expansion" / "known_concepts_snapshot.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({"known_concepts": []}))
+
+    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+
+    run_stage_4(run)
+
+    assert len(captured) == 1
+    assert captured[0].agent == "knowledge_base_reader"
+    assert captured[0].expected_outputs == ["06_expansion/known_concepts_snapshot.json"]
+
+
+def test_run_stage_5_dispatches_gap_detector_and_logs_queue_count(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    captured = []
+
+    def fake_run_shards(run_dir, specs, **kwargs):
+        captured.extend(specs)
+        out_dir = run_dir / "06_expansion"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "knowledge_gap_report.json").write_text(json.dumps({"knowledge_gaps": []}))
+        (out_dir / "expansion_need_queue.json").write_text(
+            json.dumps({"items": [{"gap_id": "g1"}, {"gap_id": "g2"}]})
+        )
+
+    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+
+    run_stage_5(run)
+
+    assert len(captured) == 1
+    assert captured[0].agent == "knowledge_gap_detector"
+    assert "queue_items=2" in (run / "run_log.csv").read_text()
+
+
+def test_run_stage_6_writes_skipped_outputs_when_queue_is_empty(tmp_path):
+    run = tmp_path / "run"
+    (run / "06_expansion").mkdir(parents=True)
+    (run / "06_expansion" / "expansion_need_queue.json").write_text(json.dumps({"items": []}))
+
+    run_stage_6(run)
+
+    assert json.loads((run / "06_expansion" / "expansion_round_01.json").read_text()) == {
+        "items": [],
+        "status": "skipped",
+    }
+    assert (run / "06_expansion" / "accepted_candidates.csv").read_text().startswith("arxiv_id,")
+    assert (run / "06_expansion" / "rejected_candidates.csv").read_text().startswith("arxiv_id,")
+
+
+def test_run_stage_6_dispatches_one_expansion_shard_per_gap_and_merges(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    (run / "06_expansion").mkdir(parents=True)
+    (run / "06_expansion" / "expansion_need_queue.json").write_text(
+        json.dumps({"items": [{"gap_id": "g1"}, {"gap_id": "g2"}]})
+    )
+    captured = []
+
+    def fake_run_shards(run_dir, specs, **kwargs):
+        captured.extend(specs)
+        expansion_dir = run_dir / "06_expansion"
+        for spec in specs:
+            shard_id = spec.shard_id
+            (expansion_dir / f"expansion_round_01_shard_{shard_id}.json").write_text(
+                json.dumps({"items": [{"shard_id": shard_id}]})
+            )
+            (expansion_dir / f"accepted_candidates_shard_{shard_id}.csv").write_text(
+                "arxiv_id,gap_id,unknown_concept,title,candidate_role,score,why_needed\n"
+                f"2501.{shard_id[-3:]},g,{shard_id},Title,foundational,0.9,needed\n"
+            )
+            (expansion_dir / f"rejected_candidates_shard_{shard_id}.csv").write_text(
+                "arxiv_id,gap_id,unknown_concept,title,candidate_role,score,why_rejected\n"
+            )
+
+    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+
+    run_stage_6(run, max_workers=20)
+
+    assert [spec.shard_id for spec in captured] == ["expansion-001", "expansion-002"]
+    assert all(spec.agent == "paper_expander" for spec in captured)
+    round_data = json.loads((run / "06_expansion" / "expansion_round_01.json").read_text())
+    assert round_data["status"] == "completed"
+    assert len(round_data["items"]) == 2
+    assert "2501.001" in (run / "06_expansion" / "accepted_candidates.csv").read_text()
+
+
+def test_run_stage_7_dispatches_paper_ranker_and_validates_scores(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    (run / "02_paper_pool").mkdir(parents=True)
+    (run / "07_scoring").mkdir(parents=True)
+    ids = ["1.1", "1.2"]
+    (run / "02_paper_pool" / "paper_pool.json").write_text(
+        json.dumps([{"arxiv_id": arxiv_id} for arxiv_id in ids])
+    )
+    calls = []
+
+    def fake_run_shards(run_dir, specs, **kwargs):
+        calls.extend(specs)
+        header = (
+            "arxiv_id,topic_relevance,graph_centrality,citation_or_influence,recency,"
+            "implementation_impact,chapter_need,knowledge_gap_boost,final_score\n"
+        )
+        rows = "1.1,1,1,1,1,1,1,0,0.9\n1.2,0,0,0,0,0,0,0,0.1\n"
+        (run / "07_scoring" / "paper_scores.csv").write_text(header + rows)
+        (run / "07_scoring" / "promotion_candidates.csv").write_text(header + rows)
+        (run / "07_scoring" / "promoted_papers.json").write_text(
+            json.dumps({"promoted_papers": [{"arxiv_id": "1.1", "final_score": 0.9}]})
+        )
+
+    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+
+    run_stage_7(run)
+
+    assert len(calls) == 1
+    assert calls[0].agent == "paper_ranker"
+    assert "Run Stage 7 scoring only" in calls[0].prompt
+    assert "paper_scores.csv" in calls[0].prompt
+
+
+def test_run_stage_7_normalizes_reduced_promotion_candidates_csv(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    (run / "02_paper_pool").mkdir(parents=True)
+    (run / "07_scoring").mkdir(parents=True)
+    ids = ["1.1", "1.2"]
+    (run / "02_paper_pool" / "paper_pool.json").write_text(
+        json.dumps([{"arxiv_id": arxiv_id} for arxiv_id in ids])
+    )
+
+    def fake_run_shards(run_dir, specs, **kwargs):
+        header = (
+            "arxiv_id,topic_relevance,graph_centrality,citation_or_influence,recency,"
+            "implementation_impact,chapter_need,knowledge_gap_boost,final_score\n"
+        )
+        rows = "1.1,1,1,1,1,1,1,0,0.9\n1.2,0,0,0,0,0,0,0,0.1\n"
+        (run / "07_scoring" / "paper_scores.csv").write_text(header + rows)
+        (run / "07_scoring" / "promotion_candidates.csv").write_text(
+            "arxiv_id,final_score,reason\n1.1,0.9,top\n1.2,0.1,tail\n"
+        )
+        (run / "07_scoring" / "promoted_papers.json").write_text(
+            json.dumps(
+                {
+                    "promoted_papers": [
+                        {"arxiv_id": "1.2", "final_score": 0.1, "reason": "tail"},
+                        {"arxiv_id": "1.1", "final_score": 0.9, "reason": "top"},
+                    ]
+                }
+            )
+        )
+
+    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+
+    run_stage_7(run)
+
+    candidates = (run / "07_scoring" / "promotion_candidates.csv").read_text()
+    promoted = json.loads((run / "07_scoring" / "promoted_papers.json").read_text())
+    assert "topic_relevance" in candidates
+    assert "reason" not in candidates.splitlines()[0]
+    assert candidates.splitlines()[1].startswith("1.1,")
+    assert promoted["promoted_papers"] == [{"arxiv_id": "1.1", "final_score": 0.9, "reason": "top"}]
+
+
+def _write_promoted_papers(run, ids):
+    (run / "07_scoring").mkdir(parents=True, exist_ok=True)
+    (run / "07_scoring" / "promoted_papers.json").write_text(
+        json.dumps({"promoted_papers": [{"arxiv_id": arxiv_id} for arxiv_id in ids]})
+    )
+
+
+def test_run_stage_8_dispatches_full_markdown_fetch_for_promoted_papers(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    ids = ["1.1", "1.2"]
+    _write_promoted_papers(run, ids)
+    captured = []
+
+    def fake_run_shards(run_dir, specs, **kwargs):
+        captured.extend(specs)
+        for rel_path in specs[0].expected_outputs:
+            out = run_dir / rel_path
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text("# Paper\n")
+
+    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+
+    run_stage_8(run)
+
+    assert len(captured) == 1
+    assert captured[0].stage == "8"
+    assert "Run Stage 8 full markdown fetch only" in captured[0].prompt
+    assert captured[0].expected_outputs == [
+        "08_full_markdown/1.1.md",
+        "08_full_markdown/1.2.md",
+    ]
+
+
+def test_run_stage_9_shards_promoted_ids_and_requires_tree_and_nodes(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    ids = ["1.1", "1.2", "1.3"]
+    _write_promoted_papers(run, ids)
+    captured = []
+
+    def fake_run_shards(run_dir, specs, **kwargs):
+        captured.extend(specs)
+        for spec in specs:
+            for rel_path in spec.expected_outputs:
+                out = run_dir / rel_path
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text("{}")
+
+    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+
+    run_stage_9(run, max_workers=20)
+
+    assert [len(spec.expected_outputs) for spec in captured] == [4, 2]
+    assert all(spec.agent == "paper_indexer" for spec in captured)
+    assert "09_pageindex/nodes/1.1.nodes.json" in captured[0].expected_outputs
+
+
+def test_run_stage_10_shards_one_paper_at_a_time_and_validates_grounding(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    ids = ["1.1", "1.2", "1.3"]
+    _write_promoted_papers(run, ids)
+    captured = []
+
+    def fake_run_shards(run_dir, specs, **kwargs):
+        captured.extend(specs)
+        for spec in specs:
+            for rel_path in spec.expected_outputs:
+                out = run_dir / rel_path
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(
+                    json.dumps({"claims": [{"source_node_id": "s.01", "source_lines": [1, 2]}]})
+                )
+
+    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+
+    run_stage_10(run, max_workers=20)
+
+    assert [len(spec.expected_outputs) for spec in captured] == [1, 1, 1]
+    assert all(spec.agent == "verified_evidence_extractor" for spec in captured)
+    assert all("Run Stage 10 only" in spec.prompt for spec in captured)
 
 
 def test_build_chapter_targets_excludes_appendices_and_keeps_order(tmp_path):
@@ -142,7 +583,7 @@ def test_run_stage_13_uses_pack_suffixes_and_stable_shard_ids(tmp_path):
     _write_outline(run)
     captured = []
 
-    def fake_run_shards(run_dir, specs, max_retries=1):
+    def fake_run_shards(run_dir, specs, max_retries=1, **kwargs):
         captured.extend(specs)
 
     with (
@@ -160,6 +601,8 @@ def test_run_stage_13_uses_pack_suffixes_and_stable_shard_ids(tmp_path):
     assert "Execute directly in this codex exec session." in captured[0].prompt
     assert "Do not spawn subagents" in captured[0].prompt
     assert "do not run nested codex commands" in captured[0].prompt
+    assert '"pack_targets": ["book:preface", "family:fam_a"]' in captured[0].prompt
+    assert '"pack_targets": ["method:m1"]' in captured[1].prompt
 
     (run / "13_chapter_packs" / "book").mkdir(parents=True)
     (run / "13_chapter_packs" / "book" / "preface_pack.json").write_text("{}")
@@ -287,6 +730,30 @@ def test_build_deterministic_stage_13_does_not_write_invalid_method_pack(tmp_pat
     assert not (run / "13_chapter_packs" / "methods" / "m1_pack.json").exists()
 
 
+def test_build_deterministic_stage_13_falls_back_to_method_claims_for_theory_and_algorithm(tmp_path):
+    run = tmp_path / "run"
+    _write_outline(run)
+    _write_stage_13_sources(run)
+    evidence_path = run / "10_verified_evidence" / "1.1.json"
+    evidence = json.loads(evidence_path.read_text())
+    evidence["equations"] = []
+    evidence["algorithms"] = []
+    evidence_path.write_text(json.dumps(evidence))
+
+    result = build_deterministic_stage_13_packs(run)
+
+    assert result["methods"] == 1
+    method_pack = json.loads((run / "13_chapter_packs" / "methods" / "m1_pack.json").read_text())
+    sections = {
+        section["section_title"]: section["source_nodes"]
+        for section in method_pack["section_plan"]
+    }
+    assert sections["Theory"][0]["node_id"] == "s.02"
+    assert sections["Algorithm"][0]["node_id"] == "s.02"
+    assert sections["Theory"][0]["section_text"].strip()
+    assert sections["Algorithm"][0]["section_text"].strip()
+
+
 def test_build_deterministic_stage_13_repairs_invalid_existing_method_pack(tmp_path):
     run = tmp_path / "run"
     _write_outline(run)
@@ -332,7 +799,7 @@ def test_run_stage_14_groups_targets_by_type_and_uses_book_filenames(tmp_path):
     )
     captured = []
 
-    def fake_run_shards(run_dir, specs, max_retries=1):
+    def fake_run_shards(run_dir, specs, max_retries=1, **kwargs):
         captured.extend(specs)
 
     with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
@@ -346,6 +813,35 @@ def test_run_stage_14_groups_targets_by_type_and_uses_book_filenames(tmp_path):
         ),
         ("write-families-001", "family_chapter_writer", ["14_chapters/families/fam_a.md"]),
         ("write-methods-001", "method_chapter_writer", ["14_chapters/methods/m1.md"]),
+    ]
+    assert '"section_ids": ["preface", "goals"]' in captured[0].prompt
+    assert '"family_ids": ["fam_a"]' in captured[1].prompt
+    assert '"method_ids": ["m1"]' in captured[2].prompt
+
+
+def test_run_stage_14_shards_methods_one_at_a_time(tmp_path):
+    run = tmp_path / "run"
+    _write_outline(
+        run,
+        methods=[
+            {"id": "m1", "title": "M1", "arxiv_id": "1.1", "family_id": "fam_a"},
+            {"id": "m2", "title": "M2", "arxiv_id": "2.2", "family_id": "fam_a"},
+            {"id": "m3", "title": "M3", "arxiv_id": "3.3", "family_id": "fam_a"},
+        ],
+    )
+    captured = []
+
+    def fake_run_shards(run_dir, specs, max_retries=1, **kwargs):
+        captured.extend(specs)
+
+    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+        run_stage_14(run)
+
+    method_specs = [spec for spec in captured if spec.agent == "method_chapter_writer"]
+    assert [(spec.shard_id, spec.expected_outputs) for spec in method_specs] == [
+        ("write-methods-001", ["14_chapters/methods/m1.md"]),
+        ("write-methods-002", ["14_chapters/methods/m2.md"]),
+        ("write-methods-003", ["14_chapters/methods/m3.md"]),
     ]
 
 
@@ -390,7 +886,112 @@ def test_run_stage_15_writes_verification_summary_from_per_target_json(tmp_path)
     assert "methods,m1,True" in summary
 
 
-def test_run_stage_16_merges_manifest_shards_in_canonical_order(tmp_path):
+def test_run_stage_15_uses_typed_chapter_targets_in_prompt(tmp_path):
+    run = tmp_path / "run"
+    _write_outline(run)
+    captured = []
+
+    def fake_run_shards(run_dir, specs, max_retries=1, **kwargs):
+        captured.extend(specs)
+        for spec in specs:
+            for relpath in spec.expected_outputs:
+                path = run / relpath
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    json.dumps(
+                        {
+                            "passed": True,
+                            "summary": {
+                                "claims_total": 0,
+                                "claims_unsupported": 0,
+                                "claims_overstated": 0,
+                                "gaps_covered": 0,
+                                "gaps_missing": 0,
+                                "word_count": 1500,
+                                "form_issue_count": 0,
+                                "equations_rendered": 0,
+                                "pseudocode_blocks": 0,
+                            },
+                        }
+                    )
+                )
+
+    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+        run_stage_15(run)
+
+    assert len(captured) == 2
+    assert '"chapter_targets": ["book:preface", "family:fam_a"]' in captured[0].prompt
+    assert '"chapter_targets": ["method:m1"]' in captured[1].prompt
+
+
+def test_run_stage_15_repairs_blocking_form_issues_once(tmp_path):
+    run = tmp_path / "run"
+    (run / "12_taxonomy").mkdir(parents=True)
+    (run / "12_taxonomy" / "outline.json").write_text(
+        json.dumps(
+            {
+                "topic": "Fixture topic",
+                "book_sections": [{"id": "preface", "title": "Preface"}],
+                "families": [],
+                "methods": [],
+            }
+        )
+    )
+    calls = []
+
+    def fake_run_shards(run_dir, specs, **kwargs):
+        calls.extend((spec.agent, spec.prompt, spec.expected_outputs) for spec in specs)
+        for spec in specs:
+            if spec.agent == "verifier":
+                passed = len([call for call in calls if call[0] == "verifier"]) > 1
+                path = run / "15_verification" / "book" / "preface_verification.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    json.dumps(
+                        {
+                            "passed": passed,
+                            "form_issues": []
+                            if passed
+                            else [
+                                {
+                                    "check": "chapter_file_missing",
+                                    "detail": "Missing chapter file.",
+                                    "excerpt": "",
+                                }
+                            ],
+                            "summary": {
+                                "claims_total": 0,
+                                "claims_unsupported": 0,
+                                "claims_overstated": 0,
+                                "gaps_covered": 0,
+                                "gaps_missing": 0,
+                                "word_count": 600 if passed else 0,
+                                "form_issue_count": 0 if passed else 1,
+                                "equations_rendered": 0,
+                                "pseudocode_blocks": 0,
+                            },
+                        }
+                    )
+                )
+            else:
+                path = run / "14_chapters" / "book" / "00_preface.md"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# Preface\n\n" + "word " * 600)
+
+    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+        run_stage_15(run)
+
+    assert [call[0] for call in calls] == [
+        "verifier",
+        "book_section_writer",
+        "verifier",
+    ]
+    assert '"form_issues": {"preface": [{"check": "chapter_file_missing"' in calls[1][1]
+    summary = (run / "15_verification" / "verification_summary.csv").read_text()
+    assert "book,preface,True" in summary
+
+
+def test_run_stage_16_builds_manifest_deterministically_in_canonical_order(tmp_path):
     run = tmp_path / "run"
     _write_outline(
         run,
@@ -399,27 +1000,34 @@ def test_run_stage_16_merges_manifest_shards_in_canonical_order(tmp_path):
             {"id": "goals", "title": "Goals"},
         ],
     )
-
-    def fake_run_shards(run_dir, specs, max_retries=1):
-        for spec in specs:
-            path = run_dir / spec.expected_outputs[0]
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                json.dumps(
-                    [
-                        {
-                            "chapter_id": target["id"],
-                            "chapter_type": target["type"],
-                            "file": f"dummy/{target['id']}.md",
-                        }
-                        for target in json.loads(spec.prompt.split("payload=", 1)[1].split("\n", 1)[0])["targets"]
-                    ]
-                )
+    for target in build_chapter_targets(run):
+        chapter_path = run / {
+            "book": f"14_chapters/book/{'00_preface.md' if target['id'] == 'preface' else '03_goals.md'}",
+            "families": f"14_chapters/families/{target['id']}.md",
+            "methods": f"14_chapters/methods/{target['id']}.md",
+        }[target["type"]]
+        chapter_path.parent.mkdir(parents=True, exist_ok=True)
+        chapter_path.write_text(f"# {target['id']}\n\nBody text.\n")
+        verification_path = run / "15_verification" / target["type"] / f"{target['id']}_verification.json"
+        verification_path.parent.mkdir(parents=True, exist_ok=True)
+        verification_path.write_text(
+            json.dumps(
+                {
+                    "passed": True,
+                    "summary": {
+                        "word_count": 1500,
+                        "form_issue_count": 0,
+                        "equations_rendered": 0,
+                        "pseudocode_blocks": 0,
+                    },
+                }
             )
+        )
 
-    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+    with patch("scripts.run_auto_research.run_shards") as run_shards:
         run_stage_16(run)
 
+    run_shards.assert_not_called()
     manifest = json.loads((run / "16_book" / "chapters_manifest.json").read_text())
     assert [chapter["chapter_id"] for chapter in manifest["chapters"]] == [
         "preface",
@@ -427,10 +1035,79 @@ def test_run_stage_16_merges_manifest_shards_in_canonical_order(tmp_path):
         "fam_a",
         "m1",
     ]
+    assert all(chapter["status"] == "passed" for chapter in manifest["chapters"])
+    assert (run / "14_chapters" / "methods" / "m1.md").read_text().startswith("---\n")
     assert not list((run / "16_book").glob("chapters_manifest_shard_*.json"))
 
 
-def _write_outline(run, *, book_sections=None):
+def test_run_stage_16_treats_high_word_count_as_non_blocking(tmp_path):
+    run = tmp_path / "run"
+    _write_outline(
+        run,
+        methods=[
+            {"id": "m_long", "title": "Long Method", "arxiv_id": "1.1", "family_id": "fam_a"},
+            {"id": "m_bad", "title": "Bad Method", "arxiv_id": "2.2", "family_id": "fam_a"},
+        ],
+    )
+    verification_by_id = {
+        "preface": {"passed": True, "summary": {"word_count": 600, "form_issue_count": 0}},
+        "fam_a": {"passed": True, "summary": {"word_count": 1200, "form_issue_count": 0}},
+        "m_long": {
+            "passed": False,
+            "form_issues": [
+                {
+                    "check": "method_word_count_high",
+                    "detail": "Method chapter has 4200 words; maximum is 3000.",
+                    "excerpt": "# Long Method",
+                }
+            ],
+            "summary": {
+                "word_count": 4200,
+                "form_issue_count": 1,
+                "claims_unsupported": 0,
+                "claims_overstated": 0,
+                "gaps_missing": 0,
+            },
+        },
+        "m_bad": {
+            "passed": False,
+            "form_issues": [
+                {
+                    "check": "copied_source_outline",
+                    "detail": "Copied source headings into the chapter.",
+                    "excerpt": "Baselines.",
+                }
+            ],
+            "summary": {
+                "word_count": 2200,
+                "form_issue_count": 1,
+                "claims_unsupported": 0,
+                "claims_overstated": 0,
+                "gaps_missing": 0,
+            },
+        },
+    }
+    for target in build_chapter_targets(run):
+        chapter_path = run / {
+            "book": "14_chapters/book/00_preface.md",
+            "families": f"14_chapters/families/{target['id']}.md",
+            "methods": f"14_chapters/methods/{target['id']}.md",
+        }[target["type"]]
+        chapter_path.parent.mkdir(parents=True, exist_ok=True)
+        chapter_path.write_text(f"# {target['id']}\n\nDetailed chapter body.\n")
+        verification_path = run / "15_verification" / target["type"] / f"{target['id']}_verification.json"
+        verification_path.parent.mkdir(parents=True, exist_ok=True)
+        verification_path.write_text(json.dumps(verification_by_id[target["id"]]))
+
+    run_stage_16(run)
+
+    manifest = json.loads((run / "16_book" / "chapters_manifest.json").read_text())
+    statuses = {chapter["chapter_id"]: chapter["status"] for chapter in manifest["chapters"]}
+    assert statuses["m_long"] == "passed"
+    assert statuses["m_bad"] == "excluded_form_issues"
+
+
+def _write_outline(run, *, book_sections=None, methods=None):
     (run / "12_taxonomy").mkdir(parents=True, exist_ok=True)
     outline = {
         "topic": "Fixture topic",
@@ -440,7 +1117,8 @@ def _write_outline(run, *, book_sections=None):
             {"id": "appendices", "title": "Appendices"},
         ],
         "families": [{"id": "fam_a", "title": "A", "method_ids": ["m1"]}],
-        "methods": [{"id": "m1", "title": "M1", "arxiv_id": "1.1", "family_id": "fam_a"}],
+        "methods": methods
+        or [{"id": "m1", "title": "M1", "arxiv_id": "1.1", "family_id": "fam_a"}],
     }
     (run / "12_taxonomy" / "outline.json").write_text(json.dumps(outline))
 
@@ -590,6 +1268,32 @@ def test_main_resume_from_stage_11_calls_stage_11(tmp_path, monkeypatch):
     assert calls == ["demo"]
 
 
+def test_main_all_resume_from_stage_7_includes_bootstrap_handlers(tmp_path, monkeypatch):
+    run = tmp_path / "research_runs" / "demo"
+    run.mkdir(parents=True)
+    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    calls = []
+
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_7", lambda run_dir: calls.append("7"))
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_8", lambda run_dir: calls.append("8"))
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_9", lambda run_dir: calls.append("9"))
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_10", lambda run_dir: calls.append("10"))
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_11", lambda run_dir: calls.append("11"))
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_12", lambda run_dir: None)
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_12_5", lambda run_dir: None)
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_13", lambda run_dir: None)
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_14", lambda run_dir: None)
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_15", lambda run_dir: None)
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_16", lambda run_dir: None)
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_17", lambda run_dir: None)
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_18", lambda run_dir: None)
+
+    rc = main(["--run-id", "demo", "--phase", "all", "--resume", "--from-stage", "7"])
+
+    assert rc == 0
+    assert calls[:5] == ["7", "8", "9", "10", "11"]
+
+
 def test_main_rejects_from_stage_outside_phase(tmp_path, monkeypatch):
     run = tmp_path / "research_runs" / "demo"
     run.mkdir(parents=True)
@@ -619,6 +1323,27 @@ def test_main_write_phase_defaults_to_stage_14(tmp_path, monkeypatch):
 
     assert rc == 0
     assert calls == ["14", "15", "16", "17", "18"]
+
+
+def test_main_write_phase_passes_max_workers_20_to_parallel_stages(tmp_path, monkeypatch):
+    run = tmp_path / "research_runs" / "demo"
+    run.mkdir(parents=True)
+    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    calls = []
+
+    def fake_parallel_stage(run_dir, *, max_workers=1):
+        calls.append(max_workers)
+
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_14", fake_parallel_stage)
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_15", fake_parallel_stage)
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_16", lambda run_dir: None)
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_17", lambda run_dir: None)
+    monkeypatch.setattr("scripts.run_auto_research.run_stage_18", lambda run_dir: None)
+
+    rc = main(["--run-id", "demo", "--phase", "write", "--max-workers", "20"])
+
+    assert rc == 0
+    assert calls == [20, 20]
 
 
 def test_main_write_phase_rejects_draft_from_stage(tmp_path, monkeypatch):
@@ -657,14 +1382,19 @@ def test_main_write_phase_rejects_saved_draft_current_stage(tmp_path, monkeypatc
         raise AssertionError("expected saved draft current_stage failure")
 
 
-def test_main_with_topic_requires_bootstrap_to_create_run(tmp_path, monkeypatch):
+def test_main_with_topic_starts_new_run_before_requested_stage(tmp_path, monkeypatch):
     monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
-    monkeypatch.setattr("scripts.run_auto_research.bootstrap_new_run", lambda topic, phase: "demo-run")
+
+    def fake_start_run(topic, phase):
+        run = tmp_path / "research_runs" / "demo-run"
+        run.mkdir(parents=True)
+        return "demo-run"
+
+    monkeypatch.setattr("scripts.run_auto_research.start_new_run", fake_start_run)
     monkeypatch.setattr("scripts.run_auto_research.run_stage_11", lambda run_dir: None)
     monkeypatch.setattr("scripts.run_auto_research.run_stage_12", lambda run_dir: None)
     monkeypatch.setattr("scripts.run_auto_research.run_stage_12_5", lambda run_dir: None)
     monkeypatch.setattr("scripts.run_auto_research.run_stage_13", lambda run_dir: None)
-    (tmp_path / "research_runs" / "demo-run").mkdir(parents=True)
 
     rc = main(["--topic", "Demo topic", "--phase", "draft", "--from-stage", "11"])
 
@@ -672,72 +1402,292 @@ def test_main_with_topic_requires_bootstrap_to_create_run(tmp_path, monkeypatch)
     assert (tmp_path / "research_runs" / "demo-run" / "run_control" / "run_state.json").exists()
 
 
-def test_bootstrap_new_run_rejects_unsafe_run_id():
-    completed = subprocess.CompletedProcess(
-        ["codex"],
-        0,
-        stdout="RUN_ID=../escape\n",
-        stderr="",
-    )
+def test_main_topic_all_uses_stage_scoped_bootstrap_handlers(tmp_path, monkeypatch):
+    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    calls = []
 
-    with patch("scripts.run_auto_research.subprocess.run", return_value=completed):
-        try:
-            bootstrap_new_run("Demo topic", "draft")
-        except ValueError as error:
-            assert "unsafe run_id" in str(error)
-        else:
-            raise AssertionError("expected unsafe run_id failure")
+    def fake_start_run(topic, phase):
+        run = tmp_path / "research_runs" / "demo-run"
+        run.mkdir(parents=True)
+        calls.append(("0", topic, phase))
+        return "demo-run"
 
+    def fake_stage(stage):
+        def run(run_dir, **kwargs):
+            calls.append((stage, run_dir.name))
 
-def test_bootstrap_new_run_uses_current_noninteractive_flags():
-    captured = {}
+        return run
 
-    def fake_run(cmd, cwd, text, capture_output, timeout):
-        captured["cmd"] = cmd
-        return subprocess.CompletedProcess(cmd, 0, stdout="RUN_ID=demo-run\n", stderr="")
-
-    with patch("scripts.run_auto_research.subprocess.run", side_effect=fake_run):
-        assert bootstrap_new_run("Demo topic", "draft") == "demo-run"
-
-    command = captured["cmd"]
-    assert "--ask-for-approval" not in command
-    assert command[0:2] == ["codex", "exec"]
-    assert command[command.index("-c") + 1] == 'approval_policy="never"'
-    assert command[command.index("--sandbox") + 1] == "workspace-write"
-    assert "Execute directly in this codex exec session." in command[-1]
-    assert "Do not spawn subagents" in command[-1]
-    assert "do not run nested codex commands" in command[-1]
-
-
-def test_bootstrap_new_run_reports_launch_error():
-    with patch(
-        "scripts.run_auto_research.subprocess.run",
-        side_effect=FileNotFoundError("codex"),
+    monkeypatch.setattr("scripts.run_auto_research.start_new_run", fake_start_run)
+    for stage in (
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+        "10",
+        "11",
+        "12",
+        "12.5",
+        "13",
+        "14",
+        "15",
+        "16",
+        "17",
+        "18",
     ):
-        try:
-            bootstrap_new_run("Demo topic", "draft")
-        except RuntimeError as error:
-            assert "bootstrap failed to launch or complete" in str(error)
-        else:
-            raise AssertionError("expected bootstrap launch failure")
+        monkeypatch.setattr(
+            f"scripts.run_auto_research.run_stage_{stage.replace('.', '_')}",
+            fake_stage(stage),
+        )
+
+    rc = main(["--topic", "Demo topic", "--phase", "all", "--executor", "sdk", "--max-workers", "20"])
+
+    assert rc == 0
+    assert calls[:11] == [
+        ("0", "Demo topic", "all"),
+        ("1", "demo-run"),
+        ("2", "demo-run"),
+        ("3", "demo-run"),
+        ("4", "demo-run"),
+        ("5", "demo-run"),
+        ("6", "demo-run"),
+        ("7", "demo-run"),
+        ("8", "demo-run"),
+        ("9", "demo-run"),
+        ("10", "demo-run"),
+    ]
 
 
-def test_bootstrap_new_run_reports_missing_run_id_stdout():
-    completed = subprocess.CompletedProcess(
-        ["codex"],
-        0,
-        stdout="completed without id\n",
-        stderr="",
+def _write_valid_bootstrap_contract(run):
+    ids = [f"2501.{idx:05d}" for idx in range(200)]
+    (run / "00_input").mkdir(parents=True)
+    (run / "01_seed_pool").mkdir(parents=True)
+    (run / "02_paper_pool").mkdir(parents=True)
+    (run / "04_weak_evidence").mkdir(parents=True)
+    (run / "07_scoring").mkdir(parents=True)
+    (run / "08_full_markdown").mkdir(parents=True)
+    (run / "09_pageindex" / "trees").mkdir(parents=True)
+    (run / "10_verified_evidence").mkdir(parents=True)
+
+    aspects = [
+        {
+            "id": f"aspect_{idx}",
+            "normal_queries": [f"normal query {idx}"],
+            "survey_queries": [f"survey query {idx}"],
+            "positive_keywords": [f"keyword {idx}"],
+        }
+        for idx in range(4)
+    ]
+    (run / "00_input" / "search_plan.json").write_text(
+        json.dumps({"target_seed_papers": 200, "aspects": aspects})
+    )
+    bulk_path = run / "01_seed_pool" / "bulk_search_results_123.json"
+    bulk_path.write_text(json.dumps({arxiv_id: "abstract" for arxiv_id in ids}))
+    (run / "01_seed_pool" / "seed_pool_raw.json").write_text(
+        json.dumps(
+            {
+                "papers": {arxiv_id: "abstract" for arxiv_id in ids},
+                "total_kept": len(ids),
+                "output_path": str(bulk_path),
+            }
+        )
+    )
+    (run / "02_paper_pool" / "paper_pool.json").write_text(
+        json.dumps([{"arxiv_id": arxiv_id, "title": f"Paper {arxiv_id}"} for arxiv_id in ids])
+    )
+    (run / "02_paper_pool" / "candidate_pool_report.json").write_text(
+        json.dumps(
+            {
+                "raw_kept": len(ids),
+                "target_seed_papers": 200,
+                "selected_total": len(ids),
+                "per_aspect_selected": {f"aspect_{idx}": 50 for idx in range(4)},
+            }
+        )
+    )
+    for arxiv_id in ids:
+        (run / "04_weak_evidence" / f"{arxiv_id}.json").write_text(
+            json.dumps({"reader_needed_concepts": ["concept"]})
+        )
+    promoted_id = ids[0]
+    score_header = (
+        "arxiv_id,topic_relevance,graph_centrality,citation_or_influence,recency,"
+        "implementation_impact,chapter_need,knowledge_gap_boost,final_score\n"
+    )
+    score_rows = "".join(
+        f"{arxiv_id},0.8,0.5,0.2,0.8,0.5,0.5,0.0,{0.9 if arxiv_id == promoted_id else 0.1}\n"
+        for arxiv_id in ids
+    )
+    (run / "07_scoring" / "paper_scores.csv").write_text(score_header + score_rows)
+    (run / "07_scoring" / "promotion_candidates.csv").write_text(score_header + score_rows)
+    (run / "07_scoring" / "promoted_papers.json").write_text(
+        json.dumps({"promoted_papers": [{"arxiv_id": promoted_id, "final_score": 0.9}]})
+    )
+    (run / "08_full_markdown" / f"{promoted_id}.md").write_text("# Paper\n")
+    (run / "09_pageindex" / "trees" / f"{promoted_id}.tree.json").write_text("{}")
+    (run / "10_verified_evidence" / f"{promoted_id}.json").write_text(
+        json.dumps({"claims": [{"source_node_id": "s.01", "source_lines": [1, 1]}]})
     )
 
-    with patch("scripts.run_auto_research.subprocess.run", return_value=completed):
-        try:
-            bootstrap_new_run("Demo topic", "draft")
-        except RuntimeError as error:
-            assert "bootstrap did not print RUN_ID" in str(error)
-            assert "completed without id" in str(error)
-        else:
-            raise AssertionError("expected missing RUN_ID failure")
+
+def test_validate_bootstrap_contract_requires_real_bulk_search_artifact(tmp_path):
+    run = tmp_path / "run"
+    _write_valid_bootstrap_contract(run)
+    (run / "01_seed_pool" / "seed_pool_raw.json").write_text(
+        json.dumps({"papers": {"2501.00000": "abstract"}})
+    )
+
+    try:
+        validate_bootstrap_stage_0_10_contract(run)
+    except RuntimeError as error:
+        assert "output_path" in str(error)
+    else:
+        raise AssertionError("expected missing bulk output_path failure")
+
+
+def test_validate_bootstrap_contract_rejects_tiny_paper_pool(tmp_path):
+    run = tmp_path / "run"
+    _write_valid_bootstrap_contract(run)
+    tiny_ids = [f"2501.{idx:05d}" for idx in range(3)]
+    (run / "02_paper_pool" / "paper_pool.json").write_text(
+        json.dumps([{"arxiv_id": arxiv_id, "title": f"Paper {arxiv_id}"} for arxiv_id in tiny_ids])
+    )
+
+    try:
+        validate_bootstrap_stage_0_10_contract(run)
+    except RuntimeError as error:
+        assert "at least 40 papers" in str(error)
+    else:
+        raise AssertionError("expected tiny paper pool failure")
+
+
+def test_validate_bootstrap_contract_rejects_truncated_large_seed_pool(tmp_path):
+    run = tmp_path / "run"
+    _write_valid_bootstrap_contract(run)
+    kept_ids = [f"2501.{idx:05d}" for idx in range(220)]
+    selected_ids = kept_ids[:50]
+    (run / "01_seed_pool" / "seed_pool_raw.json").write_text(
+        json.dumps(
+            {
+                "papers": {arxiv_id: "abstract" for arxiv_id in kept_ids},
+                "total_kept": len(kept_ids),
+                "output_path": str(run / "01_seed_pool" / "bulk_search_results_123.json"),
+            }
+        )
+    )
+    (run / "02_paper_pool" / "paper_pool.json").write_text(
+        json.dumps([{"arxiv_id": arxiv_id, "title": f"Paper {arxiv_id}"} for arxiv_id in selected_ids])
+    )
+    (run / "02_paper_pool" / "candidate_pool_report.json").write_text(
+        json.dumps(
+            {
+                "raw_kept": len(kept_ids),
+                "target_seed_papers": 200,
+                "selected_total": len(selected_ids),
+                "per_aspect_selected": {f"aspect_{idx}": 10 for idx in range(4)},
+            }
+        )
+    )
+
+    try:
+        validate_bootstrap_stage_0_10_contract(run)
+    except RuntimeError as error:
+        assert "must contain at least 200 papers when bulk search kept 220" in str(error)
+    else:
+        raise AssertionError("expected truncated large seed pool failure")
+
+
+def test_validate_bootstrap_contract_requires_candidate_pool_report(tmp_path):
+    run = tmp_path / "run"
+    _write_valid_bootstrap_contract(run)
+    (run / "02_paper_pool" / "candidate_pool_report.json").unlink()
+
+    try:
+        validate_bootstrap_stage_0_10_contract(run)
+    except RuntimeError as error:
+        assert "candidate_pool_report.json" in str(error)
+    else:
+        raise AssertionError("expected missing candidate pool report failure")
+
+
+def test_validate_bootstrap_contract_accepts_real_discovery_shape(tmp_path):
+    run = tmp_path / "run"
+    _write_valid_bootstrap_contract(run)
+
+    validate_bootstrap_stage_0_10_contract(run)
+
+
+def test_validate_bootstrap_contract_rejects_stage7_without_score_files(tmp_path):
+    run = tmp_path / "run"
+    _write_valid_bootstrap_contract(run)
+    (run / "07_scoring" / "paper_scores.csv").unlink()
+    (run / "07_scoring" / "promotion_candidates.csv").unlink()
+
+    try:
+        validate_bootstrap_stage_0_10_contract(run)
+    except RuntimeError as error:
+        assert "paper_scores.csv" in str(error)
+    else:
+        raise AssertionError("expected missing Stage 7 score files failure")
+
+
+def test_bootstrap_new_run_is_retired():
+    try:
+        bootstrap_new_run("Demo topic", "all")
+    except RuntimeError as error:
+        assert "retired" in str(error)
+    else:
+        raise AssertionError("expected retired bootstrap failure")
+
+
+def test_main_status_reports_failed_sdk_thread(tmp_path, monkeypatch, capsys):
+    run = tmp_path / "research_runs" / "demo"
+    shard_dir = run / "run_control" / "stages" / "14" / "shards"
+    shard_dir.mkdir(parents=True)
+    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    save_run_state(
+        run,
+        {
+            "run_id": "demo",
+            "phase": "write",
+            "status": "failed",
+            "current_stage": "14",
+        },
+    )
+    (run / "run_log.csv").write_text(
+        "timestamp,stage,status,detail\n2026-01-01T00:00:00+00:00,14,failed,write-001 missing expected outputs\n"
+    )
+    (shard_dir / "write-001.attempt-1.stderr.txt").write_text("bad chapter\n")
+    (shard_dir / "write-001.json").write_text(
+        json.dumps(
+            {
+                "stage": "14",
+                "shard_id": "write-001",
+                "status": "failed",
+                "executor": "sdk",
+                "thread_id": "thread-123",
+                "turn_id": "turn-456",
+                "stderr_path": "run_control/stages/14/shards/write-001.attempt-1.stderr.txt",
+            }
+        )
+    )
+
+    rc = main(["--run-id", "demo", "--status"])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "run_id=demo" in out
+    assert "status=failed" in out
+    assert "failed_stage=14" in out
+    assert "failed_shard=write-001" in out
+    assert "thread_id=thread-123" in out
+    assert "turn_id=turn-456" in out
+    assert "stderr=run_control/stages/14/shards/write-001.attempt-1.stderr.txt" in out
 
 
 def test_main_rejects_topic_write_phase():

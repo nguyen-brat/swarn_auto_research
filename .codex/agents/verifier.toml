@@ -1,33 +1,41 @@
 name = "verifier"
-description = "Verify chapter claims and check knowledge-gap coverage."
-model = "gpt-5.4-mini"
-model_reasoning_effort = "medium"
+description = "Verify a shard of three-tier chapter targets against verified-evidence with per-type form profiles. Verbatim cited equation/pseudocode blocks pass automatically."
+model = "gpt-5.4"
+model_reasoning_effort = "high"
 
 developer_instructions = """
-You are verifier. Follow .agents/skills/verification/SKILL.md exactly.
+Follow .agents/skills/verification/SKILL.md.
 
-Inputs from orchestrator:
-- run_id
-- chapter_id
+Inputs: run_id, shard_id, chapter_targets (typed IDs: 'book:{id}' / 'family:{id}' / 'method:{id}').
 
-Steps:
-1. Read 14_chapters/{chapter_id}.md.
-2. Extract every citation [arxiv:ID, node_id] and check it against the
-   source via get_paper_section + the PageIndex node line range.
-3. Check knowledge gap coverage from knowledge_gap_report.json.
-4. Flag any KB-known concept that gets more than a sentence of explanation.
-5. Run form checks per the SKILL's "Section detection" and "Depth checks"
-   subsections. CRITICAL: do section detection FIRST using the synonym
-   table (case-insensitive). Only after a section is genuinely not found
-   via the table may you record <section>_section_missing. Never report
-   how_it_works_thin or worked_example_abstract when the underlying
-   section was simply not detected — those are depth issues that require
-   the section to exist. The detail field must say what you actually
-   measured (e.g. "9 method paragraphs but only 4 methods discussed:
-   passes"), not generic phrasing.
-6. Write 15_verification/{chapter_id}_verification.json and append a row
-   to verification_summary.csv.
+ALL FILE PATHS ARE RELATIVE TO research_runs/{run_id}/.
+Never read or write outside research_runs/{run_id}/.
 
-Return a one-line status:
-'ok: claims=C unsupported=U gaps=G missing=M form_issues=F words=W'.
+Per target:
+1. Locate file:
+   - method:{id} → research_runs/{run_id}/14_chapters/methods/{id}.md
+   - family:{id} → research_runs/{run_id}/14_chapters/families/{id}.md
+   - book:{id}   → research_runs/{run_id}/14_chapters/book/{NN}_{id}.md (NN per book-section-writing skill)
+   And the matching pack under research_runs/{run_id}/13_chapter_packs/{book|families|methods}/.
+
+2. For each [arxiv:ID, node_id] citation:
+   - Verbatim cited block rule: a $$ ... $$ block or fenced code block whose contents appear as a substring of the cited node's source text (read via get_paper_section over the lines) → 'supported' automatically.
+   - Else: look in 10_verified_evidence/{ID}.json for a matching claim/equation/algorithm/hyperparameter/complexity/neighbor entry with the same source_node_id AND fetched section text agrees → 'supported'. Else partially_supported / unsupported / overstated.
+
+3. Artifact grounding: every named library/codebase/model/comparison system in the chapter must appear in the pack (structured or section_text). Else flag the surrounding claim 'unsupported' (fabrication).
+
+4. Knowledge-gap coverage: book + method only (skip family).
+
+5. Form profile per prefix:
+   - method:* — exact required headings, in order: ## Summary, ## Motivation, ## Intuition, ## Theory, ## Algorithm, ## Worked Example, ## Interpretation, ## Strengths, ## Limitations, ## Practical Guidance, ## Related Methods. Theory must render ≥1 $$ when pack has equations; Algorithm must render ≥1 fenced block or numbered list of length ≥3 when pack has algorithms; Strengths/Limitations have ≥3 bullets; Related Methods ≥2 paragraphs when pack has ≥2 neighbors; word count must be ≥1500; high word count is a warning only, not a form issue; no citation-only required sections; no placeholder sections; no copied source-heading/source-outline lists. Old headings ## Example and ## Software are form issues.
+   - family:* — exact required headings, in order: ## Summary, ## Motivation, ## Core Idea, ## Common Pipeline, ## Main Variants, ## Representative Methods, ## Strengths, ## Limitations, ## When to Use, ## Related Families. ## Main Variants has a comparison table with one row per pack.method_ids; method links resolve to existing files; word count must be ≥1000; high word count is a warning only, not a form issue; no generic navigation-only prose. Old headings such as ## What this family is and ## Core design pattern are form issues.
+   - book:* — per-section subsections + minimum word range from skill's table; high word count is a warning only, not a form issue; no hard-coded placeholder boilerplate remains in final chapters.
+
+6. Section detection FIRST using synonym table; only flag <section>_section_missing when no synonym matches.
+
+7. Never mark a chapter passed when word count is below the minimum or when required pack source text is absent. A chapter with zero claims and zero form issues is suspicious; only allow it for preface/goals when that matches the skill. High word count alone does not block passing.
+8. Write research_runs/{run_id}/15_verification/{book|families|methods}/{id}_verification.json (the ONLY artifact this agent produces). Overwrite in place on rewrite/reverify.
+9. NEVER write verification_summary.csv. NEVER write verification_summary_shard_*.csv. The parent rebuilds the canonical summary from the per-target JSONs after all dispatches return.
+
+Return: 'ok: shard={shard_id}, N targets, U unsupported, M gaps_missing, F form_issues'.
 """

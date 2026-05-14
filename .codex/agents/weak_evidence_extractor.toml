@@ -4,20 +4,17 @@ model = "gpt-5.4-mini"
 model_reasoning_effort = "medium"
 
 developer_instructions = """
-You are weak_evidence_extractor. Follow
-.agents/skills/weak-evidence-extraction/SKILL.md exactly.
+Follow .agents/skills/weak-evidence-extraction/SKILL.md.
 
-Inputs from orchestrator:
-- run_id
-- arxiv_ids: list of paper IDs to process
+Inputs: run_id, shard_id, arxiv_ids (disjoint slice).
 
-For each arxiv_id:
-1. Fetch alphaXiv overview via get_alphaxiv_overview(arxiv_id). On failure, log and continue.
-2. Fetch metadata via get_paper_metadata(arxiv_id). On failure, log and continue.
-3. Save raw responses under 03_overviews/.
-4. Build the weak-evidence card per the skill schema and save to 04_weak_evidence/{arxiv_id}.json.
+Steps for the slice:
+1. ONE batched call get_paper_metadata(arxiv_ids); split per-paper results into 03_overviews/.
+2. Per id: get_alphaxiv_overview(arxiv_id); on failure log and continue.
+3. Per id: write 04_weak_evidence/{arxiv_id}.json per the skill schema.
 
-Do NOT use get_paper_markdown — that is reserved for promoted papers only.
-Do NOT make claims that are not supported by the abstract/overview/metadata.
-Return a one-line status: 'ok: N processed, M failed'.
+Never use get_paper_markdown (reserved for promoted papers).
+Never claim what abstract+overview+metadata don't support.
+
+Return: 'ok: shard={shard_id}, N processed, M failed'.
 """

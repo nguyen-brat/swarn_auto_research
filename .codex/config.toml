@@ -1,9 +1,14 @@
 # Codex project config for swarn_auto_research
 # Loaded automatically when running `codex` from this repo root.
 
+sandbox_mode = "danger-full-access"
+approval_policy = "never"
+
 [mcp_servers.swarn-auto-research]
 command = "uv"
 args = ["run", "swarn-auto-research-mcp"]
+startup_timeout_sec = 30
+tool_timeout_sec = 10000
 
 [mcp_servers.swarn-auto-research.tools.bulk_normal_start_search]
 approval_mode = "approve"
@@ -11,8 +16,23 @@ approval_mode = "approve"
 [mcp_servers.swarn-auto-research.tools.get_alphaxiv_overview]
 approval_mode = "approve"
 
-# MVP budgets (max_seed_papers=50, max_expansion_gaps=5, max_papers_per_gap=3,
-# max_expansion_rounds=1, max_promoted_papers=10, min_gap_importance=0.70,
-# min_confusion_risk="medium") are documented in
-# .agents/skills/auto-research-orchestrator/SKILL.md and not stored in this
-# file because Codex parses [agents.X] sub-tables as agent-role definitions.
+[mcp_servers.swarn-auto-research.tools.get_paper_section]
+approval_mode = "approve"
+
+[mcp_servers.swarn-auto-research.tools.get_paper_markdown]
+approval_mode = "approve"
+
+[mcp_servers.swarn-auto-research.tools.get_paper_metadata]
+approval_mode = "approve"
+
+[agents]
+max_threads = 100
+max_depth = 1
+job_max_runtime_seconds = 3600
+
+# Budgets (max_seed_papers=50, max_expansion_gaps=5, max_expansion_rounds=1,
+# min_promote_score=0.45, min_gap_importance=0.70, min_confusion_risk="medium")
+# are documented in .agents/skills/auto-research-orchestrator/SKILL.md and not
+# stored in this file because Codex parses [agents.X] sub-tables as agent-role
+# definitions. After Stage 1 there is NO paper-count cap — Stages 6 and 7
+# filter by relevance only.

@@ -92,9 +92,9 @@ def test_paper_metadata_returns_flat_dict(monkeypatch):
     import asyncio
     from swarn_research_mcp.tools import paper_search
 
-    async def fake_metadata(arxiv_id):
-        assert arxiv_id == "2304.08485"
-        return {
+    async def fake_batch(arxiv_ids):
+        assert arxiv_ids == ["2304.08485"]
+        return [{
             "arxiv_id": "2304.08485",
             "scholar_semantic_id": "abc123",
             "title": "LLaVA",
@@ -102,43 +102,125 @@ def test_paper_metadata_returns_flat_dict(monkeypatch):
             "abstract": "We present LLaVA...",
             "citationCount": 1234,
             "referenceCount": 42,
-        }
+        }]
 
-    monkeypatch.setattr(paper_search, "paper_metadata_simple", fake_metadata)
+    monkeypatch.setattr(paper_search, "paper_metadata_simple_batch", fake_batch)
 
     result = asyncio.run(paper_search.get_paper_metadata("2304.08485"))
-    assert result["arxiv_id"] == "2304.08485"
-    assert result["scholar_semantic_id"] == "abc123"
-    assert result["citationCount"] == 1234
-    assert result["abstract"].startswith("We present")
+    row = result["results"][0]
+    assert row["arxiv_id"] == "2304.08485"
+    assert row["scholar_semantic_id"] == "abc123"
+    assert row["citationCount"] == 1234
 
 
 def test_paper_metadata_returns_empty_when_not_found(monkeypatch):
     import asyncio
     from swarn_research_mcp.tools import paper_search
 
-    async def fake_metadata(arxiv_id):
-        return {}
+    async def fake_batch(arxiv_ids):
+        return [{"arxiv_id": arxiv_ids[0], "found": False}]
 
-    monkeypatch.setattr(paper_search, "paper_metadata_simple", fake_metadata)
+    monkeypatch.setattr(paper_search, "paper_metadata_simple_batch", fake_batch)
 
     result = asyncio.run(paper_search.get_paper_metadata("9999.99999"))
-    assert result == {"arxiv_id": "9999.99999", "found": False}
+    assert result == {"results": [{"arxiv_id": "9999.99999", "found": False}]}
 
 
 def test_paper_metadata_returns_structured_error_on_failure(monkeypatch):
     import asyncio
     from swarn_research_mcp.tools import paper_search
 
-    async def failing(arxiv_id):
+    async def failing(arxiv_ids):
         raise RuntimeError("400 Bad Request")
 
-    monkeypatch.setattr(paper_search, "paper_metadata_simple", failing)
+    monkeypatch.setattr(paper_search, "paper_metadata_simple_batch", failing)
 
-    result = asyncio.run(paper_search.get_paper_metadata("2304.08485"))
-    assert result["arxiv_id"] == "2304.08485"
-    assert result["found"] is False
-    assert result["error"].startswith("RuntimeError: 400")
+    result = asyncio.run(paper_search.get_paper_metadata(["2304.08485", "2103.00020"]))
+    assert [r["arxiv_id"] for r in result["results"]] == ["2304.08485", "2103.00020"]
+    assert all(r["found"] is False for r in result["results"])
+    assert all(r["error"].startswith("RuntimeError: 400") for r in result["results"])
+
+
+def test_paper_metadata_accepts_list_input(monkeypatch):
+    import asyncio
+    from swarn_research_mcp.tools import paper_search
+
+    async def fake_batch(arxiv_ids):
+        assert arxiv_ids == ["2304.08485", "2103.00020", "9999.99999"]
+        return [
+            {"arxiv_id": "2304.08485", "title": "LLaVA"},
+            {"arxiv_id": "2103.00020", "title": "CLIP"},
+            {"arxiv_id": "9999.99999", "found": False},
+        ]
+
+    monkeypatch.setattr(paper_search, "paper_metadata_simple_batch", fake_batch)
+
+    result = asyncio.run(paper_search.get_paper_metadata(
+        ["2304.08485", "2103.00020", "9999.99999"]
+    ))
+    assert len(result["results"]) == 3
+    assert result["results"][0]["title"] == "LLaVA"
+    assert result["results"][1]["title"] == "CLIP"
+    assert result["results"][2]["found"] is False
+
+
+def test_paper_metadata_batch_halves_on_429():
+    from swarn_research_mcp.services import semantic_scholar as ss
+
+    calls = []
+
+    class Fake429(Exception):
+        pass
+
+    def fake_post(arxiv_ids):
+        calls.append(list(arxiv_ids))
+        if len(arxiv_ids) > 2:
+            raise Fake429()
+        return [
+            {"externalIds": {"ArXiv": arxiv_id}, "paperId": f"sid-{arxiv_id}",
+             "title": f"T-{arxiv_id}", "year": 2024, "abstract": "",
+             "citationCount": 0, "referenceCount": 0}
+            for arxiv_id in arxiv_ids
+        ]
+
+    original_post = ss._paper_metadata_simple_post
+    original_is_429 = ss._is_rate_limit_error
+    ss._paper_metadata_simple_post = fake_post
+    ss._is_rate_limit_error = lambda exc: isinstance(exc, Fake429)
+    try:
+        ids = ["a", "b", "c", "d", "e"]
+        result = ss._paper_metadata_simple_batch_sync(ids)
+    finally:
+        ss._paper_metadata_simple_post = original_post
+        ss._is_rate_limit_error = original_is_429
+
+    assert [r["arxiv_id"] for r in result] == ids
+    assert calls[0] == ids
+    assert any(len(c) <= 2 for c in calls[1:])
+
+
+def test_paper_metadata_batch_records_error_when_single_id_429s():
+    from swarn_research_mcp.services import semantic_scholar as ss
+
+    class Fake429(Exception):
+        pass
+
+    def always_429(arxiv_ids):
+        raise Fake429()
+
+    original_post = ss._paper_metadata_simple_post
+    original_is_429 = ss._is_rate_limit_error
+    ss._paper_metadata_simple_post = always_429
+    ss._is_rate_limit_error = lambda exc: isinstance(exc, Fake429)
+    try:
+        result = ss._paper_metadata_simple_batch_sync(["a", "b"])
+    finally:
+        ss._paper_metadata_simple_post = original_post
+        ss._is_rate_limit_error = original_is_429
+
+    assert [r["arxiv_id"] for r in result] == ["a", "b"]
+    assert all(r["found"] is False for r in result)
+    assert all("Fake429" in r["error"] for r in result)
 
 
 def test_paper_markdown_returns_dict_with_markdown(monkeypatch):
@@ -222,6 +304,173 @@ def test_extract_markdown_section_strips_numeric_prefixes():
 
     sub = extract_markdown_section(md, "Subsection")
     assert "Sub body." in sub
+
+
+def test_paper_markdown_writes_file_when_output_dir_set(monkeypatch, tmp_path):
+    import asyncio
+    from swarn_research_mcp.tools import paper_search
+
+    async def fake_md(arxiv_id, remove_toc):
+        return "# Hello\n\nBody."
+
+    monkeypatch.setattr(paper_search, "get_arxiv_markdown", fake_md)
+
+    result = asyncio.run(paper_search.get_paper_markdown(
+        "2304.08485", output_dir=str(tmp_path)
+    ))
+    assert "markdown" not in result
+    assert result["arxiv_id"] == "2304.08485"
+    output_path = tmp_path / "2304.08485.md"
+    assert result["output_path"] == str(output_path)
+    assert output_path.read_text() == "# Hello\n\nBody."
+
+
+def test_paper_markdown_does_not_write_on_error(monkeypatch, tmp_path):
+    import asyncio
+    from swarn_research_mcp.tools import paper_search
+
+    async def failing(arxiv_id, remove_toc):
+        raise RuntimeError("404 Not Found")
+
+    monkeypatch.setattr(paper_search, "get_arxiv_markdown", failing)
+
+    result = asyncio.run(paper_search.get_paper_markdown(
+        "9999.99999", output_dir=str(tmp_path)
+    ))
+    assert "output_path" not in result
+    assert result["error"].startswith("RuntimeError: 404")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_paper_section_writes_slugged_file(monkeypatch, tmp_path):
+    import asyncio
+    from swarn_research_mcp.tools import paper_search
+
+    async def fake_md(arxiv_id, remove_toc):
+        return "## 1 Introduction\n\nIntro body.\n\n## 2 Method\n\nMethod body."
+
+    monkeypatch.setattr(paper_search, "get_arxiv_markdown", fake_md)
+
+    result = asyncio.run(paper_search.get_paper_section(
+        "2304.08485", "Introduction", output_dir=str(tmp_path)
+    ))
+    assert "section" not in result
+    output_path = tmp_path / "2304.08485__introduction.md"
+    assert result["output_path"] == str(output_path)
+    assert "Intro body." in output_path.read_text()
+
+
+def test_paper_metadata_writes_per_id_files(monkeypatch, tmp_path):
+    import asyncio
+    import json
+    from swarn_research_mcp.tools import paper_search
+
+    async def fake_batch(arxiv_ids):
+        return [
+            {"arxiv_id": "2304.08485", "title": "LLaVA"},
+            {"arxiv_id": "9999.99999", "found": False},
+        ]
+
+    monkeypatch.setattr(paper_search, "paper_metadata_simple_batch", fake_batch)
+
+    result = asyncio.run(paper_search.get_paper_metadata(
+        ["2304.08485", "9999.99999"], output_dir=str(tmp_path)
+    ))
+    paths = [r["output_path"] for r in result["results"]]
+    assert paths == [
+        str(tmp_path / "2304.08485.json"),
+        str(tmp_path / "9999.99999.json"),
+    ]
+    assert json.loads((tmp_path / "2304.08485.json").read_text())["title"] == "LLaVA"
+    assert json.loads((tmp_path / "9999.99999.json").read_text())["found"] is False
+
+
+def test_paper_metadata_error_row_not_written(monkeypatch, tmp_path):
+    import asyncio
+    from swarn_research_mcp.tools import paper_search
+
+    async def failing(arxiv_ids):
+        raise RuntimeError("400 Bad Request")
+
+    monkeypatch.setattr(paper_search, "paper_metadata_simple_batch", failing)
+
+    result = asyncio.run(paper_search.get_paper_metadata(
+        ["2304.08485"], output_dir=str(tmp_path)
+    ))
+    assert "output_path" not in result["results"][0]
+    assert result["results"][0]["error"].startswith("RuntimeError: 400")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_alphaxiv_overview_writes_file(monkeypatch, tmp_path):
+    import asyncio
+    import json
+    from swarn_research_mcp.tools import paper_search
+
+    async def fake_overview(arxiv_id):
+        return "# Overview\n\nBody."
+
+    monkeypatch.setattr(
+        paper_search, "get_alphaxiv_overview_markdown", fake_overview
+    )
+
+    result = asyncio.run(paper_search.get_alphaxiv_overview(
+        "2304.08485", output_dir=str(tmp_path)
+    ))
+    assert "markdown" not in result
+    output_path = tmp_path / "2304.08485.json"
+    assert result["output_path"] == str(output_path)
+    saved = json.loads(output_path.read_text())
+    assert saved["markdown"] == "# Overview\n\nBody."
+
+
+def test_coerce_string_list_handles_list():
+    from swarn_research_mcp.tools.paper_search import _coerce_string_list
+    assert _coerce_string_list(["a", "b"], field_name="x") == ["a", "b"]
+
+
+def test_coerce_string_list_splits_newlines():
+    from swarn_research_mcp.tools.paper_search import _coerce_string_list
+    raw = "alpha\nbeta\ngamma"
+    assert _coerce_string_list(raw, field_name="x") == ["alpha", "beta", "gamma"]
+
+
+def test_coerce_string_list_drops_blank_lines():
+    """The original Hugging Face 400 came from blank queries
+    becoming q=' '. This guards against that regression."""
+    from swarn_research_mcp.tools.paper_search import _coerce_string_list
+    raw = "\nalpha\n\n  \nbeta\n"
+    assert _coerce_string_list(raw, field_name="x") == ["alpha", "beta"]
+
+
+def test_coerce_string_list_falls_back_to_comma_split():
+    from swarn_research_mcp.tools.paper_search import _coerce_string_list
+    raw = "long-context, attention, sparse attention"
+    assert _coerce_string_list(raw, field_name="x") == [
+        "long-context", "attention", "sparse attention"
+    ]
+
+
+def test_coerce_string_list_rejects_unknown_type():
+    import pytest
+    from swarn_research_mcp.tools.paper_search import _coerce_string_list
+    with pytest.raises(TypeError):
+        _coerce_string_list(123, field_name="x")
+
+
+def test_bulk_normal_start_search_rejects_empty_queries():
+    """Empty queries used to silently send q=' ' to Hugging Face."""
+    import asyncio
+    import pytest
+    from swarn_research_mcp.tools import paper_search
+
+    with pytest.raises(ValueError):
+        asyncio.run(paper_search.bulk_normal_start_search(
+            queries="",
+            survey_queries=["s"],
+            positive_keywords=["k"],
+            negative_keywords=[],
+        ))
 
 
 if __name__ == "__main__":

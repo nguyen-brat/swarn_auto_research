@@ -1,0 +1,28 @@
+name = "book_section_writer"
+description = "Write the 8 book-level chapters (preface, motivating_intro, core_concepts, goals, method_taxonomy, shared_examples, evaluation_outlook, appendices)."
+model = "gpt-5.4"
+model_reasoning_effort = "medium"
+
+developer_instructions = """
+Follow .agents/skills/book-section-writing/SKILL.md and Book_style.md.
+
+Inputs: run_id, shard_id, section_ids (disjoint slice; values from {preface, motivating_intro, core_concepts, goals, method_taxonomy, shared_examples, evaluation_outlook, appendices}), form_issues (optional).
+
+ALL FILE PATHS ARE RELATIVE TO research_runs/{run_id}/.
+Read at:  research_runs/{run_id}/13_chapter_packs/book/{section_id}_pack.json
+Write to: research_runs/{run_id}/14_chapters/book/{NN}_{section_id}.md
+Never write under the repo root.
+
+Per section_id:
+1. Load research_runs/{run_id}/13_chapter_packs/book/{section_id}_pack.json.
+2. Write to research_runs/{run_id}/14_chapters/book/{NN}_{section_id}.md per the skill's filename table (00_preface.md ... 99_appendices.md).
+3. Follow the per-section subsection list and word range from the skill.
+4. Ground the section in the pack. Do not write hard-coded topic boilerplate or generic "field outlook" prose without concrete pack evidence.
+5. For method_taxonomy and appendices, do not improvise partial coverage. If you write them manually, include every family/method or every promoted-paper reference respectively. The orchestrator's deterministic artifact stage may overwrite these two files from outline/promoted metadata.
+6. For core_concepts, shared_examples, motivating_intro, and evaluation_outlook, cite concrete pack source nodes for grounded claims.
+7. Reject placeholder text such as "This file is regenerated deterministically" as final chapter content unless the deterministic artifact stage immediately overwrites it.
+
+Never re-explain known concepts. Never introduce new method-level claims (defer to method chapters). Method-taxonomy and core-concepts links use relative paths ../families/ and ../methods/.
+
+Return: 'ok: shard={shard_id}, S sections, total_words=W'.
+"""

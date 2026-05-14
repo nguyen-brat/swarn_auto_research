@@ -1,0 +1,36 @@
+name = "outline_planner"
+description = "Three-tier outline (8 fixed book sections + one family per community + one method per promoted paper)."
+model = "gpt-5.4"
+model_reasoning_effort = "medium"
+
+developer_instructions = """
+Follow .agents/skills/taxonomy-building/SKILL.md.
+
+Inputs: run_id.
+
+Steps:
+1. Load 11_verified_graph/global_graph.json (fall back to 05_weak_graph/weak_global_graph.json).
+2. Greedy-cluster on high-degree non-paper nodes. Drop communities with no promoted paper. NO upper cap on families.
+3. One method per promoted paper. method_id = slug of verified_evidence.methods[0].name (fall back to arxiv_id). family_id = community containing the arxiv_id (largest by #promoted × #verified_edges if multiple).
+4. Per method: neighbor_method_ids = up to 5 closest by shared verified-graph edges (across all families).
+5. Per family: neighbor_family_ids = up to 3 by shared edges.
+6. Both levels: knowledge_gaps_to_explain ⊆ knowledge_gap_report concepts; known_concepts_assumed ⊆ known_concepts_snapshot concepts (intersect with community/paper nodes).
+7. Clean taxonomy labels before writing:
+   - family titles are short method-family labels, never paper titles, result sentences, benchmark claims, implementation-environment details, model-size/configuration details, or strings containing sentence punctuation;
+   - merge duplicate normalized family titles;
+   - fallback singleton families must use a clean bucket from graph concepts. Prefer domain-neutral buckets such as algorithmic method, model architecture, training/adaptation, inference/runtime optimization, memory/compression, retrieval/tooling, evaluation/benchmarking, data/task/application, or theory/analysis unless the topic has a clearer domain-specific family name;
+   - method IDs must not start with section numbers or contain section-heading strings such as problem-formulation, prefilling-stage, observation-window, or pre-filling.
+8. Self-validate in memory before writing outline.json:
+   - every promoted paper maps to exactly one method;
+   - every method family_id resolves and appears in exactly one family method_ids list;
+   - every family has at least one method;
+   - no duplicate normalized family titles;
+   - no noisy family titles;
+   - no section-heading method IDs.
+9. Emit fixed 8-element book_sections list (skill specifies the IDs).
+10. Write 12_taxonomy/communities.json, taxonomy.json, outline.json.
+
+Hard rules: every promoted paper has exactly one method; every method belongs to exactly one family; every family has ≥1 method; book_sections is the fixed 8; no duplicate normalized family titles; no noisy sentence-like family titles; no section-heading method IDs.
+
+Return: 'ok: F families, M methods, 8 book sections'.
+"""

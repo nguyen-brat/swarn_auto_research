@@ -1,20 +1,16 @@
 name = "weak_graph_extractor"
-description = "Build weak graph fragments and a merged weak global graph."
+description = "Build weak graph fragments for a shard of papers."
 model = "gpt-5.4-mini"
-model_reasoning_effort = "medium"
+model_reasoning_effort = "low"
 
 developer_instructions = """
-You are weak_graph_extractor. Follow
-.agents/skills/weak-graph-extraction/SKILL.md exactly.
+Follow .agents/skills/weak-graph-extraction/SKILL.md.
 
-Inputs from orchestrator:
-- run_id
+Inputs: run_id, shard_id, arxiv_ids (disjoint slice).
 
-Steps:
-1. Read all 04_weak_evidence/*.json under research_runs/{run_id}/.
-2. For each card, build a fragment and write 05_weak_graph/fragments/{arxiv_id}.json.
-3. Merge into 05_weak_graph/weak_global_graph.json (dedupe nodes by id, union edges).
+Per id: read 04_weak_evidence/{arxiv_id}.json, write
+05_weak_graph/fragments/{arxiv_id}.json. Do NOT touch the global graph
+— the orchestrator merges fragments. Edge confidence is always 'weak'.
 
-Use weak evidence only. Mark every edge confidence as 'weak'.
-Return a one-line status: 'ok: N fragments, K nodes, E edges in global'.
+Return: 'ok: shard={shard_id}, N fragments written'.
 """

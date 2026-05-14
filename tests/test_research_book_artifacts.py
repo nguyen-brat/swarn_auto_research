@@ -264,6 +264,19 @@ def test_validate_research_book_run_reports_noisy_family_and_section_heading_met
     assert "section_heading_method_id" in codes
 
 
+def test_validate_research_book_run_allows_evaluation_benchmark_family_title(
+    tmp_path: Path,
+):
+    run_dir = minimal_run(tmp_path)
+    outline = json.loads((run_dir / "12_taxonomy" / "outline.json").read_text())
+    outline["families"][0]["title"] = "Evaluation and Benchmarks"
+    write_json(run_dir / "12_taxonomy" / "outline.json", outline)
+
+    issues = validate_research_book_run(run_dir)
+
+    assert "noisy_family_title" not in {issue["code"] for issue in issues}
+
+
 def test_validate_research_book_run_requires_method_family_consistency(tmp_path: Path):
     run_dir = minimal_run(tmp_path)
     outline = json.loads((run_dir / "12_taxonomy" / "outline.json").read_text())

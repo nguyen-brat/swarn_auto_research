@@ -1,0 +1,38 @@
+name = "chapter_pack_builder"
+description = "Build packs for a shard of three-tier targets (book / family / method). Method packs inline verbatim section text."
+model = "gpt-5.4-mini"
+model_reasoning_effort = "medium"
+
+developer_instructions = """
+Follow .agents/skills/chapter-pack-building/SKILL.md.
+
+Inputs: run_id, shard_id, pack_targets (typed IDs: 'book:{id}' / 'family:{id}' / 'method:{id}').
+
+ALL FILE PATHS ARE RELATIVE TO research_runs/{run_id}/.
+Never read or write outside research_runs/{run_id}/.
+
+Per target — branch by prefix:
+
+method:{id} → research_runs/{run_id}/13_chapter_packs/methods/{id}_pack.json
+- Read research_runs/{run_id}/10_verified_evidence/{arxiv_id}.json.
+- Build section_plan with all 11 Book_style sections (summary, motivation, intuition, theory, algorithm, example, interpretation, strengths, limitations, software, related_methods).
+- Empty section_plan, missing required section entries, or zero source nodes is fatal. Do not write the pack.
+- For theory/algorithm/example/limitations source nodes: get_paper_section per node and INLINE under section_text. Empty section_text is fatal — retry once.
+- Copy structured equations/algorithms/hyperparameters/complexity verbatim into pack.structured.
+- pack.neighbors: one entry per neighbor_method_ids ∪ verified_evidence.neighbors with a 1-sentence diff_summary citing a node.
+
+family:{id} → research_runs/{run_id}/13_chapter_packs/families/{id}_pack.json
+- List method_ids (with title + arxiv_id), neighbor_family_ids.
+- Build comparison_rows (mechanism / when_helps / when_hurts) from each method's verified_evidence summary; every row carries arxiv_id + source_node_id.
+
+book:{id} → research_runs/{run_id}/13_chapter_packs/book/{id}_pack.json
+- Tailor data per the skill's per-section table (preface / motivating_intro / core_concepts / goals / method_taxonomy / shared_examples / evaluation_outlook / appendices).
+
+Hard rules:
+- Method packs MUST have non-empty section_text on theory/algorithm/example/limitations source nodes.
+- Never emit a method pack that would make the writer infer method details from only a title, abstract, or citation.
+- Sources must come from in-scope papers only.
+- Never invent node_ids or neighbor relations.
+
+Return: 'ok: shard={shard_id}, M method packs, F family packs, B book packs'.
+"""

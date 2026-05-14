@@ -21,3 +21,6 @@ research_runs/*/
 data/
 graphify-out/
 semantic_scholar_debug.json
+
+# Persistent S2 paper-detail cache (regenerable from API)
+swarn_research_mcp/cache/

@@ -10,11 +10,13 @@ description: Run the auto-research pipeline end-to-end for one topic — Book_st
 For end-to-end runs, prefer:
 
 ```bash
-python scripts/run_auto_research.py --topic "<topic>" --phase draft
-python scripts/run_auto_research.py --run-id <run_id> --phase write --resume
+env PYTHONPATH=. python scripts/run_auto_research.py --topic "<topic>" --phase all --executor sdk --max-workers 20
+env PYTHONPATH=. python scripts/run_auto_research.py --run-id <run_id> --phase write --resume --executor sdk --max-workers 20
 ```
 
-The Python runner owns durable stage state, shard manifests, artifact checks, retries, and deterministic merges. This skill remains the behavioral contract for every stage, but an interactive parent Codex session should not be the long-running control plane for full end-to-end runs.
+The Python runner owns durable stage state, shard manifests, artifact checks, retries, and deterministic merges. This skill remains the behavioral contract for every stage. The interactive parent Codex session should supervise the runner and repair failures, not manually execute the stage work in chat.
+
+The runner must execute Stages 0-10 as separate stage handlers. Do not ask one Codex SDK session to run multiple stages from 0 through 10.
 
 ## Inputs
 - `topic` (required for `phase=draft|all`)
@@ -57,15 +59,15 @@ Before dispatching any stage, check whether its primary output exists. If yes, l
 | Stage | Primary artifact |
 |-------|-----------------|
 | 0  | `run_config.json` |
-| 1  | `00_input/search_plan.json` and `02_paper_pool/paper_pool.json` |
+| 1  | `00_input/search_plan.json` and `02_paper_pool/paper_pool.json` + `02_paper_pool/candidate_pool_report.json` |
 | 2  | every paper has `04_weak_evidence/{arxiv_id}.json` |
 | 3  | `05_weak_graph/weak_global_graph.json` |
 | 4  | `06_expansion/known_concepts_snapshot.json` |
 | 5  | `06_expansion/knowledge_gap_report.json` + `expansion_need_queue.json` |
 | 6  | `06_expansion/expansion_round_01.json` (or queue empty) |
-| 7  | `07_scoring/promoted_papers.json` |
+| 7  | `07_scoring/paper_scores.csv` + `07_scoring/promotion_candidates.csv` + `07_scoring/promoted_papers.json` |
 | 8  | every promoted paper has `08_full_markdown/{arxiv_id}.md` |
-| 9  | every promoted paper has `09_pageindex/trees/{arxiv_id}.tree.json` |
+| 9  | every promoted paper has `09_pageindex/trees/{arxiv_id}.tree.json` + `09_pageindex/nodes/{arxiv_id}.nodes.json` |
 | 10 | every promoted paper has `10_verified_evidence/{arxiv_id}.json` |
 | 11 | `11_verified_graph/global_graph.json` |
 | 12 | `12_taxonomy/outline.json` (three-tier) |
@@ -82,7 +84,7 @@ At stage 18, `generate_book_artifacts` ALWAYS produces `SUMMARY.md`, `sidebar.js
 
 ## Budgets
 ```
-max_seed_papers   = 50    # Stage 1 only
+target_seed_papers = 200  # Stage 1 candidate pool target
 max_expansion_gaps = 5    # gap-topic count, not paper count
 max_expansion_rounds = 1
 min_gap_importance = 0.70
@@ -95,7 +97,7 @@ shard_size_chapters = 2       # Stages 13 (book/family), 14, 15, 16 — read sli
 verified_sections_per_paper = 20
 ```
 
-**Cap policy:** Stage 1 caps initial search at `max_seed_papers`. After that, no paper-count caps anywhere. Stage 6 keeps every paper meeting the acceptance rules; Stage 7 promotes every paper with `final_score ≥ min_promote_score`. Quality drops out via the relevance gate, not truncation.
+**Cap policy:** Stage 1 targets `target_seed_papers` selected papers from the raw bulk-search result. If the raw result has fewer kept papers, keep them all. If it has more, select a stratified pool across search aspects instead of taking the first/global top papers. After that, no paper-count caps anywhere. Stage 6 keeps every paper meeting the acceptance rules; Stage 7 promotes every paper with `final_score ≥ min_promote_score`. Quality drops out via the relevance gate, not truncation.
 
 ## Sharded parallel execution (any stage marked PARALLEL)
 1. Build ordered item list.
@@ -143,7 +145,25 @@ Cap: ≤ 50 concurrent sub-agents per stage. If a stage has more than 50 shards,
 
 Call MCP `bulk_normal_start_search` ONCE with these unioned lists and `output_dir=01_seed_pool/`. The tool dedupes results internally.
 
-**1c. Build the pool.** Save the raw response as `01_seed_pool/seed_pool_raw.json`. Build `02_paper_pool/paper_pool.{json,csv}` from the kept papers, capping at `max_seed_papers`. Stop if the pool has < 10 papers (topic too narrow — re-run query_planner with a broader topic phrasing first).
+**1c. Build the pool.** Save the raw response as `01_seed_pool/seed_pool_raw.json`. Build `02_paper_pool/paper_pool.{json,csv}` from the kept papers:
+- If raw kept papers ≤ `target_seed_papers`, keep every paper.
+- If raw kept papers > `target_seed_papers`, select `target_seed_papers` papers with stratified coverage across the `search_plan.json` aspects. Assign papers to aspects by matching aspect queries / positive keywords against title, abstract, venue, and metadata; round-robin non-empty aspects first, then fill any remaining slots by global relevance/order.
+- Do not silently collapse a large raw pool to 50 papers. For broad topics, a 150–200 paper candidate pool is expected.
+
+Write `02_paper_pool/candidate_pool_report.json`:
+```json
+{
+  "raw_kept": 391,
+  "target_seed_papers": 200,
+  "selected_total": 200,
+  "per_aspect_selected": {
+    "speech_to_speech_models": 48,
+    "full_duplex_dialogue": 44
+  }
+}
+```
+
+Stop if the pool has < 40 papers after a broad retry (topic too narrow or search failed).
 
 ### 2 — Weak evidence [PARALLEL]
 Shard `paper_pool.keys()` → `weak_evidence_extractor` per shard. Success: every paper has `04_weak_evidence/{arxiv_id}.json`.
@@ -267,7 +287,7 @@ Validation is blocking for structural contract issues:
 - appendices reference every promoted paper, with missing citation metadata recorded as `citation/<arxiv_id>` review debt rather than a hard book-generation failure;
 - method packs have non-empty source text for theory, algorithm, example, and limitations;
 - every method chapter has at least 1500 words;
-- every family chapter has at least 1000 words and includes `## Core design pattern`;
+- every family chapter has at least 1000 words and includes the required family headings, including `## Core Idea`;
 - no method or family chapter is marked `passed` with a below-threshold word count.
 
 Non-passing chapter statuses are reported as warnings by the validator. They should still be reviewed, but they do not block navigation artifact generation unless a structural contract issue is also present. Excluded chapters are quarantined from main navigation and listed in `16_book/NEEDS_REVIEW.md`.
@@ -281,7 +301,7 @@ On any stage failure, append a row to `run_log.csv` and stop. Sub-agent return s
 3. Every `04_weak_evidence/*.json` has non-empty `reader_needed_concepts`.
 4. `knowledge_gap_report.json` has all three buckets.
 5. Every `accepted_candidates.csv` row has `added_for_gap` + `why_needed`.
-6. `promoted_papers.json` has ≥ 1 entry, each with `final_score ≥ min_promote_score`. No upper cap.
+6. `paper_scores.csv` and `promotion_candidates.csv` score every paper exactly once; `promotion_candidates.csv` is sorted by descending `final_score`; `promoted_papers.json` includes every paper with `final_score ≥ min_promote_score`. No upper cap.
 7. `08_full_markdown/` has one file per promoted paper.
 8. `09_pageindex/trees/` has one valid tree per promoted paper.
 9. Every `10_verified_evidence/*.json` has claims with `source_node_id` + `source_lines`.
@@ -289,7 +309,7 @@ On any stage failure, append a row to `run_log.csv` and stop. Sub-agent return s
 11. `outline.json` has 8 `book_sections`, ≥ 1 `families`, one `methods` entry per promoted paper.
 12. Every method pack has non-empty `section_text` on theory/algorithm/example/limitations sources; every family pack has ≥ 1 method_id; all 8 book packs exist.
 13. Every outline ID has its markdown file in the right `14_chapters/{book|families|methods}/`.
-14. Every chapter has its verification file. Every method chapter passes (`claims_unsupported=0, gaps_missing=0, form_issue_count=0, word_count ≥ 1500, equations_rendered ≥ 1` when pack provides equations); every family chapter has `word_count ≥ 1000` and `## Core design pattern`.
+14. Every chapter has its verification file. Every method chapter passes (`claims_unsupported=0, gaps_missing=0, form_issue_count=0, word_count ≥ 1500, equations_rendered ≥ 1` when pack provides equations); every family chapter has `word_count ≥ 1000` and the required family headings including `## Core Idea`.
 15. Every dispatched chapter target has valid YAML front matter (`chapter_id, chapter_type, title, slug, status`) and ends with `## References`. `chapters_manifest.json` lists all three tiers in canonical order except `book:appendices`. No `handbook.md`.
 16. `17_learning_suggestions/knowledge_to_add.md` exists.
 17. `16_book/SUMMARY.md`, `16_book/sidebar.json`, and `16_book/appendices/{glossary.md,notation.md,datasets.md,software.md,references.md}` exist; `python -m swarn_research_mcp.research_book research_runs/{run_id} --validate` exits 0.

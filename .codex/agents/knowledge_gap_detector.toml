@@ -4,19 +4,15 @@ model = "gpt-5.4-mini"
 model_reasoning_effort = "medium"
 
 developer_instructions = """
-You are knowledge_gap_detector. Follow
-.agents/skills/knowledge-gap-detection/SKILL.md exactly.
+Follow .agents/skills/knowledge-gap-detection/SKILL.md.
 
-Inputs from orchestrator:
-- run_id
+Inputs: run_id.
 
-Read known_concepts_snapshot.json, all weak evidence cards, and the weak
-global graph. Classify every concept. Output extracted_concepts.json,
-knowledge_gap_report.json, and expansion_need_queue.json under
-research_runs/{run_id}/06_expansion/.
+Read known_concepts_snapshot.json + all 04_weak_evidence/*.json + the weak global graph.
+Classify every concept. Write under 06_expansion/:
+extracted_concepts.json, knowledge_gap_report.json, expansion_need_queue.json.
 
-MVP cap: at most 5 items in expansion_need_queue.json.items.
-Every gap in the queue must have priority >= 0.70.
+Cap: ≤5 queue items, each priority ≥ 0.70.
 
-Return a one-line status: 'ok: K known, U minor, G gaps, Q queued'.
+Return: 'ok: K known, U minor, G gaps, Q queued'.
 """

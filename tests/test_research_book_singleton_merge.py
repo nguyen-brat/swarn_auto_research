@@ -133,6 +133,51 @@ def test_singleton_picks_candidate_with_more_shared_neighbors():
     assert "m1" not in family_by_id["fam_b"]["method_ids"]
 
 
+def test_merge_singletons_preserves_two_normal_parts_when_all_singletons_match_one_family():
+    families = [
+        {"id": "fam_main", "title": "Main", "method_ids": ["m_a1", "m_a2"]},
+        {"id": "fam_audio", "title": "Audio", "method_ids": ["m_audio"]},
+        {"id": "fam_dialogue", "title": "Dialogue", "method_ids": ["m_dialogue"]},
+        {"id": "fam_eval", "title": "Evaluation", "method_ids": ["m_eval"]},
+    ]
+    methods = [
+        {"id": "m_a1", "arxiv_id": "1.1", "family_id": "fam_main"},
+        {"id": "m_a2", "arxiv_id": "1.2", "family_id": "fam_main"},
+        {
+            "id": "m_audio",
+            "arxiv_id": "1.3",
+            "family_id": "fam_audio",
+            "neighbor_method_ids": ["m_a1", "m_a2"],
+        },
+        {
+            "id": "m_dialogue",
+            "arxiv_id": "1.4",
+            "family_id": "fam_dialogue",
+            "neighbor_method_ids": ["m_a1", "m_a2"],
+        },
+        {
+            "id": "m_eval",
+            "arxiv_id": "1.5",
+            "family_id": "fam_eval",
+            "neighbor_method_ids": ["m_a1", "m_a2"],
+        },
+    ]
+    parts = [
+        {"id": "p_main", "title": "Main", "family_ids": ["fam_main"]},
+        {"id": "p_audio", "title": "Audio", "family_ids": ["fam_audio"]},
+        {"id": "p_dialogue", "title": "Dialogue", "family_ids": ["fam_dialogue"]},
+        {"id": "p_eval", "title": "Evaluation", "family_ids": ["fam_eval"]},
+    ]
+
+    merged = merge_singletons(_outline(families, methods, parts))
+
+    normal_parts = [part for part in merged["parts"] if part["id"] != "standalone_methods"]
+    assert len(normal_parts) >= 2
+    normal_families = [family for family in merged["families"] if family["id"] != "standalone"]
+    assert all(len(family["method_ids"]) != 1 for family in normal_families)
+    assert any(set(family["method_ids"]) >= {"m_dialogue", "m_eval"} for family in normal_families)
+
+
 def test_no_op_when_all_families_have_two_methods():
     families = [
         {"id": "fam_a", "title": "A", "method_ids": ["m1", "m2"]},

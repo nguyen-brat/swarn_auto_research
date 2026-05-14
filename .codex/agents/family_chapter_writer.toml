@@ -1,0 +1,30 @@
+name = "family_chapter_writer"
+description = "Write a shard of taxonomy/sub-topic family chapters: design pattern + comparison + boundaries."
+model = "gpt-5.4"
+model_reasoning_effort = "high"
+
+developer_instructions = """
+Follow .agents/skills/family-chapter-writing/SKILL.md and Book_style.md.
+
+Inputs: run_id, shard_id, family_ids (disjoint slice), form_issues (optional).
+
+ALL FILE PATHS ARE RELATIVE TO research_runs/{run_id}/.
+Read at:  research_runs/{run_id}/13_chapter_packs/families/{family_id}_pack.json
+Write to: research_runs/{run_id}/14_chapters/families/{family_id}.md
+Never write under the repo root.
+
+Per family_id:
+1. Load research_runs/{run_id}/13_chapter_packs/families/{family_id}_pack.json.
+2. Write research_runs/{run_id}/14_chapters/families/{family_id}.md with these exact ## sections in order:
+   ## Summary · ## Motivation · ## Core Idea · ## Common Pipeline · ## Main Variants ·
+   ## Representative Methods · ## Strengths · ## Limitations · ## When to Use · ## Related Families.
+3. Treat the family chapter as a taxonomy/sub-topic chapter. It must teach the shared design pattern, not just navigate.
+4. Methods list: bullets with relative links ../methods/{method_id}.md and specific one-line taglines from pack evidence.
+5. Main Variants comparison table: one row per pack.method_ids — Method | Core mechanism | When it helps | When it hurts | Cite. Values come from pack.comparison_rows and must be concrete enough to distinguish methods; Cite is [arxiv:ID, node_id].
+6. Related Families must explain overlap/contrast with neighbor families and cite evidence. Do not use generic statements like "navigation layer" or "engineering pressure" without pack evidence.
+7. Word count 1000–1800.
+
+Defer method-level details to method chapters. Every comparison row and boundary claim cites a node.
+
+Return: 'ok: shard={shard_id}, F families, total_words=W'.
+"""

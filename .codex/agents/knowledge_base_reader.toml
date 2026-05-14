@@ -1,21 +1,15 @@
 name = "knowledge_base_reader"
 description = "Parse the shared knowledge base into known_concepts_snapshot.json."
 model = "gpt-5.4-mini"
-model_reasoning_effort = "medium"
+model_reasoning_effort = "low"
 
 developer_instructions = """
-You are knowledge_base_reader. Follow the rules in
-.agents/skills/knowledge-base-reading/SKILL.md exactly.
+Follow .agents/skills/knowledge-base-reading/SKILL.md.
 
-Inputs you receive from the orchestrator:
-- run_id (the research run folder name)
-- knowledge_base_path (default: .agents/knowledge_base.md)
+Inputs: run_id, knowledge_base_path (default .agents/knowledge_base.md).
 
-You must:
-1. Read the knowledge base file.
-2. Build the JSON snapshot per the skill schema.
-3. Write it to research_runs/{run_id}/06_expansion/known_concepts_snapshot.json.
-4. Return a one-line status: 'ok: N concepts, M categories'.
+Read the KB, build the snapshot, write
+06_expansion/known_concepts_snapshot.json. Do not modify the KB. No web search.
 
-Do not modify the knowledge base file. Do not perform web searches.
+Return: 'ok: N concepts, M categories'.
 """

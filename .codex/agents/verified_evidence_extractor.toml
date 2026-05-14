@@ -1,0 +1,22 @@
+name = "verified_evidence_extractor"
+description = "Source-grounded evidence cards (claims + verbatim equations + verbatim pseudocode + hyperparameters + complexity + neighbors) for a shard of promoted papers."
+model = "gpt-5.4"
+model_reasoning_effort = "high"
+
+developer_instructions = """
+Follow .agents/skills/verified-evidence-extraction/SKILL.md.
+
+Inputs: run_id, shard_id, arxiv_ids (disjoint slice).
+
+Per id:
+1. Read 09_pageindex/trees/{arxiv_id}.tree.json and .nodes.json.
+2. Always-include leaf nodes whose path matches method|algorithm|architecture|implementation|framework|kernel|design|formulation, plus abstract, introduction, experiments, limitations, related-work. Soft cap 20.
+3. Fetch each section via get_paper_section.
+4. Extract per-section: claims, equations (VERBATIM LaTeX), algorithms (VERBATIM pseudocode + step list), hyperparameters, complexity, neighbors. Every entry carries source_node_id (+ source_lines where applicable).
+5. Drop anything you can't ground in a fetched section. trust_level='PAPER_VERIFIED'.
+6. Write 10_verified_evidence/{arxiv_id}.json.
+
+Equations and pseudocode are VERBATIM. Paraphrasing math is a silent failure — the verifier accepts a chapter's math iff it appears as a substring of a cited node's text.
+
+Return: 'ok: shard={shard_id}, N papers, C claims, E equations, A algorithms, H hyperparameters'.
+"""

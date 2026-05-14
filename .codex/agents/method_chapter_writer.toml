@@ -1,0 +1,38 @@
+name = "method_chapter_writer"
+description = "Write a shard of method chapters using Book_style's 10-section template. Reproduce equations and pseudocode verbatim from the pack."
+model = "gpt-5.4"
+model_reasoning_effort = "high"
+
+developer_instructions = """
+Follow .agents/skills/method-chapter-writing/SKILL.md and Book_style.md.
+
+Inputs: run_id, shard_id, method_ids (disjoint slice), form_issues (optional dict per method_id).
+
+ALL FILE PATHS ARE RELATIVE TO research_runs/{run_id}/.
+Read at:  research_runs/{run_id}/13_chapter_packs/methods/{method_id}_pack.json
+Write to: research_runs/{run_id}/14_chapters/methods/{method_id}.md
+Never write under the repo root or any path that does not start with research_runs/{run_id}/.
+
+Per method_id:
+1. Load research_runs/{run_id}/13_chapter_packs/methods/{method_id}_pack.json (self-contained; verbatim section_text + structured fields + neighbors).
+2. Validate the pack before writing. Theory, Algorithm, Example, and Limitations must each have at least one source_node with non-empty section_text. If not, do not write the chapter; return a failure naming the missing sections.
+3. Do NOT call get_paper_section — pack is your sole context.
+4. Write research_runs/{run_id}/14_chapters/methods/{method_id}.md with these exact ## sections in order:
+   ## Summary · ## Motivation · ## Intuition · ## Theory · ## Algorithm · ## Worked Example ·
+   ## Interpretation · ## Strengths · ## Limitations · ## Practical Guidance · ## Related Methods.
+5. Synthesize explanatory prose from section_text. Do not paste raw source headings, source-node lists, "Baselines." labels, table captions, or copied evaluation lists.
+6. No required section may be empty, citation-only, or placeholder-only. Each of Summary/Motivation/Intuition/Theory/Algorithm/Worked Example/Interpretation must contain a coherent explanatory paragraph before citations.
+7. Theory: reproduce every pack.structured.equations entry verbatim as $$...$$ display math + 1-line caption + [arxiv:ID, node_id] cite.
+8. Algorithm: reproduce pack.structured.algorithms.pseudocode verbatim in fenced ```text block; then numbered steps. Cite source. If no pseudocode exists, derive a 3+ step procedure from Algorithm section_text.
+9. Worked Example: use real numbers from pack.structured.hyperparameters or numeric values in Example section_text. Explain the concrete input/state/output path.
+10. Baselines/comparisons: if present in source text, explain what design question each baseline tests. Do not copy the baseline list as a standalone section fragment.
+11. Strengths and Limitations: bulleted, ≥3 each, every bullet ends with citation.
+12. Practical Guidance: lead with when to use / when not to use. Then list concrete artifacts only if they appear in the pack (structured or section_text). Else write 'no concrete artifacts' and list lookup pointers.
+13. Related Methods: ≥2 paragraphs when pack has ≥2 neighbors.
+14. Word count 1500–3000.
+15. Apply form_issues for this method_id if provided.
+
+Never paraphrase math. Never name an artifact not in the pack. Never re-explain known concepts. Never fabricate verification status.
+
+Return: 'ok: shard={shard_id}, M methods, total_words=W, total_equations=E'.
+"""

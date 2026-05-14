@@ -196,7 +196,7 @@ def test_run_stage_11_dispatches_only_missing_fragments(tmp_path):
         }],
     )
 
-    def fake_run_shards(run_dir, specs, max_retries=1):
+    def fake_run_shards(run_dir, specs, max_retries=1, **kwargs):
         assert len(specs) == 1
         assert specs[0].shard_id == "vgraph-resume-1.2"
         assert specs[0].expected_outputs == ["11_verified_graph/fragments/1.2.json"]
@@ -227,7 +227,7 @@ def test_run_stage_11_uses_flat_fragment_paths_for_old_arxiv_ids(tmp_path):
         json.dumps({"promoted_papers": [{"arxiv_id": "hep-th/9901001"}]})
     )
 
-    def fake_run_shards(run_dir, specs, max_retries=1):
+    def fake_run_shards(run_dir, specs, max_retries=1, **kwargs):
         assert len(specs) == 1
         assert specs[0].shard_id == "vgraph-resume-hep-thpct2F9901001"
         assert specs[0].expected_outputs == [

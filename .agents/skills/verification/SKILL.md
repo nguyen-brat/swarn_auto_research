@@ -1,115 +1,114 @@
 ---
 name: verification
-description: Verify chapter claims against source nodes and check knowledge-gap coverage.
+description: Verify chapters against verified-evidence with per-type form profiles. Verbatim cited equation/pseudocode blocks pass automatically.
 ---
 
 # Verification
 
-## Goal
-Catch unsupported claims, overstated results, missing background, and over-explained known concepts.
-
 ## Inputs
-- `14_chapters/{chapter_id}.md`
-- `13_chapter_packs/{chapter_id}_pack.json`
-- `09_pageindex/trees/*.tree.json` and `.nodes.json`
-- `08_full_markdown/{arxiv_id}.md` (via MCP `get_paper_section`)
-- `06_expansion/known_concepts_snapshot.json`
-- `06_expansion/knowledge_gap_report.json`
+- `chapter_targets` — typed IDs (`book:{id}` / `family:{id}` / `method:{id}`)
+- `14_chapters/{book|families|methods}/...`
+- `13_chapter_packs/{book|families|methods}/...`
+- `10_verified_evidence/{arxiv_id}.json`
+- `09_pageindex/trees/*.tree.json`
+- `08_full_markdown/{arxiv_id}.md` (via `get_paper_section`)
+- `06_expansion/known_concepts_snapshot.json`, `knowledge_gap_report.json`
+- `12_taxonomy/outline.json`
 
 ## Outputs
-- `15_verification/{chapter_id}_verification.json`
-- `15_verification/verification_summary.csv`
+- `15_verification/{book|families|methods}/{id}_verification.json` — the ONLY artifact this agent writes. Overwrite in place on rewrite/reverify.
 
-## Rules
-- For each non-trivial claim with a citation `[arxiv:ID, node_id]`, fetch that section and judge: `supported`, `partially_supported`, `unsupported`, `overstated`.
-- For each high-priority knowledge gap from `knowledge_gap_report.json`, judge `covered` / `missing` / `overexplained` based on the chapter text.
-- For KB-known concepts that the chapter explains in detail (more than a sentence), flag as `overexplained_background`.
-- A claim that invents a dataset, metric, or numerical result is `unsupported`.
+NEVER write `verification_summary.csv` or any `verification_summary_shard_*.csv`. The parent orchestrator rebuilds the canonical summary deterministically from per-target JSONs after all dispatches return.
 
-## Form checks (from chapter-writing/SKILL.md)
+## Claim verdicts
+For every `[arxiv:ID, node_id]` citation: `supported`, `partially_supported`, `unsupported`, or `overstated`.
 
-These catch a chapter that is technically grounded but structurally thin.
+### Verbatim cited block rule (auto-supported)
+A `$$ ... $$` block or fenced code block (```text or unlanguaged) whose contents appear as a substring of the cited node's source text (read via `get_paper_section`) → `supported` automatically.
 
-### Section detection (do this FIRST, before any form check)
+### Verified-evidence match
+Else `supported` only if `10_verified_evidence/{ID}.json` has a `claim/equation/algorithm/hyperparameter/complexity/neighbor` with the same `source_node_id` AND fetched section text agrees.
 
-Headings vary in casing and synonyms across chapters. Before reporting any
-section as "missing", scan all `##` and `###` headings in the chapter and
-match them case-insensitively against this synonym table. Use the FIRST
-match. Only report a section missing if NO synonym matches.
+### Artifact grounding (fabrication check)
+Every named library/codebase/model/comparison must appear in the chapter's pack (either in `pack.structured` or in any `pack.section_plan[*].source_nodes[*].section_text`). Else mark surrounding claim `unsupported`. Do NOT accept names from `04_weak_evidence/`.
 
-| Logical section       | Accepted heading synonyms (case-insensitive, trim whitespace) |
-|-----------------------|---------------------------------------------------------------|
-| `how_it_works`        | "how it works", "mechanism", "how the methods work", "method details", "technical details", "algorithm" |
-| `worked_example`      | "worked example", "example", "concrete example", "case study", "walkthrough" |
-| `strengths`           | "strengths", "when it works well", "advantages" |
-| `limitations`         | "limitations", "weaknesses", "failure modes", "caveats", "tradeoffs" |
-| `comparison`          | "comparison table", "comparison", "method comparison", "side by side" |
-| `implementation_notes`| "implementation notes", "tools", "libraries", "implementation", "tools and implementation", "implementation and tools" |
-| `practical_guidance`  | "practical guidance", "when to use", "when to use and when not to use", "guidance" |
+## Knowledge-gap coverage
+Book + method only (skip family). Each high-priority gap: `covered` / `missing` / `overexplained` (KB-known concepts with > 1 sentence of explanation).
 
-If a check's section is not found via this table, the issue is
-**`<section>_section_missing`**, NOT the depth-related issue. Do not record
-`how_it_works_thin` when the section is genuinely absent — record
-`how_it_works_section_missing` instead. The two are different problems and
-the chapter writer needs different feedback for each.
+## Section detection
+Do this FIRST, case-insensitive on heading text. Synonyms allowed:
 
-### Depth checks (only after the section is located)
+| Logical section  | Synonyms |
+|---|---|
+| Theory          | "theory", "theoretical foundation", "formalism" |
+| Algorithm       | "algorithm", "procedure", "method steps" |
+| Worked Example  | "worked example", "example", "case study" |
+| Practical Guidance | "practical guidance", "software", "implementation notes", "tools and libraries" |
+| Related Methods | "related methods", "related work and methods", "neighbors" |
+| Strengths       | "strengths", "advantages", "when it works well" |
+| Limitations     | "limitations", "weaknesses", "failure modes", "caveats" |
 
-For each check, parse the chapter's section bounded by the matched heading
-and the next `##` heading (or end of file). Then evaluate:
+If no synonym matches → `<section>_section_missing`. Never report depth issues for an absent section.
 
-- **word_count** below 1200, computed across the whole chapter.
-- **comparison_table_missing** if the chapter discusses ≥ 3 methods and contains no Markdown table anywhere (table = at least one line starting with `|` followed by a `| --- |` separator).
-- **how_it_works_thin** if `how_it_works` is found AND the chapter discusses ≥ 2 methods AND the section's paragraph count is fewer than the number of methods. A "paragraph" is a run of non-blank lines separated by blank lines; bold-prefixed paragraphs like `**Mamba.** ...` count as one paragraph each.
-- **strengths_not_list** if `strengths` is found AND the section contains zero Markdown bullet lines (`- ` or `* `) OR fewer than 3 bullets.
-- **limitations_not_list** same check on `limitations`.
-- **worked_example_abstract** if `worked_example` is found AND the section contains NEITHER a digit run of length ≥ 1 (e.g. "8K", "32x", "0.9") NOR all three of the substrings `input`, `state`, `output` (case-insensitive).
-- **implementation_notes_empty** if `implementation_notes` is found AND fewer than 2 backtick-quoted artifacts (`` `vllm` ``, `` `transformers` ``, etc.) OR proper-noun artifacts (capitalized library/model/repo names) are mentioned, UNLESS the section contains the literal phrase "no concrete artifacts" or "none were available".
+## Form profile per chapter type
 
-Each form failure is recorded as a `form_issues` entry with `check`,
-`detail`, and an `excerpt` field showing up to 240 chars of the matched
-text (or "section not found" when the section is genuinely missing). Both
-section-missing and depth issues count toward `summary.form_issue_count`.
+High word count is non-blocking for handbook output. Report `*_word_count_high`
+as a warning if useful, but do not put it in `form_issues` and do not include it
+in `summary.form_issue_count`. Low word count remains a blocking form issue.
+
+### `method:*`
+- Required headings, exactly and in order: `## Summary`, `## Motivation`, `## Intuition`, `## Theory`, `## Algorithm`, `## Worked Example`, `## Interpretation`, `## Strengths`, `## Limitations`, `## Practical Guidance`, `## Related Methods`.
+- `theory_missing_equations` — Theory has 0 `$$` AND pack has ≥ 1 equation.
+- `algorithm_missing_pseudocode` — Algorithm has 0 fenced block AND no numbered list of length ≥ 3, AND pack has ≥ 1 algorithm.
+- `example_abstract` — Worked Example has no concrete number AND pack provides hyperparameters or numeric results.
+- `citation_only_section` — any required section except Practical Guidance/Related Methods has only citations or fewer than 20 non-citation words.
+- `placeholder_section` — section body is `None.`, "Too thin.", "No explicit hyperparameters were extracted..." alone, or equivalent placeholder text.
+- `copied_source_outline` — section mostly consists of source paper headings, table captions, "Baselines." labels, or repeated bullet lists rather than explanatory prose.
+- `strengths_thin` / `limitations_thin` — < 3 bullets.
+- `related_methods_thin` — < 2 paragraphs AND pack has ≥ 2 neighbors.
+- `method_word_count_low` — < 1500. `method_word_count_high` — > 3000 is a warning only.
+
+### `family:*`
+- Required headings, exactly and in order: `## Summary`, `## Motivation`, `## Core Idea`, `## Common Pipeline`, `## Main Variants`, `## Representative Methods`, `## Strengths`, `## Limitations`, `## When to Use`, `## Related Families`.
+- `comparison_table_missing` — no Markdown table.
+- `comparison_row_count_mismatch` — table rows ≠ `len(pack.method_ids)`.
+- `core_idea_missing` — missing `## Core Idea`.
+- `family_placeholder_prose` — generic navigation prose without concrete mechanism/use/failure claims from pack rows.
+- `method_links_broken` — link target file doesn't exist under `14_chapters/methods/`.
+- `family_word_count_low` — < 1000. `_high` — > 1800 is a warning only.
+
+### `book:*`
+Per `section_id`, check the subsection list and word range from `book-section-writing/SKILL.md`. Specific extras:
+- `motivating_intro` — ≥ 1 citation in the anecdote.
+- `core_concepts` — one subsection per gap concept.
+- `goals` — bulleted list with ≥ 2.
+- `method_taxonomy` — ≥ 1 family link per family and ≥ 1 method link per method in outline.
+- `shared_examples` — ≥ 1 worked example with citation.
+- `evaluation_outlook` — ≥ 3 distinct benchmark/metric names from verified-evidence.
+- `appendices` — References lists every promoted paper.
+- `book_placeholder_prose` — generic boilerplate or "regenerated deterministically" placeholder remains in final chapter.
+- Other ranges → `<section>_word_count_low`; `<section>_word_count_high` is a warning only. Missing required subsections → `<subsection>_missing`.
 
 ## Output schema
 ```json
 {
-  "chapter_id": "chapter_01",
-  "claims": [
-    {"text": "...", "citation": "arxiv:2304.08485, s.03.02", "verdict": "supported", "reason": ""}
-  ],
-  "knowledge_gap_coverage": [
-    {"concept": "CLIP vision encoder", "status": "covered", "reason": ""}
-  ],
-  "overexplained_known_concepts": [
-    {"concept": "Transformer", "reason": "Two paragraphs of explanation; KB lists it as known."}
-  ],
-  "form_issues": [
-    {
-      "check": "comparison_table_missing",
-      "detail": "Discusses 5 methods (Mamba, Samba, Transformer-XL, Longformer, PagedAttention) with no comparison table.",
-      "excerpt": ""
-    },
-    {
-      "check": "how_it_works_section_missing",
-      "detail": "No heading matched any synonym for 'How it works'.",
-      "excerpt": "section not found"
-    }
-  ],
+  "chapter_target": "method:nsa",
+  "chapter_type": "method",
+  "claims": [{"text":"", "citation":"arxiv:..., s.05.02",
+              "verdict":"supported", "reason":"verbatim equation match"}],
+  "knowledge_gap_coverage": [{"concept":"", "status":"covered|missing|overexplained", "reason":""}],
+  "form_issues": [{"check":"theory_missing_equations", "detail":"", "excerpt":""}],
+  "warnings": [{"check":"method_word_count_high", "detail":"", "excerpt":""}],
   "summary": {
-    "claims_total": 0,
-    "claims_unsupported": 0,
-    "claims_overstated": 0,
-    "gaps_covered": 0,
-    "gaps_missing": 0,
-    "overexplained_count": 0,
-    "word_count": 0,
-    "form_issue_count": 0
+    "claims_total": 0, "claims_unsupported": 0, "claims_overstated": 0,
+    "gaps_covered": 0, "gaps_missing": 0,
+    "word_count": 0, "form_issue_count": 0,
+    "equations_rendered": 0, "pseudocode_blocks": 0
   }
 }
 ```
 
-## Success check
-- File exists.
-- For MVP success: `claims_unsupported == 0`, `gaps_missing == 0`, `form_issue_count == 0`, and `word_count >= 1200`.
-- A run with `form_issue_count > 0` is functionally complete but should NOT be reported as MVP-passing; the orchestrator should log it and the user can choose to re-dispatch `chapter_writer` with the verifier output as feedback.
+## Success
+- File at canonical verification path.
+- `passed` iff `claims_unsupported == 0 AND gaps_missing == 0 AND form_issue_count == 0`.
+  High-word-count warnings do not affect `passed`.
