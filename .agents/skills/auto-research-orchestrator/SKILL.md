@@ -25,26 +25,8 @@ The runner must execute Stages 0-10 as separate stage handlers. Do not ask one C
 - `knowledge_base_path` (default `.agents/knowledge_base.md`)
 - normal/survey queries, positive/negative keywords (optional; derive from topic)
 
-## Two-pass execution (Codex sub-agent model bug workaround)
-
-Codex bug [openai/codex#16548] makes every sub-agent run as the parent session's model regardless of its `.toml`. Run two passes so cheap stages use mini and writing uses gpt-5.4:
-
-| Phase   | Stages | Recommended parent |
-|---------|--------|--------------------|
-| `draft` | 0–13   | `gpt-5.4-mini`     |
-| `write` | 14–17  | `gpt-5.4`          |
-| `all`   | 0–17   | (whatever)         |
-
-Operator workflow:
-1. `codex --model gpt-5.4-mini` → orchestrator with `phase=draft` + topic. Runs 0–13. Status line prints the `run_id`.
-2. `codex --model gpt-5.4` → orchestrator with `phase=write` + `run_id`. Runs 14–17.
-
-End-of-phase status (print verbatim):
-- draft: `draft phase complete. run_id={run_id}. Now relaunch codex with --model gpt-5.4 and ask the orchestrator with phase=write run_id={run_id}.`
-- write: `write phase complete. run_id={run_id}. Chapters at research_runs/{run_id}/14_chapters/.`
-
 ## phase=write,fix_excluded=true (single retry)
-When the operator re-launches with `phase=write fix_excluded=true`:
+When invoked with `phase=write fix_excluded=true`:
 1. Read offender list from `15_verification/{type}/{id}_verification.json`.
 2. For each offender:
    - `gaps_missing` -> re-dispatch stage 13 (pack rebuild) for that ID, then stage 14.
@@ -223,7 +205,7 @@ Build typed `pack_targets` in canonical order: 8 book sections → all families 
 Validation: every method pack has non-empty `section_text` on theory/algorithm/example/limitations source nodes (the single biggest determinant of method-chapter depth). Failing pack re-dispatched ONCE.
 
 ### Phase boundary — end of `draft`
-If `phase=draft`, stop here. Print the draft-complete status line. Never dispatch Stages 14–17.
+If `phase=draft`, stop here. Print `draft phase complete. run_id={run_id}.` Never dispatch Stages 14–17.
 
 ### 14 — Write chapters [PARALLEL three-tier]
 Three writer agents run concurrently, each sharded independently:

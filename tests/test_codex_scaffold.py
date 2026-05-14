@@ -40,6 +40,7 @@ EXPECTED_SKILLS = {
     "weak-graph-extraction",
     "knowledge-gap-detection",
     "paper-pool-expansion",
+    "paper-ranking",
     "pageindex-building",
     "verified-evidence-extraction",
     "verified-graph-extraction",
@@ -226,3 +227,29 @@ def test_config_toml_has_mcp_server_block():
     config = tomllib.loads((REPO_ROOT / ".codex" / "config.toml").read_text())
     assert "mcp_servers" in config
     assert "swarn-auto-research" in config["mcp_servers"]
+
+
+def test_paper_ranker_has_companion_skill_and_budget_docs_are_current():
+    skill_path = SKILLS_DIR / "paper-ranking" / "SKILL.md"
+    assert skill_path.is_file()
+
+    skill_md = skill_path.read_text()
+    compact_skill = re.sub(r"\s+", "", skill_md)
+    assert "final_score=0.35*topic_relevance" in compact_skill
+
+    paper_ranker_prompt = tomllib.loads((AGENTS_DIR / "paper_ranker.toml").read_text())[
+        "developer_instructions"
+    ]
+    assert "Follow .agents/skills/paper-ranking/SKILL.md." in paper_ranker_prompt
+
+    config_toml = (REPO_ROOT / ".codex" / "config.toml").read_text()
+    assert "max_seed_papers=50" not in config_toml
+
+    method_writer = (AGENTS_DIR / "method_chapter_writer.toml").read_text()
+    assert "11-section template" in method_writer
+    assert "10-section template" not in method_writer
+
+    orchestrator = (SKILLS_DIR / "auto-research-orchestrator" / "SKILL.md").read_text()
+    assert "Two-pass execution" not in orchestrator
+    assert "relaunch codex with --model gpt-5.4" not in orchestrator
+    assert "Now relaunch codex" not in orchestrator

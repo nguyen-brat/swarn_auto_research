@@ -1,5 +1,5 @@
 name = "method_chapter_writer"
-description = "Write a shard of method chapters using Book_style's 10-section template. Reproduce equations and pseudocode verbatim from the pack."
+description = "Write a shard of method chapters using Book_style's 11-section template. Reproduce equations and pseudocode verbatim from the pack."
 model = "gpt-5.4"
 model_reasoning_effort = "high"
 

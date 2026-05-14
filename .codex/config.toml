@@ -30,7 +30,7 @@ max_threads = 100
 max_depth = 1
 job_max_runtime_seconds = 3600
 
-# Budgets (max_seed_papers=50, max_expansion_gaps=5, max_expansion_rounds=1,
+# Budgets (target_seed_papers=200, max_expansion_gaps=5, max_expansion_rounds=1,
 # min_promote_score=0.45, min_gap_importance=0.70, min_confusion_risk="medium")
 # are documented in .agents/skills/auto-research-orchestrator/SKILL.md and not
 # stored in this file because Codex parses [agents.X] sub-tables as agent-role
