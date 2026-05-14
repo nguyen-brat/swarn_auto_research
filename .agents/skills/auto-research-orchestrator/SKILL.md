@@ -117,7 +117,7 @@ Cap: ≤ 50 concurrent sub-agents per stage. If a stage has more than 50 shards,
 
 ### 1 — Seed pool
 
-**1a. Plan the search.** Dispatch `query_planner` with the topic and any user-supplied queries/keywords. It writes `00_input/search_plan.json` covering 4–8 distinct aspects of the topic (method families, architectural enablers, training/adaptation, evaluation, foundational priors, boundary aspects). This is the step that prevents missing key papers — narrow plans miss whole sub-areas.
+**1a. Plan the search.** Dispatch `query_planner` with the topic and any user-supplied queries/keywords. It writes `00_input/search_plan.json` covering 4–6 distinct aspects of the topic (method families, architectural enablers, training/adaptation, evaluation, foundational priors, boundary aspects). This is the step that prevents missing key papers — narrow plans miss whole sub-areas.
 
 **1b. Execute the search.** Read `search_plan.json`. Build the union across all aspects:
 - `queries` = union of every aspect's `normal_queries`

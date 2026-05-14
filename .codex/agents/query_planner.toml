@@ -1,5 +1,5 @@
 name = "query_planner"
-description = "Expand a topic into 4–8 distinct aspects with per-aspect queries and keywords for Stage 1."
+description = "Expand a topic into 4–6 distinct aspects with per-aspect queries and keywords for Stage 1."
 model = "gpt-5.4"
 model_reasoning_effort = "medium"
 
