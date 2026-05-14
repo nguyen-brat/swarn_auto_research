@@ -1852,6 +1852,9 @@ def test_validate_bootstrap_contract_rejects_truncated_large_seed_pool(tmp_path)
     _write_valid_bootstrap_contract(run)
     kept_ids = [f"2501.{idx:05d}" for idx in range(220)]
     selected_ids = kept_ids[:50]
+    (run / "01_seed_pool" / "bulk_search_results_123.json").write_text(
+        json.dumps({arxiv_id: "abstract" for arxiv_id in kept_ids})
+    )
     (run / "01_seed_pool" / "seed_pool_raw.json").write_text(
         json.dumps(
             {
