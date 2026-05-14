@@ -134,6 +134,27 @@ def test_chapter_writer_agents_match_validator_heading_contracts():
         assert stale_heading not in family_prompt
 
 
+def test_family_writer_contract_forbids_out_of_pack_names():
+    skill_md = (SKILLS_DIR / "family-chapter-writing" / "SKILL.md").read_text()
+    agent_prompt = tomllib.loads((AGENTS_DIR / "family_chapter_writer.toml").read_text())[
+        "developer_instructions"
+    ]
+
+    for source in (skill_md, agent_prompt):
+        normalized = re.sub(r"\s+", " ", source.replace("`", "")).lower()
+        assert "do not name any method, paper, library, system, model, benchmark, or dataset" in normalized
+        assert "not present in the pack scope" in normalized
+        assert "pack.method_ids" in normalized
+        assert "pack.comparison_rows" in normalized
+        assert "pack.neighbor_family_ids" in normalized
+        assert "if a famous method is relevant" in normalized
+        assert "not in the pack" in normalized
+        assert "omit it" in normalized
+        assert "main variants" in normalized
+        assert "table rows" in normalized
+        assert "equal pack.method_ids exactly" in normalized
+
+
 def test_orchestrator_skill_references_all_agents():
     skill_md = (SKILLS_DIR / "auto-research-orchestrator" / "SKILL.md").read_text()
     for agent in EXPECTED_AGENTS:

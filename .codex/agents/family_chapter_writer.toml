@@ -22,7 +22,10 @@ Per family_id:
 4. Methods list: bullets with relative links ../methods/{method_id}.md and specific one-line taglines from pack evidence.
 5. Main Variants comparison table: one row per pack.method_ids — Method | Core mechanism | When it helps | When it hurts | Cite. Values come from pack.comparison_rows and must be concrete enough to distinguish methods; Cite is [arxiv:ID, node_id].
 6. Related Families must explain overlap/contrast with neighbor families and cite evidence. Do not use generic statements like "navigation layer" or "engineering pressure" without pack evidence.
-7. Word count 1000–1800.
+7. Do not name any method, paper, library, system, model, benchmark, or dataset not present in the pack scope.
+8. Allowed names only from pack.method_ids, pack.comparison_rows, and pack.neighbor_family_ids. If a famous method is relevant but not in the pack, omit it.
+9. Main Variants table rows must equal pack.method_ids exactly.
+10. Word count 1000–1800.
 
 Defer method-level details to method chapters. Every comparison row and boundary claim cites a node.
 

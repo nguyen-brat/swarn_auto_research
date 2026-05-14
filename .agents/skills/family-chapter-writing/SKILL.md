@@ -36,7 +36,11 @@ A trailing `## References` is allowed but not required.
 
 ## Hard rules
 - Defer method-level details to method chapters.
+- Do not name any method, paper, library, system, model, benchmark, or dataset not present in the pack scope.
+- Allowed names only from `pack.method_ids`, `pack.comparison_rows`, and `pack.neighbor_family_ids`.
+- If a famous method is relevant but not in the pack, omit it.
 - `## Main Variants` contains a comparison table; every row cites a node.
+- `## Main Variants` table rows must equal `pack.method_ids` exactly.
 - Every `## Related Families` boundary claim cites a node.
 - Method links use relative path `../methods/{method_id}.md`.
 
