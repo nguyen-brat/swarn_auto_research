@@ -12,7 +12,7 @@ description: Verify chapters against verified-evidence with per-type form profil
 - `10_verified_evidence/{arxiv_id}.json`
 - `09_pageindex/trees/*.tree.json`
 - `08_full_markdown/{arxiv_id}.md` (via `get_paper_section`)
-- `06_expansion/known_concepts_snapshot.json`, `knowledge_gap_report.json`
+- `06_expansion/known_concepts_snapshot.json`; do not load `knowledge_gap_report.json` as a per-chapter checklist
 - `12_taxonomy/outline.json`
 
 ## Outputs
@@ -32,8 +32,19 @@ Else `supported` only if `10_verified_evidence/{ID}.json` has a `claim/equation/
 ### Artifact grounding (fabrication check)
 Every named library/codebase/model/comparison must appear in the chapter's pack (either in `pack.structured` or in any `pack.section_plan[*].source_nodes[*].section_text`). Else mark surrounding claim `unsupported`. Do NOT accept names from `04_weak_evidence/`.
 
+### Synthesis claims for family and book chapters
+Do not downgrade a claim to `partially_supported` merely because it synthesizes across multiple cited sources. For `family:*`, a synthesis claim is `supported` when all named methods are present in the pack and each cited node exists in verified evidence or fetched source text. For `book:*`, a synthesis claim is `supported` when every named method/family/concept is present in the chapter pack or outline and each cited node exists in verified evidence or fetched source text.
+
+Use `partially_supported` only when the sentence combines anchored pack evidence with an extra factual assertion that is not anchored by any cited node. `partially_supported` is informational and is not counted as `claims_unsupported`.
+
 ## Knowledge-gap coverage
-Book + method only (skip family). Each high-priority gap: `covered` / `missing` / `overexplained` (KB-known concepts with > 1 sentence of explanation).
+Use the chapter pack, not the global gap report, as the required checklist.
+
+- `method:*`: check only `pack.knowledge_gaps_to_explain`; at most 3 method gaps are required. If the pack list is empty, emit an empty `knowledge_gap_coverage` list and `gaps_missing = 0`.
+- `family:*`: check only `pack.knowledge_gaps_to_explain`; family synthesis may cover gaps across methods.
+- `book:*`: check only the section-specific concepts in the book pack. Do not load the global `knowledge_gap_report` as a per-chapter required checklist.
+
+Do not load the global knowledge_gap_report as a per-chapter required checklist. Global gaps are input to pack building, not verifier obligations for every chapter.
 
 ## Section detection
 Do this FIRST, case-insensitive on heading text. Synonyms allowed:
@@ -94,6 +105,7 @@ Per `section_id`, check the subsection list and word range from `book-section-wr
 {
   "chapter_target": "method:nsa",
   "chapter_type": "method",
+  "passed": true,
   "claims": [{"text":"", "citation":"arxiv:..., s.05.02",
               "verdict":"supported", "reason":"verbatim equation match"}],
   "knowledge_gap_coverage": [{"concept":"", "status":"covered|missing|overexplained", "reason":""}],
@@ -110,5 +122,5 @@ Per `section_id`, check the subsection list and word range from `book-section-wr
 
 ## Success
 - File at canonical verification path.
-- `passed` iff `claims_unsupported == 0 AND gaps_missing == 0 AND form_issue_count == 0`.
+- `passed` iff `claims_unsupported == 0 AND claims_overstated == 0 AND gaps_missing == 0 AND form_issue_count == 0`.
   High-word-count warnings do not affect `passed`.

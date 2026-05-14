@@ -155,6 +155,41 @@ def test_family_writer_contract_forbids_out_of_pack_names():
         assert "equal pack.method_ids exactly" in normalized
 
 
+def test_verifier_contract_allows_family_and_book_synthesis():
+    skill_md = (SKILLS_DIR / "verification" / "SKILL.md").read_text()
+    agent_prompt = tomllib.loads((AGENTS_DIR / "verifier.toml").read_text())[
+        "developer_instructions"
+    ]
+
+    for source in (skill_md, agent_prompt):
+        normalized = re.sub(r"\s+", " ", source.replace("`", "")).lower()
+        assert "synthesis claims for family and book chapters" in normalized
+        assert "do not downgrade" in normalized
+        assert "synthesizes across" in normalized
+        assert "all named methods are present in the pack" in normalized
+        assert "book:*" in normalized
+        assert "pack or outline" in normalized
+        assert "partially_supported is informational" in normalized
+        assert "not counted as claims_unsupported" in normalized
+
+
+def test_verifier_contract_uses_pack_scoped_gap_list():
+    skill_md = (SKILLS_DIR / "verification" / "SKILL.md").read_text()
+    agent_prompt = tomllib.loads((AGENTS_DIR / "verifier.toml").read_text())[
+        "developer_instructions"
+    ]
+
+    for source in (skill_md, agent_prompt):
+        normalized = re.sub(r"\s+", " ", source.replace("`", "")).lower()
+        assert "pack.knowledge_gaps_to_explain" in normalized
+        assert "do not load the global knowledge_gap_report" in normalized
+        assert "per-chapter required checklist" in normalized
+        assert "at most 3 method gaps are required" in normalized
+        assert "empty" in normalized
+        assert "gaps_missing = 0" in normalized or "gaps_missing=0" in normalized
+        assert '"passed"' in source
+
+
 def test_orchestrator_skill_references_all_agents():
     skill_md = (SKILLS_DIR / "auto-research-orchestrator" / "SKILL.md").read_text()
     for agent in EXPECTED_AGENTS:

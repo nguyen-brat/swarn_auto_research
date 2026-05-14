@@ -24,18 +24,25 @@ Per target:
 
 3. Artifact grounding: every named library/codebase/model/comparison system in the chapter must appear in the pack (structured or section_text). Else flag the surrounding claim 'unsupported' (fabrication).
 
-4. Knowledge-gap coverage: book + method only (skip family).
+4. Synthesis claims for family and book chapters: Do not downgrade a claim to partially_supported merely because it synthesizes across multiple cited sources. For family:* all named methods are present in the pack and every cited node must exist in verified evidence or fetched source text. For book:* all named methods, families, or concepts must be present in the pack or outline and every cited node must exist in verified evidence or fetched source text. partially_supported is informational and is not counted as claims_unsupported.
 
-5. Form profile per prefix:
+5. Knowledge-gap coverage: use pack.knowledge_gaps_to_explain, not the global knowledge_gap_report, as the per-chapter checklist.
+   - method:* — check only pack.knowledge_gaps_to_explain. At most 3 method gaps are required. If the pack list is empty, emit an empty knowledge_gap_coverage list and gaps_missing=0.
+   - family:* — check only pack.knowledge_gaps_to_explain.
+   - book:* — check only section-specific concepts in the book pack.
+   Do not load the global knowledge_gap_report as a per-chapter required checklist. Global gaps are input to pack building, not verifier obligations for every chapter.
+
+6. Form profile per prefix:
    - method:* — exact required headings, in order: ## Summary, ## Motivation, ## Intuition, ## Theory, ## Algorithm, ## Worked Example, ## Interpretation, ## Strengths, ## Limitations, ## Practical Guidance, ## Related Methods. Theory must render ≥1 $$ when pack has equations; Algorithm must render ≥1 fenced block or numbered list of length ≥3 when pack has algorithms; Strengths/Limitations have ≥3 bullets; Related Methods ≥2 paragraphs when pack has ≥2 neighbors; word count must be ≥1500; high word count is a warning only, not a form issue; no citation-only required sections; no placeholder sections; no copied source-heading/source-outline lists. Old headings ## Example and ## Software are form issues.
    - family:* — exact required headings, in order: ## Summary, ## Motivation, ## Core Idea, ## Common Pipeline, ## Main Variants, ## Representative Methods, ## Strengths, ## Limitations, ## When to Use, ## Related Families. ## Main Variants has a comparison table with one row per pack.method_ids; method links resolve to existing files; word count must be ≥1000; high word count is a warning only, not a form issue; no generic navigation-only prose. Old headings such as ## What this family is and ## Core design pattern are form issues.
    - book:* — per-section subsections + minimum word range from skill's table; high word count is a warning only, not a form issue; no hard-coded placeholder boilerplate remains in final chapters.
 
-6. Section detection FIRST using synonym table; only flag <section>_section_missing when no synonym matches.
+7. Section detection FIRST using synonym table; only flag <section>_section_missing when no synonym matches.
 
-7. Never mark a chapter passed when word count is below the minimum or when required pack source text is absent. A chapter with zero claims and zero form issues is suspicious; only allow it for preface/goals when that matches the skill. High word count alone does not block passing.
-8. Write research_runs/{run_id}/15_verification/{book|families|methods}/{id}_verification.json (the ONLY artifact this agent produces). Overwrite in place on rewrite/reverify.
-9. NEVER write verification_summary.csv. NEVER write verification_summary_shard_*.csv. The parent rebuilds the canonical summary from the per-target JSONs after all dispatches return.
+8. Never mark a chapter passed when word count is below the minimum or when required pack source text is absent. A chapter with zero claims and zero form issues is suspicious; only allow it for preface/goals when that matches the skill. High word count alone does not block passing.
+9. Output must include top-level "passed" immediately after "chapter_type" and before "claims" in the JSON object. passed is true iff claims_unsupported == 0 AND claims_overstated == 0 AND gaps_missing == 0 AND form_issue_count == 0. High-word-count warnings do not affect passed.
+10. Write research_runs/{run_id}/15_verification/{book|families|methods}/{id}_verification.json (the ONLY artifact this agent produces). Overwrite in place on rewrite/reverify.
+11. NEVER write verification_summary.csv. NEVER write verification_summary_shard_*.csv. The parent rebuilds the canonical summary from the per-target JSONs after all dispatches return.
 
 Return: 'ok: shard={shard_id}, N targets, U unsupported, M gaps_missing, F form_issues'.
 """
