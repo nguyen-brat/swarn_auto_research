@@ -175,6 +175,14 @@ def _paper_label(arxiv_id: str, promoted: dict[str, dict[str, Any]], pool: dict[
     return f"[arxiv:{arxiv_id}] {title} ({year})"
 
 
+def _method_display_title(method: dict[str, Any], method_id: str) -> str:
+    title = str(method.get("title") or method_id)
+    readable_id = method_id.replace("-", " ")
+    if readable_id.lower() in title.lower() or method_id.lower() in title.lower():
+        return title
+    return f"{title} ({method_id})"
+
+
 def _outline(run_dir: Path) -> dict[str, Any]:
     return _load_json(run_dir / "12_taxonomy" / "outline.json")
 
@@ -1079,13 +1087,15 @@ def _build_summary(
                 for method_id in passed_methods:
                     method = methods.get(method_id)
                     if method:
-                        lines.append(f"- [{method['title']}](../14_chapters/methods/{method_id}.md)")
+                        title = _method_display_title(method, method_id)
+                        lines.append(f"- [{title}](../14_chapters/methods/{method_id}.md)")
             else:
                 lines.append(f"- [{family['title']}](../14_chapters/families/{family_id}.md)")
                 for method_id in passed_methods:
                     method = methods.get(method_id)
                     if method:
-                        lines.append(f"  - [{method['title']}](../14_chapters/methods/{method_id}.md)")
+                        title = _method_display_title(method, method_id)
+                        lines.append(f"  - [{title}](../14_chapters/methods/{method_id}.md)")
     return "\n".join(lines)
 
 
@@ -1125,13 +1135,23 @@ def _build_sidebar(
                 for method_id in passed_methods:
                     method = methods.get(method_id)
                     if method:
-                        children.append({"title": method["title"], "path": f"14_chapters/methods/{method_id}.md"})
+                        children.append(
+                            {
+                                "title": _method_display_title(method, method_id),
+                                "path": f"14_chapters/methods/{method_id}.md",
+                            }
+                        )
             else:
                 method_kids = []
                 for method_id in passed_methods:
                     method = methods.get(method_id)
                     if method:
-                        method_kids.append({"title": method["title"], "path": f"14_chapters/methods/{method_id}.md"})
+                        method_kids.append(
+                            {
+                                "title": _method_display_title(method, method_id),
+                                "path": f"14_chapters/methods/{method_id}.md",
+                            }
+                        )
                 children.append(
                     {
                         "title": family["title"],

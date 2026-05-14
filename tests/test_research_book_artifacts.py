@@ -392,6 +392,35 @@ def test_generate_book_artifacts_writes_complete_navigation_and_appendices(tmp_p
     assert sidebar["items"][2]["children"][0]["title"] == "KV Cache"
 
 
+def test_summary_method_label_includes_slug_when_title_and_id_differ(tmp_path: Path):
+    run_dir = minimal_run(tmp_path)
+    outline = json.loads((run_dir / "12_taxonomy" / "outline.json").read_text())
+    outline["methods"][0]["title"] = "Attention Routing"
+    write_json(run_dir / "12_taxonomy" / "outline.json", outline)
+
+    generate_book_artifacts(run_dir)
+
+    summary = (run_dir / "16_book" / "SUMMARY.md").read_text(encoding="utf-8")
+    assert "- [Attention Routing (first-method)](../14_chapters/methods/first-method.md)" in summary
+    assert "../14_chapters/methods/attention-routing.md" not in summary
+
+
+def test_sidebar_method_label_includes_slug_when_title_and_id_differ(tmp_path: Path):
+    run_dir = minimal_run(tmp_path)
+    outline = json.loads((run_dir / "12_taxonomy" / "outline.json").read_text())
+    outline["methods"][0]["title"] = "Attention Routing"
+    write_json(run_dir / "12_taxonomy" / "outline.json", outline)
+
+    generate_book_artifacts(run_dir)
+
+    sidebar = json.loads((run_dir / "16_book" / "sidebar.json").read_text())
+    method_item = sidebar["items"][1]["children"][0]["children"][0]
+    assert method_item == {
+        "title": "Attention Routing (first-method)",
+        "path": "14_chapters/methods/first-method.md",
+    }
+
+
 def test_generate_book_artifacts_resolves_titles_from_semantic_scholar(tmp_path: Path):
     run_dir = minimal_run(tmp_path)
     write_json(
