@@ -71,7 +71,7 @@ async def run_one_shot(
             cwd=str(cwd or REPO_ROOT),
             approval_policy="never",
         )
-        stream = turn.stream()
+        stream = turn.stream(notification_timeout_s=timeout)
         try:
             result = await asyncio.wait_for(
                 _collect_async_run_result(stream, turn_id=turn.id),

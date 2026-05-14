@@ -59,25 +59,35 @@ class SdkCodexScriptTest(unittest.TestCase):
 
     def test_run_one_shot_returns_thread_and_turn_ids(self) -> None:
         module = load_sdk_codex_module()
+        captured_thread = None
 
         class FakeTurn:
             id = "turn-123"
 
-            def stream(self):
+            def __init__(self):
+                self.notification_timeout_s = None
+
+            def stream(self, notification_timeout_s=None):
+                self.notification_timeout_s = notification_timeout_s
                 return object()
 
         class FakeThread:
             id = "thread-abc"
 
+            def __init__(self):
+                self.fake_turn = FakeTurn()
+
             async def turn(self, prompt, **kwargs):
                 self.prompt = prompt
                 self.kwargs = kwargs
-                return FakeTurn()
+                return self.fake_turn
 
         class FakeCodex:
             def __init__(self, config):
+                nonlocal captured_thread
                 self.config = config
                 self.thread = FakeThread()
+                captured_thread = self.thread
 
             async def __aenter__(self):
                 return self
@@ -109,6 +119,8 @@ class SdkCodexScriptTest(unittest.TestCase):
         self.assertEqual(result.thread_id, "thread-abc")
         self.assertEqual(result.turn_id, "turn-123")
         self.assertEqual(result.final_response, "done")
+        self.assertIsNotNone(captured_thread)
+        self.assertEqual(captured_thread.fake_turn.notification_timeout_s, 12)
 
 
 if __name__ == "__main__":
