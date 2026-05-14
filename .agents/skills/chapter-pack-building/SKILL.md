@@ -29,6 +29,8 @@ Required Book_style sections in `section_plan` (11):
 
 An empty or partial `section_plan` is a build failure. Never write a method pack with zero source nodes or with fewer than these 11 section entries.
 
+Method packs must scope `knowledge_gaps_to_explain` to concepts actually touched by that method's evidence. Prefer `outline.methods[*].knowledge_gaps_to_explain` when present, otherwise intersect `knowledge_gap_report` concepts with the method's evidence claim and structured text. Cap method `knowledge_gaps_to_explain` at 3 concepts. Do not copy the global `knowledge_gap_report` into every method pack.
+
 Per-section `source_node` shape:
 ```json
 {"arxiv_id":"", "node_id":"", "lines":[0,0],

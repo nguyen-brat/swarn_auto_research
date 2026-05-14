@@ -1587,11 +1587,130 @@ def _build_method_pack(
         "family_id": method.get("family_id", ""),
         "family_title": family.get("title", method.get("family_id", "")),
         "known_concepts_assumed": method.get("known_concepts_assumed") or [],
-        "knowledge_gaps_to_explain": method.get("knowledge_gaps_to_explain") or [],
+        "knowledge_gaps_to_explain": _method_gap_scope(run_dir, method, evidence),
         "structured": structured,
         "section_plan": section_plan,
         "neighbors": neighbors,
     }
+
+
+def _gap_concept_text(item: Any) -> str:
+    if isinstance(item, str):
+        return item.strip()
+    if isinstance(item, dict):
+        for key in ("concept", "name", "title", "text"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def _knowledge_gap_candidates(run_dir: Path) -> list[str]:
+    report = _read_json_or_empty(run_dir / "06_expansion" / "knowledge_gap_report.json")
+    raw_items: list[Any] = []
+    for key in ("knowledge_gaps", "gaps", "confusing_concepts", "missing_prerequisites"):
+        value = report.get(key)
+        if isinstance(value, list):
+            raw_items.extend(value)
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        concept = _gap_concept_text(item)
+        normalized = concept.lower()
+        if concept and normalized not in seen:
+            seen.add(normalized)
+            candidates.append(concept)
+    return sorted(candidates, key=lambda concept: len(concept.split()), reverse=True)
+
+
+def _concept_match_spans(concept: str, evidence_text: str) -> list[tuple[int, int]]:
+    normalized = " ".join(concept.lower().split())
+    if not normalized:
+        return []
+    escaped = r"\s+".join(re.escape(part) for part in normalized.split())
+    plural_suffix = "s?" if not normalized.endswith("s") else ""
+    return [
+        match.span()
+        for match in re.finditer(rf"(?<!\w){escaped}{plural_suffix}(?!\w)", evidence_text)
+    ]
+
+
+def _concept_matches_evidence(concept: str, evidence_text: str) -> bool:
+    return bool(_concept_match_spans(concept, evidence_text.lower()))
+
+
+def _evidence_text_values(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [
+            text
+            for item in value.values()
+            for text in _evidence_text_values(item)
+        ]
+    if isinstance(value, list):
+        return [
+            text
+            for item in value
+            for text in _evidence_text_values(item)
+        ]
+    return []
+
+
+def _method_gap_scope(
+    run_dir: Path,
+    method: dict[str, Any],
+    evidence: dict[str, Any],
+) -> list[str]:
+    explicit = [
+        concept
+        for concept in (
+            _gap_concept_text(item)
+            for item in method.get("knowledge_gaps_to_explain") or []
+        )
+        if concept
+    ]
+    if explicit:
+        return explicit[:3]
+
+    evidence_parts: list[str] = []
+    for key in (
+        "claims",
+        "equations",
+        "algorithms",
+        "hyperparameters",
+        "complexity",
+        "datasets",
+        "artifacts",
+        "benchmarks",
+        "metrics",
+        "baselines",
+        "results",
+        "limitations",
+    ):
+        evidence_parts.extend(_evidence_text_values(evidence.get(key) or []))
+    evidence_text = " ".join(evidence_parts).lower()
+
+    scoped: list[str] = []
+    selected_spans: list[tuple[int, int]] = []
+    for concept in _knowledge_gap_candidates(run_dir):
+        spans = _concept_match_spans(concept, evidence_text)
+        if not spans:
+            continue
+        if all(
+            any(
+                start >= selected_start and end <= selected_end
+                for selected_start, selected_end in selected_spans
+            )
+            for start, end in spans
+        ):
+            continue
+        scoped.append(concept)
+        selected_spans.extend(spans)
+        if len(scoped) >= 3:
+            break
+    return scoped
 
 
 def _first_text(items: list[dict[str, Any]], key: str, fallback: str) -> str:

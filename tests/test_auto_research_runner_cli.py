@@ -736,6 +736,77 @@ def test_build_deterministic_stage_13_packs_from_verified_evidence(tmp_path):
     assert book_pack["data"]["topic"] == "Fixture topic"
 
 
+def test_build_method_pack_scopes_knowledge_gaps_to_method_evidence(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "10_verified_evidence").mkdir(parents=True)
+    (run_dir / "06_expansion").mkdir(parents=True)
+    (run_dir / "10_verified_evidence" / "1234.00001.json").write_text(
+        json.dumps(
+            {
+                "claims": [
+                    {
+                        "text": "AudioMAE masks spectrogram patches before reconstruction.",
+                        "claim_type": "method",
+                        "source_node_id": "s.01",
+                        "source_lines": [1, 3],
+                    },
+                    {
+                        "text": "The encoder learns acoustic representations from mel spectrograms.",
+                        "claim_type": "method",
+                        "source_node_id": "s.02",
+                        "source_lines": [4, 8],
+                    },
+                ],
+                "equations": [],
+                "algorithms": [],
+                "limitations": [
+                    {
+                        "text": "The method depends on masked reconstruction quality.",
+                        "source_node_id": "s.03",
+                    }
+                ],
+            }
+        )
+    )
+    (run_dir / "06_expansion" / "knowledge_gap_report.json").write_text(
+        json.dumps(
+            {
+                "knowledge_gaps": [
+                    {"concept": "asr", "priority": 0.9},
+                    {"concept": "mel", "priority": 0.9},
+                    {"concept": "mel spectrogram", "priority": 0.9},
+                    {"concept": "masked reconstruction", "priority": 0.8},
+                    {"concept": "codec tokens", "priority": 0.9},
+                    {"concept": "full duplex dialog", "priority": 0.9},
+                    {"concept": "autoregressive decoding", "priority": 0.9},
+                ]
+            }
+        )
+    )
+    outline = {
+        "families": [{"id": "fam", "title": "Fam", "method_ids": ["audiomae"]}],
+        "methods": [
+            {
+                "id": "audiomae",
+                "title": "AudioMAE",
+                "arxiv_id": "1234.00001",
+                "family_id": "fam",
+                "neighbor_method_ids": [],
+            }
+        ],
+    }
+
+    pack = runner._build_method_pack(run_dir, outline, outline["methods"][0])
+
+    assert pack["knowledge_gaps_to_explain"] == [
+        "mel spectrogram",
+        "masked reconstruction",
+    ]
+    assert "asr" not in pack["knowledge_gaps_to_explain"]
+    assert "mel" not in pack["knowledge_gaps_to_explain"]
+
+
 def test_run_stage_13_uses_deterministic_builder_before_codex_shards(tmp_path):
     run = tmp_path / "run"
     _write_outline(run)

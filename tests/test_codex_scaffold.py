@@ -191,6 +191,25 @@ def test_verifier_contract_uses_pack_scoped_gap_list():
         assert '"passed"' in source
 
 
+def test_chapter_pack_contract_caps_method_gap_scope():
+    skill_md = (SKILLS_DIR / "chapter-pack-building" / "SKILL.md").read_text()
+    agent_prompt = tomllib.loads((AGENTS_DIR / "chapter_pack_builder.toml").read_text())[
+        "developer_instructions"
+    ]
+
+    for source in (skill_md, agent_prompt):
+        normalized = re.sub(r"\s+", " ", source.replace("`", "")).lower()
+        assert (
+            "method packs must scope knowledge_gaps_to_explain to concepts actually touched by that method"
+            in normalized
+        )
+        assert "prefer outline.methods[*].knowledge_gaps_to_explain when present" in normalized
+        assert "intersect knowledge_gap_report concepts with the method" in normalized
+        assert "evidence" in normalized
+        assert "cap method knowledge_gaps_to_explain at 3 concepts" in normalized
+        assert "do not copy the global knowledge_gap_report into every method pack" in normalized
+
+
 def test_orchestrator_skill_references_all_agents():
     skill_md = (SKILLS_DIR / "auto-research-orchestrator" / "SKILL.md").read_text()
     for agent in EXPECTED_AGENTS:
