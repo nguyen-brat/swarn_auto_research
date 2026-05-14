@@ -1918,6 +1918,34 @@ def test_validate_stage_1_keep_all_contract_requires_pool_csv_matches_json(tmp_p
     assert "paper_pool.csv must contain exactly every paper_pool arxiv_id" in str(error.value)
 
 
+def test_validate_stage_1_keep_all_contract_rejects_bulk_output_mismatch(tmp_path):
+    run = tmp_path / "run"
+    ids = [f"2501.{idx:05d}" for idx in range(40)]
+    _write_valid_bootstrap_contract(run, ids=ids)
+    (run / "01_seed_pool" / "bulk_search_results_123.json").write_text(
+        json.dumps({arxiv_id: "abstract" for arxiv_id in ids + ["2502.99999"]})
+    )
+
+    with pytest.raises(RuntimeError) as error:
+        validate_stage_1_keep_all_contract(run)
+
+    assert "bulk_search_results artifact must match seed_pool_raw.json papers" in str(error.value)
+
+
+def test_validate_stage_1_keep_all_contract_requires_query_fields_per_aspect(tmp_path):
+    run = tmp_path / "run"
+    _write_valid_bootstrap_contract(run)
+    search_plan_path = run / "00_input" / "search_plan.json"
+    search_plan = json.loads(search_plan_path.read_text())
+    search_plan["aspects"][0]["survey_queries"] = []
+    search_plan_path.write_text(json.dumps(search_plan))
+
+    with pytest.raises(RuntimeError) as error:
+        validate_stage_1_keep_all_contract(run)
+
+    assert "must include non-empty normal_queries, survey_queries, and positive_keywords" in str(error.value)
+
+
 def test_validate_bootstrap_contract_rejects_duplicate_raw_seed_ids(tmp_path):
     run = tmp_path / "run"
     ids = [f"2501.{idx:05d}" for idx in range(40)]

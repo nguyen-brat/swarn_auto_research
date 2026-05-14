@@ -226,8 +226,9 @@ def _seed_pool_kept_count(seed_pool: dict[str, Any]) -> int:
     raise RuntimeError("seed_pool_raw.json must include total_kept or papers")
 
 
-def _seed_pool_ids(seed_pool: dict[str, Any]) -> list[str]:
-    papers = seed_pool.get("papers")
+def _kept_paper_ids(papers: Any, *, path_name: str) -> list[str]:
+    if isinstance(papers, dict) and isinstance(papers.get("papers"), (dict, list)):
+        return _kept_paper_ids(papers["papers"], path_name=f"{path_name} papers")
     if isinstance(papers, dict):
         return [str(arxiv_id) for arxiv_id in papers.keys()]
     if isinstance(papers, list):
@@ -238,9 +239,16 @@ def _seed_pool_ids(seed_pool: dict[str, Any]) -> list[str]:
             elif isinstance(item, dict) and item.get("arxiv_id"):
                 ids.append(str(item["arxiv_id"]))
             else:
-                raise RuntimeError("seed_pool_raw.json papers list entries must be strings or include arxiv_id")
+                raise RuntimeError(f"{path_name} list entries must be strings or include arxiv_id")
         return ids
-    raise RuntimeError("seed_pool_raw.json must include papers as an object or list")
+    raise RuntimeError(f"{path_name} must be an object or list")
+
+
+def _seed_pool_ids(seed_pool: dict[str, Any]) -> list[str]:
+    papers = seed_pool.get("papers")
+    if not isinstance(papers, (dict, list)):
+        raise RuntimeError("seed_pool_raw.json must include papers as an object or list")
+    return _kept_paper_ids(papers, path_name="seed_pool_raw.json papers")
 
 
 def _duplicate_ids(ids: list[str]) -> list[str]:
@@ -405,15 +413,15 @@ def validate_stage_1_keep_all_contract(run_dir: Path) -> list[str]:
         aspect_id = str(aspect.get("aspect_id") or aspect.get("id") or "").strip()
         if not aspect_id:
             raise RuntimeError("Stage 1 search_plan aspects must include non-empty ids")
-        query_terms = set()
         for field in ("normal_queries", "survey_queries", "positive_keywords"):
-            values = aspect.get(field, [])
-            if isinstance(values, list):
-                query_terms.update(str(value).strip() for value in values if str(value).strip())
-        if not query_terms:
-            raise RuntimeError(
-                "Stage 1 search_plan aspects must include normal, survey, or positive keyword terms"
-            )
+            values = aspect.get(field)
+            if not isinstance(values, list) or not any(
+                isinstance(value, str) and value.strip() for value in values
+            ):
+                raise RuntimeError(
+                    f"Stage 1 search_plan aspect {aspect_id} must include non-empty "
+                    "normal_queries, survey_queries, and positive_keywords"
+                )
 
     seed_pool = _load_json(run_dir / "01_seed_pool" / "seed_pool_raw.json")
     if not isinstance(seed_pool, dict):
@@ -429,6 +437,7 @@ def validate_stage_1_keep_all_contract(run_dir: Path) -> list[str]:
         raise RuntimeError("bulk_normal_start_search output_path must point inside 01_seed_pool")
     if not resolved_raw_path.name.startswith("bulk_search_results_"):
         raise RuntimeError("Stage 1 must preserve bulk_search_results_<timestamp>.json")
+    bulk_search_results = _load_json(resolved_raw_path)
     raw_kept_count = _seed_pool_kept_count(seed_pool)
     raw_seed_ids = _seed_pool_ids(seed_pool)
     if len(raw_seed_ids) != raw_kept_count:
@@ -439,6 +448,14 @@ def validate_stage_1_keep_all_contract(run_dir: Path) -> list[str]:
     if raw_duplicates:
         raise RuntimeError(
             f"seed_pool_raw.json papers must not contain duplicate arxiv_id values: {raw_duplicates[:10]}"
+        )
+    bulk_ids = _kept_paper_ids(bulk_search_results, path_name=resolved_raw_path.name)
+    if set(bulk_ids) != set(raw_seed_ids):
+        missing = sorted(set(raw_seed_ids) - set(bulk_ids))
+        extra = sorted(set(bulk_ids) - set(raw_seed_ids))
+        raise RuntimeError(
+            "bulk_search_results artifact must match seed_pool_raw.json papers; "
+            f"missing={missing[:10]}, extra={extra[:10]}"
         )
 
     paper_pool = _load_json(run_dir / "02_paper_pool" / "paper_pool.json")
