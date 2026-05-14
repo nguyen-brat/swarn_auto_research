@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import csv
 import json
 import subprocess
 import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 import scripts.run_auto_research as runner
 from scripts.run_auto_research import (
@@ -119,6 +122,52 @@ def test_run_shards_honors_max_workers_20(tmp_path):
 
     assert max_seen > 1
     assert all((run / f"out/{idx}.txt").exists() for idx in range(20))
+
+
+def test_run_single_shard_records_traceback_on_exception(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    spec = runner.ShardSpec(
+        stage="99",
+        shard_id="boom",
+        agent="broken_agent",
+        model="gpt-5.4-mini",
+        prompt="fail",
+        expected_outputs=["out.txt"],
+    )
+
+    def fail_attempt(*args, **kwargs):
+        raise ValueError("specific boom")
+
+    monkeypatch.setattr(runner, "_run_shard_attempt", fail_attempt)
+
+    with pytest.raises(RuntimeError):
+        runner._run_single_shard(run_dir, spec, max_retries=0)
+
+    stderr = (
+        run_dir
+        / "run_control"
+        / "stages"
+        / "99"
+        / "shards"
+        / "boom.attempt-1.stderr.txt"
+    ).read_text()
+    assert "sdk_thread=n/a sdk_turn=n/a" in stderr
+    assert "Traceback (most recent call last)" in stderr
+    assert "ValueError: specific boom" in stderr
+
+
+def test_append_run_log_writes_single_header_under_repeated_calls(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    for idx in range(20):
+        runner.append_run_log(run_dir, "x", "status", f"detail {idx}")
+
+    rows = list(csv.reader((run_dir / "run_log.csv").open()))
+    assert rows[0] == ["timestamp", "stage", "status", "detail"]
+    assert rows.count(["timestamp", "stage", "status", "detail"]) == 1
+    assert len(rows) == 21
 
 
 def test_run_stage_18_runs_generate_then_validate(tmp_path):

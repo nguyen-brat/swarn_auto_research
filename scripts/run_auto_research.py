@@ -7,6 +7,8 @@ import json
 import subprocess
 import sys
 import re
+import threading
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -69,6 +71,8 @@ NON_BLOCKING_FORM_ISSUE_CHECKS = {
     "family_word_count_high",
 }
 
+_RUN_LOG_LOCK = threading.Lock()
+
 
 @dataclass
 class ShardSpec:
@@ -120,20 +124,22 @@ def save_run_state(run_dir: Path, state: dict[str, Any]) -> None:
 
 def append_run_log(run_dir: Path, stage: str, status: str, detail: str) -> None:
     log_path = run_dir / "run_log.csv"
-    needs_header = not log_path.exists()
 
-    with log_path.open("a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=("timestamp", "stage", "status", "detail"))
-        if needs_header:
-            writer.writeheader()
-        writer.writerow(
-            {
-                "timestamp": now_iso(),
-                "stage": stage,
-                "status": status,
-                "detail": detail,
-            }
-        )
+    with _RUN_LOG_LOCK:
+        needs_header = not log_path.exists()
+
+        with log_path.open("a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=("timestamp", "stage", "status", "detail"))
+            if needs_header:
+                writer.writeheader()
+            writer.writerow(
+                {
+                    "timestamp": now_iso(),
+                    "stage": stage,
+                    "status": status,
+                    "detail": detail,
+                }
+            )
 
 
 def primary_artifact_exists(run_dir: Path, stage: str) -> bool:
@@ -799,10 +805,19 @@ def _run_single_shard(
                 executor=executor,
             )
         except (OSError, subprocess.TimeoutExpired, Exception) as error:
+            sdk_meta = getattr(error, "sdk_meta", None)
+            sdk_thread = sdk_meta.get("thread_id") if isinstance(sdk_meta, dict) else "n/a"
+            sdk_turn = sdk_meta.get("turn_id") if isinstance(sdk_meta, dict) else "n/a"
+            stderr = (
+                f"sdk_thread={sdk_thread} sdk_turn={sdk_turn}\n"
+                + "".join(
+                    traceback.format_exception(type(error), error, error.__traceback__)
+                )
+            )
             result = ShardAttemptResult(
                 returncode=None,
                 stdout="",
-                stderr=f"{type(error).__name__}: {error}\n",
+                stderr=stderr,
                 executor=executor,
             )
         stdout_path.write_text(result.stdout or "", encoding="utf-8")
