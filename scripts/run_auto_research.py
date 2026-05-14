@@ -24,7 +24,6 @@ RUNS_ROOT = REPO_ROOT / "research_runs"
 DEFAULT_SHARD_TIMEOUT_SECONDS = 3 * 3600
 BOOTSTRAP_TIMEOUT_SECONDS = 6 * 3600
 DEFAULT_EXECUTOR = "sdk"
-DEFAULT_TARGET_SEED_PAPERS = 200
 MIN_BOOTSTRAP_PAPER_POOL = 40
 DIRECT_SHARD_RULES = [
     "Execute directly in this codex exec session.",
@@ -225,17 +224,21 @@ def _seed_pool_kept_count(seed_pool: dict[str, Any]) -> int:
     raise RuntimeError("seed_pool_raw.json must include total_kept or papers")
 
 
-def _bootstrap_target_seed_papers(search_plan: dict[str, Any]) -> int:
-    raw_target = search_plan.get("target_seed_papers", DEFAULT_TARGET_SEED_PAPERS)
-    try:
-        target = int(raw_target)
-    except (TypeError, ValueError) as error:
-        raise RuntimeError("search_plan.json target_seed_papers must be an integer") from error
-    if target < MIN_BOOTSTRAP_PAPER_POOL:
-        raise RuntimeError(
-            f"search_plan.json target_seed_papers must be at least {MIN_BOOTSTRAP_PAPER_POOL}"
-        )
-    return target
+def _seed_pool_ids(seed_pool: dict[str, Any]) -> list[str]:
+    papers = seed_pool.get("papers")
+    if isinstance(papers, dict):
+        return [str(arxiv_id) for arxiv_id in papers.keys()]
+    if isinstance(papers, list):
+        ids: list[str] = []
+        for item in papers:
+            if isinstance(item, str):
+                ids.append(item)
+            elif isinstance(item, dict) and item.get("arxiv_id"):
+                ids.append(str(item["arxiv_id"]))
+            else:
+                raise RuntimeError("seed_pool_raw.json papers list entries must be strings or include arxiv_id")
+        return ids
+    raise RuntimeError("seed_pool_raw.json must include papers as an object or list")
 
 
 def _promoted_ids(promoted: Any) -> list[str]:
@@ -391,8 +394,6 @@ def validate_bootstrap_stage_0_10_contract(run_dir: Path) -> None:
     aspects = search_plan.get("aspects") if isinstance(search_plan, dict) else None
     if not isinstance(aspects, list) or not (4 <= len(aspects) <= 8):
         raise RuntimeError("Stage 1 search_plan.json must contain 4..8 aspects")
-    target_seed_papers = _bootstrap_target_seed_papers(search_plan)
-    aspect_ids: list[str] = []
     normal_queries: set[str] = set()
     survey_queries: set[str] = set()
     positive_keywords: set[str] = set()
@@ -402,7 +403,6 @@ def validate_bootstrap_stage_0_10_contract(run_dir: Path) -> None:
         aspect_id = str(aspect.get("aspect_id") or aspect.get("id") or f"aspect_{idx}").strip()
         if not aspect_id:
             raise RuntimeError("Stage 1 search_plan aspects must include non-empty ids")
-        aspect_ids.append(aspect_id)
         normal_queries.update(str(q).strip() for q in aspect.get("normal_queries", []) if str(q).strip())
         survey_queries.update(str(q).strip() for q in aspect.get("survey_queries", []) if str(q).strip())
         positive_keywords.update(str(q).strip() for q in aspect.get("positive_keywords", []) if str(q).strip())
@@ -424,6 +424,11 @@ def validate_bootstrap_stage_0_10_contract(run_dir: Path) -> None:
     if not resolved_raw_path.name.startswith("bulk_search_results_"):
         raise RuntimeError("Stage 1 must preserve bulk_search_results_<timestamp>.json")
     raw_kept_count = _seed_pool_kept_count(seed_pool)
+    raw_seed_ids = _seed_pool_ids(seed_pool)
+    if len(raw_seed_ids) != raw_kept_count:
+        raise RuntimeError(
+            "seed_pool_raw.json total_kept must match the number of papers in papers"
+        )
 
     paper_pool = _load_json(run_dir / "02_paper_pool" / "paper_pool.json")
     paper_ids = _paper_pool_ids(paper_pool)
@@ -431,11 +436,13 @@ def validate_bootstrap_stage_0_10_contract(run_dir: Path) -> None:
         raise RuntimeError(
             f"paper_pool.json must contain at least {MIN_BOOTSTRAP_PAPER_POOL} papers, got {len(paper_ids)}"
         )
-    required_pool_count = min(target_seed_papers, raw_kept_count)
-    if len(paper_ids) < required_pool_count:
+    if set(paper_ids) != set(raw_seed_ids):
+        missing = sorted(set(raw_seed_ids) - set(paper_ids))
+        extra = sorted(set(paper_ids) - set(raw_seed_ids))
         raise RuntimeError(
-            f"paper_pool.json must contain at least {required_pool_count} papers when bulk search kept "
-            f"{raw_kept_count}; got {len(paper_ids)}"
+            "paper_pool.json must contain every paper kept by bulk search; "
+            f"missing={missing[:10]}, extra={extra[:10]}, "
+            f"raw_kept={len(raw_seed_ids)}, selected={len(paper_ids)}"
         )
 
     candidate_report = _load_json(run_dir / "02_paper_pool" / "candidate_pool_report.json")
@@ -445,22 +452,12 @@ def validate_bootstrap_stage_0_10_contract(run_dir: Path) -> None:
         raise RuntimeError("candidate_pool_report.json selected_total must match paper_pool.json")
     if int(candidate_report.get("raw_kept", -1)) != raw_kept_count:
         raise RuntimeError("candidate_pool_report.json raw_kept must match seed_pool_raw.json")
-    if int(candidate_report.get("target_seed_papers", -1)) != target_seed_papers:
-        raise RuntimeError("candidate_pool_report.json target_seed_papers must match search_plan.json")
     per_aspect_selected = candidate_report.get("per_aspect_selected")
-    if not isinstance(per_aspect_selected, dict):
-        raise RuntimeError("candidate_pool_report.json must include per_aspect_selected counts")
-    covered_aspects = [
-        aspect_id
-        for aspect_id in aspect_ids
-        if int(per_aspect_selected.get(aspect_id, 0) or 0) > 0
-    ]
-    required_aspect_coverage = min(4, len(aspect_ids))
-    if raw_kept_count >= target_seed_papers and len(covered_aspects) < required_aspect_coverage:
-        raise RuntimeError(
-            "candidate_pool_report.json must show non-zero selection from at least "
-            f"{required_aspect_coverage} search aspects when bulk search kept {raw_kept_count}"
-        )
+    if per_aspect_selected is not None and not isinstance(per_aspect_selected, dict):
+        raise RuntimeError("candidate_pool_report.json per_aspect_selected must be an object when present")
+    selection_policy = candidate_report.get("selection_policy")
+    if selection_policy is not None and selection_policy != "keep_all_bulk_search_results":
+        raise RuntimeError("candidate_pool_report.json selection_policy must be keep_all_bulk_search_results")
     validate_stage_7_outputs(run_dir, paper_ids=paper_ids)
 
     weak_dir = run_dir / "04_weak_evidence"
@@ -2426,7 +2423,6 @@ def start_new_run(topic: str, phase: str) -> str:
                 "run_id": run_id,
                 "topic": topic,
                 "phase": phase,
-                "target_seed_papers": DEFAULT_TARGET_SEED_PAPERS,
                 "min_promote_score": 0.45,
                 "created_at": now_iso(),
             },
@@ -2461,8 +2457,8 @@ def run_stage_1(run_dir: Path, *, executor: str = DEFAULT_EXECUTOR) -> None:
                 "Write 00_input/search_plan.json.",
                 "Call bulk_normal_start_search exactly once with query-planner unions.",
                 "Write 01_seed_pool/seed_pool_raw.json and preserve bulk_search_results_<timestamp>.json in 01_seed_pool/.",
-                "Build a stratified 02_paper_pool/paper_pool.json and paper_pool.csv.",
-                "Write 02_paper_pool/candidate_pool_report.json with raw_kept, target_seed_papers, selected_total, and per_aspect_selected.",
+                "Build 02_paper_pool/paper_pool.json and paper_pool.csv from every paper in seed_pool_raw['papers']; do not downselect.",
+                "Write 02_paper_pool/candidate_pool_report.json with raw_kept, selected_total, selection_policy='keep_all_bulk_search_results', and optional per_aspect_selected={}.",
                 "Do not run Stage 2 or later.",
                 "Return the standard short success string.",
             ]
