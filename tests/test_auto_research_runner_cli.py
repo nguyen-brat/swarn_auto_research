@@ -445,7 +445,7 @@ def test_run_stage_4_dispatches_knowledge_base_reader(tmp_path, monkeypatch):
     assert captured[0].expected_outputs == ["06_expansion/known_concepts_snapshot.json"]
 
 
-def test_run_stage_5_dispatches_gap_detector_and_logs_queue_count(tmp_path, monkeypatch):
+def test_run_stage_5_dispatches_classifier_and_logs_queue_count(tmp_path, monkeypatch):
     run = tmp_path / "run"
     run.mkdir()
     captured = []
@@ -464,7 +464,7 @@ def test_run_stage_5_dispatches_gap_detector_and_logs_queue_count(tmp_path, monk
     run_stage_5(run)
 
     assert len(captured) == 1
-    assert captured[0].agent == "knowledge_gap_detector"
+    assert captured[0].agent == "knowledge_gap_classifier"
     assert "queue_items=2" in (run / "run_log.csv").read_text()
 
 

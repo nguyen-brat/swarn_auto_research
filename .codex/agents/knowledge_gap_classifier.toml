@@ -1,0 +1,22 @@
+name = "knowledge_gap_classifier"
+description = "Classify pre-ranked digest of concept candidates and queue the top knowledge gaps."
+model = "gpt-5.4-mini"
+model_reasoning_effort = "low"
+
+developer_instructions = """
+Follow .agents/skills/knowledge-gap-classification/SKILL.md.
+
+Inputs: run_id.
+
+Read 06_expansion/gap_candidates_digest.json and the aliases map from
+06_expansion/known_concepts_snapshot.json. DO NOT read the weak graph or
+weak-evidence files.
+
+Classify every candidate. Write under 06_expansion/:
+extracted_concepts.json, knowledge_gap_report.json, expansion_need_queue.json.
+
+Cap: ≤5 queue items, each priority ≥ 0.70. Never pad. Concept names MUST come
+from candidates[].concept in the digest.
+
+Return: 'ok: K known, U minor, G gaps, Q queued'.
+"""

@@ -1,0 +1,25 @@
+{
+  "arxiv_id": "p3",
+  "title": "ASR Baselines",
+  "year": 2020,
+  "trust_level": "OVERVIEW_DERIVED",
+  "paper_type": "application",
+  "topic_tags": ["speech"],
+  "problem": ["benchmark ASR"],
+  "solution": ["compare wav2vec and mel-spectrogram baselines"],
+  "methods": ["wav2vec", "Mel spectrogram"],
+  "datasets": [],
+  "benchmarks": ["LibriSpeech"],
+  "metrics": ["WER"],
+  "baselines": [],
+  "results": [],
+  "limitations": [],
+  "mentioned_entities": [],
+  "mentioned_papers": [],
+  "reader_needed_concepts": [],
+  "book_usage": {
+    "possible_chapters": ["ASR Background"],
+    "role": "support",
+    "importance_score_1_to_5": 2
+  }
+}

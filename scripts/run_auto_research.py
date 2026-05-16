@@ -17,6 +17,7 @@ from typing import Any
 from urllib.parse import quote
 
 from swarn_research_mcp.research_book import BOOK_FILE_BY_ID
+from knowledge_gap_aggregator import build_digest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -2647,17 +2648,35 @@ def run_stage_4(run_dir: Path, *, executor: str = DEFAULT_EXECUTOR) -> None:
     append_run_log(run_dir, "4", "completed", "knowledge base snapshot written")
 
 
+def run_stage_5_aggregate(run_dir: Path) -> None:
+    """Stage 5a (Python): build gap_candidates_digest.json from weak graph + evidence."""
+    digest_path = run_dir / "06_expansion" / "gap_candidates_digest.json"
+    if digest_path.exists():
+        append_run_log(run_dir, "5a", "skipped", "digest already present")
+        return
+    weak_graph = run_dir / "05_weak_graph" / "weak_global_graph.json"
+    if not weak_graph.exists():
+        append_run_log(run_dir, "5a", "skipped", "no weak graph yet")
+        return
+    digest = build_digest(run_dir, run_id=run_dir.name)
+    append_run_log(
+        run_dir, "5a", "completed",
+        f"digest written; candidates={len(digest.candidates)}",
+    )
+
+
 def run_stage_5(run_dir: Path, *, executor: str = DEFAULT_EXECUTOR) -> None:
     if primary_artifact_exists(run_dir, "5"):
         append_run_log(run_dir, "5", "skipped", "knowledge gap report already present")
         return
+    run_stage_5_aggregate(run_dir)
     spec = ShardSpec(
         stage="5",
         shard_id="knowledge-gaps",
-        agent="knowledge_gap_detector",
+        agent="knowledge_gap_classifier",
         model="gpt-5.4-mini",
         prompt=_generic_agent_prompt(
-            ".codex/agents/knowledge_gap_detector.toml",
+            ".codex/agents/knowledge_gap_classifier.toml",
             run_dir.name,
             "5",
             "knowledge-gaps",
