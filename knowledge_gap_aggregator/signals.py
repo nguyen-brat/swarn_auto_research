@@ -200,3 +200,39 @@ def graph_neighbors_per_concept(
         ranked = sorted(neigh.items(), key=lambda x: (-x[1], x[0]))[:limit]
         out[k] = [display.get(n, n) for n, _ in ranked]
     return out
+
+
+_SLOT_WEIGHTS = {
+    "title": 1.0,
+    "method": 0.8,
+    "result": 0.8,
+    "abstract": 0.6,
+    "reader_needed": 0.4,
+    "mention": 0.2,
+}
+
+
+def slot_weight(slots: list[str]) -> float:
+    if not slots:
+        return 0.2
+    return max((_SLOT_WEIGHTS.get(s, 0.2) for s in slots), default=0.2)
+
+
+def _norm(x: int, cap: int) -> float:
+    return min(x, cap) / cap if cap > 0 else 0.0
+
+
+def importance(
+    *,
+    paper_count: int,
+    core_paper_count: int,
+    in_slots: list[str],
+    is_method_of_core: bool,
+) -> float:
+    score = (
+        0.35 * _norm(core_paper_count, 3)
+        + 0.25 * _norm(paper_count, 5)
+        + 0.25 * slot_weight(in_slots)
+        + 0.15 * (1.0 if is_method_of_core else 0.0)
+    )
+    return max(0.0, min(1.0, score))

@@ -189,3 +189,41 @@ def test_graph_neighbors_via_shared_papers():
     # vit and clip vision encoder share p2 -> neighbors of each other.
     assert "CLIP vision encoder" in n["vit"]
     assert "ViT" in n["clip vision encoder"]
+
+
+from knowledge_gap_aggregator.signals import importance, slot_weight
+
+
+def test_slot_weight_table():
+    assert slot_weight(["title"]) == 1.0
+    assert slot_weight(["method"]) == 0.8
+    assert slot_weight(["result"]) == 0.8
+    assert slot_weight(["abstract"]) == 0.6
+    assert slot_weight(["reader_needed"]) == 0.4
+    assert slot_weight(["mention"]) == 0.2
+    assert slot_weight([]) == 0.2
+
+
+def test_slot_weight_takes_max():
+    assert slot_weight(["abstract", "title"]) == 1.0
+
+
+def test_importance_increases_with_signals():
+    low = importance(
+        paper_count=1, core_paper_count=0, in_slots=["mention"],
+        is_method_of_core=False,
+    )
+    high = importance(
+        paper_count=5, core_paper_count=3, in_slots=["title", "method"],
+        is_method_of_core=True,
+    )
+    assert 0.0 <= low <= 0.30
+    assert 0.85 <= high <= 1.0
+
+
+def test_importance_bounded_0_to_1():
+    val = importance(
+        paper_count=999, core_paper_count=999, in_slots=["title"],
+        is_method_of_core=True,
+    )
+    assert 0.0 <= val <= 1.0
