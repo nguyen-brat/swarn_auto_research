@@ -2666,17 +2666,17 @@ def run_stage_5_aggregate(run_dir: Path) -> None:
 
 
 def run_stage_5(run_dir: Path, *, executor: str = DEFAULT_EXECUTOR) -> None:
-    if primary_artifact_exists(run_dir, "5"):
+    if (run_dir / "06_expansion" / "knowledge_gap_report.json").exists():
         append_run_log(run_dir, "5", "skipped", "knowledge gap report already present")
         return
     run_stage_5_aggregate(run_dir)
     spec = ShardSpec(
         stage="5",
         shard_id="knowledge-gaps",
-        agent="knowledge_gap_detector",
+        agent="knowledge_gap_classifier",
         model="gpt-5.4-mini",
         prompt=_generic_agent_prompt(
-            ".codex/agents/knowledge_gap_detector.toml",
+            ".codex/agents/knowledge_gap_classifier.toml",
             run_dir.name,
             "5",
             "knowledge-gaps",
