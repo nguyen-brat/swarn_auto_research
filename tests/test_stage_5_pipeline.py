@@ -51,9 +51,12 @@ def test_run_stage_5_dispatches_classifier(run_dir):
     assert captured[0].agent == "knowledge_gap_classifier"
 
 
-def test_run_stage_5_idempotent_when_report_present(run_dir):
+def test_run_stage_5_idempotent_when_primary_artifacts_present(run_dir):
     (run_dir / "06_expansion" / "knowledge_gap_report.json").write_text(
         json.dumps({"known": [], "unknown_minor": [], "knowledge_gaps": []})
+    )
+    (run_dir / "06_expansion" / "expansion_need_queue.json").write_text(
+        json.dumps({"items": []})
     )
     with patch("scripts.run_auto_research.run_shards") as m:
         run_stage_5(run_dir)

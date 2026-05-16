@@ -2666,7 +2666,7 @@ def run_stage_5_aggregate(run_dir: Path) -> None:
 
 
 def run_stage_5(run_dir: Path, *, executor: str = DEFAULT_EXECUTOR) -> None:
-    if (run_dir / "06_expansion" / "knowledge_gap_report.json").exists():
+    if primary_artifact_exists(run_dir, "5"):
         append_run_log(run_dir, "5", "skipped", "knowledge gap report already present")
         return
     run_stage_5_aggregate(run_dir)
