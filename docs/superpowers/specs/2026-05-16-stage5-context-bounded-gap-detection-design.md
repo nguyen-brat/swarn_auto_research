@@ -2,7 +2,16 @@
 
 **Date:** 2026-05-16
 **Author:** brainstorming session (Claude + user)
-**Status:** Approved, ready for implementation plan
+**Status:** Approved, revised post expert review (rev 2)
+
+## Revision history
+
+- **rev 2 (2026-05-16, post expert review):**
+  - Real `04_weak_evidence/*.json` schema documented (concepts in `methods`/`benchmarks`/`datasets`/`baselines`/`mentioned_entities`/`reader_needed_concepts`; importance in `book_usage.importance_score_1_to_5`). Original fixture/signal design assumed a `concepts[]` array with `slot` — corrected.
+  - `bridge_score` and `networkx` dependency dropped. Four remaining signals cover the SKILL.md heuristics. May add later if regression shows missed gaps.
+  - `top_n` raised 40 → 100 (hard cap 120) to reduce the chance of the digest dropping a real gap; size remains bounded (~60 KB).
+  - Deletion of the old `knowledge_gap_detector` gated behind a regression check on an existing run (new milestone M1.5).
+  - `is_method_of_core` now derived from evidence (`methods` field of a core paper) rather than graph edges; weak graph read only for `graph_neighbors`.
 
 ## Goal
 
@@ -29,12 +38,13 @@ Replace the single agent that currently reads the entire weak global graph + eve
 |---|---|
 | Approach | **A — Python pre-aggregation + tiny classifier agent** (over map-reduce or two-pass funnel) |
 | LLM input cap | Bounded digest (~25–30 KB) of top-N candidates, independent of corpus size |
-| `top_n` candidates | 40 (hard cap 50 with core-paper safety-net) |
-| Agent name | Rename `knowledge_gap_detector` → `knowledge_gap_classifier` (new contract, no soft deprecation) |
+| `top_n` candidates | 100 (hard cap 120 with core-paper safety-net) |
+| Agent name | Rename `knowledge_gap_detector` → `knowledge_gap_classifier` (new contract) |
 | Stage number | Stay on stage 5 (5a Python + 5b agent); preserve `primary_artifact_exists("5")` semantics |
-| Community detection | `networkx.community.louvain_communities` (new dependency, accepted) |
+| Community detection | **Dropped from v1.** No `bridge_score`, no `networkx`. Revisit only if regression shows missed gaps. |
 | Sharding | None — one agent call per run, single `ShardSpec` |
 | Reasoning effort | `medium` → `low` (task is now small) |
+| Old detector removal | Gated on regression check (M1.5) — not deleted in M1 |
 
 ## Architecture
 
@@ -109,25 +119,50 @@ Module boundaries:
 }
 ```
 
-**Size budget:** ≤50 entries × ~600 bytes ≈ ≤30 KB. Independent of corpus size.
+**Size budget:** ≤120 entries × ~600 bytes ≈ ≤72 KB. Still independent of corpus size and well under a single-call context.
 
-## Importance Scoring (deterministic)
+## Real `04_weak_evidence/*.json` schema (rev 2)
+
+Concept-bearing fields (all are flat string lists unless noted):
+
+| Field | Slot derived | Notes |
+|---|---|---|
+| `methods` | `method` | central to the paper |
+| `datasets` | `method` | training/eval data — same weight as methods |
+| `benchmarks` | `result` | evaluation set |
+| `baselines` | `result` | compared-against |
+| `metrics` | `result` | reporting metric — usually mention-weight |
+| `mentioned_entities` | `mention` | low weight |
+| `reader_needed_concepts` | `reader_needed` | concepts the reader must already know |
+| `topic_tags` | `abstract` | high-level grouping |
+| `title` | `title` | string; concept gets `title` slot if it appears as a substring (case-insensitive) |
+
+Importance is at `book_usage.importance_score_1_to_5` (integer 1–5).
+
+The **concept universe** for a run is the union of all concept-bearing fields across all `04_weak_evidence/*.json`, normalized via `alias.normalize`. The weak graph is read only for `graph_neighbors` (concepts co-occurring with the target via paper-concept edges).
+
+## Importance Scoring (deterministic, rev 2)
 
 In `signals.py`:
 
 ```
 importance = (
-    0.30 * normalize(core_paper_count, cap=3)
-  + 0.20 * normalize(paper_count, cap=5)
-  + 0.20 * slot_weight                      # title=1.0, method/result=0.8, abstract=0.6, other=0.2
+    0.35 * normalize(core_paper_count, cap=3)
+  + 0.25 * normalize(paper_count, cap=5)
+  + 0.25 * slot_weight                      # title=1.0, method/result=0.8, abstract=0.6, reader_needed=0.4, mention/other=0.2
   + 0.15 * (1.0 if is_method_of_core else 0.0)
-  + 0.15 * bridge_score                     # Louvain communities spanned, normalized 0-1
 )
 ```
 
-`normalize(x, cap)` = `min(x, cap) / cap`. Per-concept signals are computed from a single pass over `weak_global_graph.edges` + a join against `04_weak_evidence/<arxiv_id>.json` for slot info and importance_score.
+`normalize(x, cap)` = `min(x, cap) / cap`. Weights renormalized after dropping `bridge_score`.
 
-`bridge_score` uses `networkx.community.louvain_communities` on the paper-concept bipartite graph. Number of distinct paper-communities each concept's papers span, normalized by total community count.
+Signals (all derived from `04_weak_evidence`, except the optional graph lookup):
+
+- **`paper_count`** — distinct papers (arxiv_ids) where the concept appears in any concept-bearing field.
+- **`core_paper_count`** — same, restricted to papers with `book_usage.importance_score_1_to_5 ≥ 4`.
+- **`in_slots`** — set of slot labels derived from which field(s) the concept appeared in, across all papers (plus `title` if matched against the paper's title string).
+- **`is_method_of_core`** — concept appears in the `methods` (or `datasets`) field of at least one core paper.
+- **`graph_neighbors`** — top-5 co-occurring concept display names from the weak graph (concepts that share at least one paper-edge with the target).
 
 ## Pre-Filter (never sent to the agent)
 
@@ -141,10 +176,10 @@ Every dropped concept and the reason are logged to `06_expansion/aggregator_log.
 
 1. Compute `importance` for every concept that passes the pre-filter.
 2. Sort descending.
-3. Keep top-40 by score.
-4. Safety-net: additionally include any concept with `core_paper_count ≥ 2` not already in top-40.
-5. Hard cap at 50 entries.
-6. For each survivor, pull at most 2 evidence snippets (≤200 chars each) from `04_weak_evidence/*.json` and the top-5 graph neighbors by edge weight.
+3. Keep top-100 by score.
+4. Safety-net: additionally include any concept with `core_paper_count ≥ 2` not already in top-100.
+5. Hard cap at 120 entries.
+6. For each survivor, pull at most 2 evidence snippets (≤200 chars each — drawn from the paper's `solution`/`problem` arrays, falling back to the concept name itself) and the top-5 graph neighbors.
 
 ## Classifier Agent Contract
 
@@ -204,7 +239,8 @@ Three independently shippable milestones:
 | Milestone | Scope |
 |---|---|
 | **M0 — aggregator only** | Ship `knowledge_gap_aggregator/`; write `gap_candidates_digest.json` to disk. Old agent untouched. Side-by-side observable run. |
-| **M1 — switch classifier** | Delete `knowledge_gap_detector` skill+toml. Wire `knowledge_gap_classifier` reading only the digest. Stage 5 becomes context-bounded. |
+| **M1 — switch classifier** | Wire `knowledge_gap_classifier` reading only the digest. `knowledge_gap_detector` files remain on disk (unused). Stage 5 becomes context-bounded. |
+| **M1.5 — regression gate** | Run new stage 5 on existing `ai-agent-system-...-152516`. Diff new queue vs. old queue. Only after sign-off, delete the old detector skill + toml. |
 | **M2 — cleanup** | Update `auto-research-orchestrator/SKILL.md`; refresh `test_codex_scaffold.py` expected agent set; refresh `test_auto_research_runner_*` mocks; drop dead code in `run_auto_research.py`. |
 
 **Regression check (manual, one-shot before M1 merge):** run new stage 5 against the existing `ai-agent-system-...-152516` run. Compare the new digest's top-10 against the old queue. Overlap expected; non-identity acceptable. Missing-but-clearly-important concepts → tune weights, not the agent.
@@ -213,11 +249,10 @@ Three independently shippable milestones:
 
 | Risk | Mitigation |
 |---|---|
-| Deterministic score misses a gap an LLM would have caught | Top-50 cap is generous; core-paper safety-net; regression check before M1; weights centralized in `signals.py` and tunable |
+| Deterministic score misses a gap an LLM would have caught | top_n=100 (cap 120) is generous; core-paper safety-net; regression check M1.5 before deletion; weights centralized in `signals.py` and tunable |
 | Alias normalization too aggressive (drops a real gap as known) | Unit tests on plurals/hyphens/acronyms; every pre-filter drop logged to `aggregator_log.json` for inspection |
-| `networkx` is a new heavy dependency | Accepted — widely used, no exotic features required |
 | Downstream consumers depend on old `extracted_concepts.json` shape | Verified: stage 6 only reads `expansion_need_queue.json`; schema unchanged |
-| `bridge_score` is unstable on tiny graphs (single-community fixtures) | Define `bridge_score = 0.0` when only one community exists; covered by unit test |
+| Slot derivation from real schema is lossy (fields don't map 1:1 to slots) | Hand-tuned mapping table in `signals.SLOT_BY_FIELD`; unit-tested with fixtures derived from a real evidence file |
 
 ## Open Questions
 
