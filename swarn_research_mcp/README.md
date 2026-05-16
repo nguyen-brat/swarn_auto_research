@@ -112,8 +112,15 @@ Environment variables used by the package:
 - `HF_TOKEN`: Required by Hugging Face paper endpoints.
 - `S2_KEY`: Optional Semantic Scholar API key. Without it, public endpoints are
   used with shared rate limits.
+- `S2_KEYS`: Optional comma-separated ordered list of Semantic Scholar API
+  keys. Use this in `.env` when you have multiple keys, for example
+  `S2_KEYS=key_one,key_two`. On HTTP 429 the client rotates to the next key
+  before retrying. `S2_KEY` remains supported and is appended after `S2_KEYS`
+  when both are set.
 - `S2_LINKED_BATCH_LIMIT`: Optional batch size override for Semantic Scholar
   linked-paper detail fetches.
+- `S2_RATE_LIMIT_BACKOFF_SECONDS`: Optional extra wait after Semantic Scholar
+  returns HTTP 429. Defaults to `30`.
 - `AUTO_RESEARCH_MCP_RETRY_DELAY_SECONDS`: Optional retry delay for MCP tool
   wrappers. Defaults to `0.5`.
 

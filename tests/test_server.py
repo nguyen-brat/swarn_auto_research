@@ -25,6 +25,7 @@ class ServerToolRegistrationTest(unittest.TestCase):
             [tool_func.__name__ for tool_func, _kwargs in fake_server.tools],
             [
                 "bulk_normal_start_search",
+                "gap_paper_search",
                 "get_paper_markdown",
                 "get_paper_section",
                 "get_alphaxiv_overview",
@@ -221,6 +222,43 @@ def test_paper_metadata_batch_records_error_when_single_id_429s():
     assert [r["arxiv_id"] for r in result] == ["a", "b"]
     assert all(r["found"] is False for r in result)
     assert all("Fake429" in r["error"] for r in result)
+
+
+def test_paper_abstract_batch_halves_on_429():
+    from swarn_research_mcp.services import semantic_scholar as ss
+
+    calls = []
+
+    class Fake429(Exception):
+        pass
+
+    def fake_post(url, payload, params=None, headers=None):
+        ids = list(payload["ids"])
+        calls.append(ids)
+        if len(ids) > 2:
+            raise Fake429()
+        return [
+            {
+                "paperId": f"sid-{paper_id}",
+                "externalIds": {"ArXiv": paper_id.removeprefix("ArXiv:")},
+                "abstract": f"abstract-{paper_id}",
+            }
+            for paper_id in ids
+        ]
+
+    original_post = ss._semantic_scholar_post
+    original_is_429 = ss._is_rate_limit_error
+    ss._semantic_scholar_post = fake_post
+    ss._is_rate_limit_error = lambda exc: isinstance(exc, Fake429)
+    try:
+        result = ss._fetch_paper_abstracts_batch_by_arxiv_ids(["a", "b", "c", "d", "e"])
+    finally:
+        ss._semantic_scholar_post = original_post
+        ss._is_rate_limit_error = original_is_429
+
+    assert [paper["externalIds"]["ArXiv"] for paper in result] == ["a", "b", "c", "d", "e"]
+    assert calls[0] == ["ArXiv:a", "ArXiv:b", "ArXiv:c", "ArXiv:d", "ArXiv:e"]
+    assert any(len(call) <= 2 for call in calls[1:])
 
 
 def test_paper_markdown_returns_dict_with_markdown(monkeypatch):

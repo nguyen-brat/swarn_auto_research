@@ -1,6 +1,6 @@
 ---
 name: taxonomy-building
-description: Three-tier handbook outline — 8 fixed book sections, one family per community, one method per promoted paper.
+description: Three-tier handbook outline — 8 fixed book sections, one family per community, one method per verified full-text paper.
 ---
 
 # Taxonomy Building
@@ -8,7 +8,7 @@ description: Three-tier handbook outline — 8 fixed book sections, one family p
 ## Inputs
 - `11_verified_graph/global_graph.json` (fall back to `05_weak_graph/weak_global_graph.json`)
 - `06_expansion/known_concepts_snapshot.json`, `knowledge_gap_report.json`
-- `07_scoring/promoted_papers.json`
+- `07_scoring/promoted_papers.json` plus Stage 8/9/10 availability artifacts
 - `10_verified_evidence/*.json` (titles, methods, neighbors)
 - `04_weak_evidence/*.json` (paper_type, importance_score)
 - `00_input/topic.md`
@@ -20,7 +20,7 @@ description: Three-tier handbook outline — 8 fixed book sections, one family p
 
 ## Family clustering
 - Greedy from highest-degree non-paper node; attach connected nodes by strongest tie; stop at threshold.
-- Family must contain ≥ 1 promoted paper. Drop background-only communities.
+- Family must contain ≥ 1 verified full-text promoted paper. Drop background-only communities.
 - **No upper cap** on families — Book_style requires one chapter per family.
 - Family title = central Method/Concept node (or dominant Method node if Paper-centric).
 - Family titles must be short method-family labels, not paper titles, benchmark results, or full claims.
@@ -44,7 +44,7 @@ Emit as `parts: [{id, title, family_ids[]}]` in `outline.json`.
 If clustering produces a singleton family (`len(method_ids) == 1`), prefer to merge it into the nearest non-singleton family only when shared verified-graph edges provide strong evidence. The deterministic Stage 12.5 post-processor `merge_singletons` in `swarn_research_mcp.research_book` will normalize the outline before Stage 13; if no strong merge evidence exists, the method stays as a standalone method chapter under the `standalone` group. Do not create catch-all `other_*` families.
 
 ## Methods
-- One per promoted paper.
+- One per verified full-text promoted paper.
 - `method_id` = slug of `verified_evidence.methods[0].name`; fall back to `arxiv_id` if no method verified.
 - `family_id` = community containing the arxiv_id; if multiple, pick largest by `(#promoted × #verified_edges)`.
 - `neighbor_method_ids`: up to 5 closest by shared verified-graph edges, across all families.
@@ -79,7 +79,7 @@ If clustering produces a singleton family (`len(method_ids) == 1`), prefer to me
 `taxonomy.json`: list of communities with `central_concept`, `node_ids`, `promoted_paper_ids`, `background_paper_ids`, `size`.
 
 ## Hard rules
-- Every promoted paper produces exactly one method.
+- Every verified full-text promoted paper produces exactly one method.
 - Every method's `family_id` resolves to a family.
 - Every method ID appears in exactly one family `method_ids` list.
 - Every family has ≥ 1 method.
@@ -93,4 +93,4 @@ If clustering produces a singleton family (`len(method_ids) == 1`), prefer to me
 Before writing `outline.json`, self-validate these rules and fix violations in memory. Do not write a draft outline that relies on downstream cleanup.
 
 ## Success
-- 8 book_sections; ≥ 1 family; one method per promoted paper; family_ids resolve.
+- 8 book_sections; ≥ 1 family; one method per verified full-text promoted paper; family_ids resolve.

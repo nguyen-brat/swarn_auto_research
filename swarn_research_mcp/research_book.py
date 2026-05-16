@@ -105,6 +105,134 @@ def _promoted_entries(run_dir: Path) -> list[dict[str, Any]]:
     return entries
 
 
+def _has_availability_artifacts(run_dir: Path) -> bool:
+    return any(
+        (run_dir / relpath).exists()
+        for relpath in ("08_full_markdown", "09_pageindex", "10_verified_evidence")
+    )
+
+
+def _markdown_is_usable(run_dir: Path, arxiv_id: str) -> bool:
+    path = run_dir / "08_full_markdown" / f"{arxiv_id}.md"
+    if not path.exists():
+        return False
+    return bool(path.read_text(encoding="utf-8").strip())
+
+
+def _flat_pageindex_nodes(data: Any) -> dict[str, Any]:
+    if isinstance(data, dict) and isinstance(data.get("nodes"), dict):
+        return data["nodes"]
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def _tree_pageindex_nodes(root: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    found: dict[str, dict[str, Any]] = {}
+
+    def walk(node: dict[str, Any], parent_id: str) -> bool:
+        node_id = str(node.get("id") or "")
+        if not node_id or node_id in found:
+            return False
+        if node_id != "s.00":
+            found[node_id] = node
+            if node.get("parent_id") != parent_id:
+                return False
+        children = node.get("children")
+        if not isinstance(children, list):
+            return False
+        return all(isinstance(child, dict) and walk(child, node_id) for child in children)
+
+    if not walk(root, ""):
+        return {}
+    return found
+
+
+def _pageindex_valid(run_dir: Path, arxiv_id: str) -> bool:
+    tree_path = run_dir / "09_pageindex" / "trees" / f"{arxiv_id}.tree.json"
+    nodes_path = run_dir / "09_pageindex" / "nodes" / f"{arxiv_id}.nodes.json"
+    if not tree_path.exists() or not nodes_path.exists():
+        return False
+    tree = _load_json(tree_path)
+    nodes = _flat_pageindex_nodes(_load_json(nodes_path))
+    if not isinstance(tree, dict) or not nodes or "s.00" in nodes:
+        return False
+    root = tree.get("root")
+    if not isinstance(root, dict) or not root.get("children"):
+        return False
+    tree_nodes = _tree_pageindex_nodes(root)
+    if set(tree_nodes) != set(nodes):
+        return False
+    required = {"id", "title", "level", "start_line", "end_line", "parent_id", "summary"}
+    markdown_path = run_dir / "08_full_markdown" / f"{arxiv_id}.md"
+    line_count = len(markdown_path.read_text(encoding="utf-8").splitlines()) if markdown_path.exists() else 0
+    for node_id, node in nodes.items():
+        if not isinstance(node, dict) or not required.issubset(node):
+            return False
+        if node.get("id") != node_id:
+            return False
+        tree_node = tree_nodes.get(node_id)
+        if not tree_node:
+            return False
+        for field in required:
+            if tree_node.get(field) != node.get(field):
+                return False
+        try:
+            start_line = int(node["start_line"])
+            end_line = int(node["end_line"])
+        except (TypeError, ValueError):
+            return False
+        if start_line < 1 or start_line > end_line:
+            return False
+        if line_count and end_line > line_count:
+            return False
+    return True
+
+
+def _verified_evidence_has_claims(run_dir: Path, arxiv_id: str) -> bool:
+    path = run_dir / "10_verified_evidence" / f"{arxiv_id}.json"
+    if not path.exists():
+        return False
+    data = _load_json(path)
+    claims = data.get("claims") if isinstance(data, dict) else None
+    if not isinstance(claims, list) or not claims:
+        return False
+    nodes = _flat_pageindex_nodes(
+        _load_json(run_dir / "09_pageindex" / "nodes" / f"{arxiv_id}.nodes.json")
+    )
+
+    def claim_matches_pageindex(claim: dict[str, Any]) -> bool:
+        source_node_id = str(claim.get("source_node_id") or "")
+        node = nodes.get(source_node_id)
+        if not isinstance(node, dict):
+            return False
+        source_lines = claim.get("source_lines")
+        if not isinstance(source_lines, list) or not source_lines:
+            return False
+        try:
+            node_start = int(node["start_line"])
+            node_end = int(node["end_line"])
+            line_values = [int(value) for value in source_lines]
+        except (KeyError, TypeError, ValueError):
+            return False
+        return all(node_start <= line <= node_end for line in line_values)
+
+    return all(claim_matches_pageindex(claim) for claim in claims)
+
+
+def _verified_fulltext_entries(run_dir: Path) -> list[dict[str, Any]]:
+    promoted = _promoted_entries(run_dir)
+    if not _has_availability_artifacts(run_dir):
+        return promoted
+    return [
+        entry
+        for entry in promoted
+        if _markdown_is_usable(run_dir, str(entry["arxiv_id"]))
+        and _pageindex_valid(run_dir, str(entry["arxiv_id"]))
+        and _verified_evidence_has_claims(run_dir, str(entry["arxiv_id"]))
+    ]
+
+
 def _paper_lookup(run_dir: Path) -> dict[str, dict[str, Any]]:
     path = run_dir / "02_paper_pool" / "paper_pool.json"
     lookup: dict[str, dict[str, Any]] = {}
@@ -395,6 +523,7 @@ def validate_research_book_run(run_dir: Path | str) -> list[dict[str, str]]:
     outline = _outline(run_path)
     manifest = _manifest(run_path)
     promoted = _promoted_entries(run_path)
+    method_required_entries = _verified_fulltext_entries(run_path)
     offenders = collect_excluded(run_path)
     excluded_family_method_ids = {
         offender["id"]
@@ -460,6 +589,7 @@ def validate_research_book_run(run_dir: Path | str) -> list[dict[str, str]]:
 
     method_ids: dict[str, int] = defaultdict(int)
     method_arxiv_counts: dict[str, int] = defaultdict(int)
+    method_arxiv_ids: set[str] = set()
     for method in methods:
         method_id = method.get("id", "")
         if method_id:
@@ -467,6 +597,7 @@ def validate_research_book_run(run_dir: Path | str) -> list[dict[str, str]]:
         arxiv_id = method.get("arxiv_id")
         if arxiv_id:
             method_arxiv_counts[arxiv_id] += 1
+            method_arxiv_ids.add(str(arxiv_id))
 
     for method_id, count in method_ids.items():
         if count > 1:
@@ -478,7 +609,7 @@ def validate_research_book_run(run_dir: Path | str) -> list[dict[str, str]]:
                 }
             )
 
-    for entry in promoted:
+    for entry in method_required_entries:
         arxiv_id = entry["arxiv_id"]
         count = method_arxiv_counts.get(arxiv_id, 0)
         if count == 0:
@@ -495,6 +626,17 @@ def validate_research_book_run(run_dir: Path | str) -> list[dict[str, str]]:
                     "severity": "error",
                     "code": "promoted_paper_with_multiple_methods",
                     "detail": f"{arxiv_id} is promoted but maps to {count} methods in outline.json",
+                }
+            )
+
+    required_arxiv_ids = {str(entry["arxiv_id"]) for entry in method_required_entries}
+    for arxiv_id in sorted(method_arxiv_ids - required_arxiv_ids):
+        if arxiv_id in {str(entry["arxiv_id"]) for entry in promoted}:
+            issues.append(
+                {
+                    "severity": "error",
+                    "code": "unverified_promoted_paper_with_method",
+                    "detail": f"{arxiv_id} has a method in outline.json but is not verified full-text eligible",
                 }
             )
 

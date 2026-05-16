@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+from types import SimpleNamespace
 
 import scripts.run_auto_research as runner
 from scripts.run_auto_research import (
@@ -127,7 +128,221 @@ def test_main_resume_saved_later_stage_validates_stage_1_before_handlers(tmp_pat
     else:
         raise AssertionError("expected Stage 1 preflight failure")
 
+    state = load_run_state(run)
+    assert state["status"] == "failed"
+    assert state["failed_stage"] == "11"
+    assert state["error_type"] == "RuntimeError"
+    assert state["error"] == "stage 1 invalid"
     assert calls == []
+
+
+def test_main_marks_state_failed_when_stage_handler_raises(tmp_path, monkeypatch, capsys):
+    runs_root = tmp_path / "research_runs"
+    run = runs_root / "demo"
+    monkeypatch.setattr(runner, "RUNS_ROOT", runs_root)
+    save_run_state(
+        run,
+        {
+            "run_id": "demo",
+            "phase": "draft",
+            "topic": "Old topic",
+            "status": "running",
+            "current_stage": "11",
+            "last_completed_stage": "10",
+        },
+    )
+    monkeypatch.setattr(
+        runner,
+        "_validate_stage_1_before_later_start",
+        lambda run_dir, start: None,
+    )
+
+    def fail_stage(_run_dir):
+        raise RuntimeError("stage exploded")
+
+    monkeypatch.setattr(runner, "run_stage_11", fail_stage)
+
+    try:
+        main(["--run-id", "demo", "--phase", "all", "--resume"])
+    except RuntimeError as error:
+        assert "stage exploded" in str(error)
+    else:
+        raise AssertionError("expected stage failure")
+
+    state = load_run_state(run)
+    assert state["status"] == "failed"
+    assert state["current_stage"] == "11"
+    assert state["failed_stage"] == "11"
+    assert state["last_completed_stage"] == "10"
+    assert state["error_type"] == "RuntimeError"
+    assert state["error"] == "stage exploded"
+
+    with (run / "run_log.csv").open(newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert rows[-1]["stage"] == "11"
+    assert rows[-1]["status"] == "failed"
+    assert "stage exploded" in rows[-1]["detail"]
+
+    assert main(["--run-id", "demo", "--status"]) == 0
+    out = capsys.readouterr().out
+    assert "status=failed" in out
+    assert "failed_stage=11" in out
+    assert "error_type=RuntimeError" in out
+    assert "error=stage exploded" in out
+
+
+def test_main_records_keyboard_interrupt_as_interrupted(tmp_path, monkeypatch, capsys):
+    runs_root = tmp_path / "research_runs"
+    run = runs_root / "demo"
+    monkeypatch.setattr(runner, "RUNS_ROOT", runs_root)
+    save_run_state(
+        run,
+        {
+            "run_id": "demo",
+            "phase": "draft",
+            "topic": "Old topic",
+            "status": "running",
+            "current_stage": "11",
+            "last_completed_stage": "10",
+        },
+    )
+    monkeypatch.setattr(
+        runner,
+        "_validate_stage_1_before_later_start",
+        lambda run_dir, start: None,
+    )
+
+    def interrupt_stage(_run_dir):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(runner, "run_stage_11", interrupt_stage)
+
+    try:
+        main(["--run-id", "demo", "--phase", "all", "--resume"])
+    except KeyboardInterrupt:
+        pass
+    else:
+        raise AssertionError("expected keyboard interrupt")
+
+    state = load_run_state(run)
+    assert state["status"] == "interrupted"
+    assert state["current_stage"] == "11"
+    assert state["failed_stage"] == "11"
+    assert state["error_type"] == "KeyboardInterrupt"
+
+    with (run / "run_log.csv").open(newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert rows[-1]["stage"] == "11"
+    assert rows[-1]["status"] == "interrupted"
+    assert "KeyboardInterrupt" in rows[-1]["detail"]
+
+    assert main(["--run-id", "demo", "--status"]) == 0
+    out = capsys.readouterr().out
+    assert "status=interrupted" in out
+    assert "failed_stage=11" in out
+    assert "error_type=KeyboardInterrupt" in out
+
+
+def test_sdk_cli_fallback_uses_cli_when_sdk_notifications_timeout(tmp_path, monkeypatch):
+    run = tmp_path / "research_runs" / "demo"
+    spec = runner.ShardSpec(
+        stage="1",
+        shard_id="query-planner",
+        agent="query_planner",
+        model="gpt-5.4-mini",
+        prompt="write search plan",
+        expected_outputs=["00_input/search_plan.json"],
+    )
+    calls = []
+
+    def fail_sdk(_run_dir, _spec, _timeout_seconds):
+        calls.append("sdk")
+        raise TimeoutError("Timed out waiting for app-server message after 51.409s")
+
+    def pass_cli(_spec, _timeout_seconds):
+        calls.append("cli")
+        return runner.ShardAttemptResult(
+            returncode=0,
+            stdout="ok",
+            stderr="",
+            executor="cli",
+        )
+
+    monkeypatch.setattr(runner, "_run_sdk_shard_attempt", fail_sdk)
+    monkeypatch.setattr(runner, "_run_cli_shard_attempt", pass_cli)
+
+    result = runner._run_shard_attempt(
+        run,
+        spec,
+        timeout_seconds=60,
+        executor="sdk-cli-fallback",
+    )
+
+    assert calls == ["sdk", "cli"]
+    assert result.returncode == 0
+    assert result.executor == "cli"
+    assert "SDK executor timed out" in result.stderr
+
+
+def test_sdk_cli_fallback_accepts_existing_outputs_after_sdk_timeout(tmp_path, monkeypatch):
+    run = tmp_path / "research_runs" / "demo"
+    (run / "00_input").mkdir(parents=True)
+    (run / "00_input" / "search_plan.json").write_text("{}", encoding="utf-8")
+    spec = runner.ShardSpec(
+        stage="1",
+        shard_id="query-planner",
+        agent="query_planner",
+        model="gpt-5.4-mini",
+        prompt="write search plan",
+        expected_outputs=["00_input/search_plan.json"],
+    )
+    calls = []
+
+    def fail_sdk(_run_dir, _spec, _timeout_seconds):
+        calls.append("sdk")
+        raise TimeoutError("Timed out waiting for app-server message after 51.409s")
+
+    def fail_cli(_spec, _timeout_seconds):
+        calls.append("cli")
+        raise AssertionError("CLI fallback should not run when outputs already exist")
+
+    monkeypatch.setattr(runner, "_run_sdk_shard_attempt", fail_sdk)
+    monkeypatch.setattr(runner, "_run_cli_shard_attempt", fail_cli)
+
+    result = runner._run_shard_attempt(
+        run,
+        spec,
+        timeout_seconds=60,
+        executor="sdk-cli-fallback",
+    )
+
+    assert calls == ["sdk"]
+    assert result.returncode == 0
+    assert result.executor == "sdk"
+    assert "SDK executor timed out after producing expected outputs" in result.stderr
+
+
+def test_run_sdk_prompt_uses_bounded_notification_timeout(monkeypatch):
+    import sdk.codex as codex_module
+
+    observed = {}
+
+    def fake_run_one_shot_sync(**kwargs):
+        observed.update(kwargs)
+        return SimpleNamespace(thread_id="thread-1", turn_id="turn-1", final_response="ok")
+
+    monkeypatch.setattr(codex_module, "run_one_shot_sync", fake_run_one_shot_sync)
+    monkeypatch.setenv("SWARN_SDK_NOTIFICATION_TIMEOUT_SECONDS", "123")
+
+    result = runner._run_sdk_prompt(
+        "write search plan",
+        model="gpt-5.4-mini",
+        timeout_seconds=runner.BOOTSTRAP_TIMEOUT_SECONDS,
+    )
+
+    assert result.final_response == "ok"
+    assert observed["timeout"] == float(runner.BOOTSTRAP_TIMEOUT_SECONDS)
+    assert observed["notification_timeout"] == 123.0
 
 
 def test_main_resets_progress_without_resume(tmp_path, monkeypatch):

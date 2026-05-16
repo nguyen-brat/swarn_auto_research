@@ -13,6 +13,9 @@ tool_timeout_sec = 10000
 [mcp_servers.swarn-auto-research.tools.bulk_normal_start_search]
 approval_mode = "approve"
 
+[mcp_servers.swarn-auto-research.tools.gap_paper_search]
+approval_mode = "approve"
+
 [mcp_servers.swarn-auto-research.tools.get_alphaxiv_overview]
 approval_mode = "approve"
 

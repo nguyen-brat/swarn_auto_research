@@ -1,6 +1,6 @@
 ---
 name: query-planning
-description: Expand a single topic into 4–6 distinct aspects with per-aspect queries and keywords, so Stage 1 search covers the whole topic instead of one popular angle.
+description: Expand a single topic into 4–5 distinct aspects with per-aspect queries and keywords, so Stage 1 search covers the whole topic instead of one popular angle.
 ---
 
 # Query Planning
@@ -16,7 +16,7 @@ Produce a search plan that covers the topic from multiple distinct angles. The p
 - `00_input/search_plan.json`
 - Do not include `target_seed_papers`; Stage 1 keeps every paper returned by the bulk search relevance gates.
 
-## Aspect coverage (think across these axes; emit 4–6 total)
+## Aspect coverage (think across these axes; emit 4–5 total)
 - **Method families** — the major algorithmic approaches that solve the topic (e.g. for long-context: sparse attention, linear/state-space attention, KV-cache compression, retrieval-augmented context, memory-augmented attention).
 - **Architectural enablers** — positional encoding tricks, kernel design, fused ops.
 - **Training and adaptation** — long-context fine-tuning, continued pretraining, distillation.
@@ -24,21 +24,21 @@ Produce a search plan that covers the topic from multiple distinct angles. The p
 - **Foundational priors** — the canonical predecessor papers a reader needs (Transformer, FlashAttention, etc.) — only when central to the topic.
 - **Boundary aspects** — adjacent areas the topic borrows from (e.g. retrieval, RAG) when they're load-bearing.
 
-Skip axes that don't apply. Aim for 4 aspects on a narrow topic, up to 6 on a broad one. Aspects must be distinct — if two would share most queries, merge them.
+Skip axes that don't apply. Aim for 4 aspects on a narrow topic, up to 5 on a broad one. Aspects must be distinct — if two would share most queries, merge them.
 
 ## Per-aspect rules
 - `aspect_id`: short snake_case slug.
 - `title`: human-readable.
 - `rationale`: 1 sentence — why this aspect matters and what would be missed without it.
-- `normal_queries`: 2–3 queries Semantic Scholar / HF search would understand. Mix specific terms with broader phrases.
-- `survey_queries`: 1 query that biases toward survey/review papers (start with "survey", "review", "overview").
+- `normal_queries`: exactly 1 query Semantic Scholar / HF search would understand. Use the best phrase for this aspect.
+- `survey_queries`: 1 query that biases toward survey/review papers (start with "survey", "review", "overview") for the 3 aspects where a survey is most useful; otherwise use an empty list.
 - `positive_keywords`: 3–5 keywords. A kept paper must mention at least one (across the union). Use distinctive vocabulary, not generic words.
 - `negative_keywords`: aspect-specific exclusions (rarely needed; usually leave empty and rely on global).
 
 ## Hard total budget (load-bearing for runtime)
 Each Stage 1 query triggers ~5 Semantic Scholar calls with citation traversal — query count drives runtime linearly. Keep totals at:
-- **≤ 15 normal queries** across all aspects combined.
-- **≤ 6 survey queries** across all aspects combined.
+- **≤ 5 normal queries** across all aspects combined; this means at most one normal query per aspect.
+- **≤ 3 survey queries** across all aspects combined.
 - If your aspect breakdown would exceed these, **merge similar aspects** or drop a query — do NOT silently push past the cap.
 
 ## Global keywords
@@ -61,9 +61,7 @@ Each Stage 1 query triggers ~5 Semantic Scholar calls with citation traversal �
       "title": "Sparse attention methods",
       "rationale": "Sparse patterns are the dominant strategy for long-context efficiency; missing this aspect would drop most of the recent work.",
       "normal_queries": [
-        "sparse attention long context transformer",
-        "block-sparse attention LLM",
-        "selected-token attention efficient inference"
+        "sparse attention long context transformer"
       ],
       "survey_queries": ["survey efficient long-context attention"],
       "positive_keywords": ["sparse attention", "block-sparse", "selected tokens", "top-k attention"],
@@ -75,8 +73,8 @@ Each Stage 1 query triggers ~5 Semantic Scholar calls with citation traversal �
 ```
 
 ## Success
-- 4–6 aspects, all with non-empty `normal_queries` and `positive_keywords`.
-- Total normal_queries ≤ 15; total survey_queries ≤ 6.
+- 4–5 aspects, all with non-empty `normal_queries` and `positive_keywords`.
+- Total normal_queries ≤ 5; total survey_queries ≤ 3.
 - No two aspects have the same `aspect_id`.
 - User-supplied queries/keywords are preserved.
 - File parses as valid JSON.

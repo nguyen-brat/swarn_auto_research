@@ -18,6 +18,7 @@ import math
 import os
 import re
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from threading import Lock
 from time import sleep
@@ -35,8 +36,40 @@ load_dotenv()
 GRAPH_BASE = "https://api.semanticscholar.org/graph/v1"
 RECOMM_BASE = "https://api.semanticscholar.org/recommendations/v1"
 
-API_KEY = os.getenv("S2_KEY", "")  # Replace or set to "" to go unauthenticated
-HEADERS = {"x-api-key": API_KEY} if API_KEY else {}
+
+def _parse_semantic_scholar_api_keys():
+    keys: list[str] = []
+
+    def add_key(value):
+        text = str(value).strip().strip('"').strip("'")
+        if text and text not in keys:
+            keys.append(text)
+
+    raw_keys = os.getenv("S2_KEYS", "")
+    if raw_keys.strip().startswith("["):
+        try:
+            parsed = json.loads(raw_keys)
+        except json.JSONDecodeError:
+            parsed = []
+        if isinstance(parsed, list):
+            for item in parsed:
+                add_key(item)
+    else:
+        for item in re.split(r"[\n,]", raw_keys):
+            add_key(item)
+
+    add_key(os.getenv("S2_KEY", ""))
+    return keys
+
+
+SEMANTIC_SCHOLAR_API_KEYS = _parse_semantic_scholar_api_keys()
+_SEMANTIC_SCHOLAR_API_KEY_INDEX = 0
+SEMANTIC_SCHOLAR_API_KEY_LOCK = Lock()
+HEADERS = (
+    {"x-api-key": SEMANTIC_SCHOLAR_API_KEYS[_SEMANTIC_SCHOLAR_API_KEY_INDEX]}
+    if SEMANTIC_SCHOLAR_API_KEYS
+    else {}
+)
 PAPER_WITH_LINKED_FIELDS = (
     "paperId,title,year,externalIds,abstract,citationCount,referenceCount,"
     "citations.paperId,citations.title,citations.year,citations.abstract,citations.externalIds,"
@@ -51,9 +84,94 @@ SEMANTIC_SCHOLAR_LINKED_BATCH_LIMIT = int(os.getenv("S2_LINKED_BATCH_LIMIT", SEM
 SEMANTIC_SCHOLAR_TIMEOUT = 300
 SEMANTIC_SCHOLAR_REQUEST_DELAY_SECONDS = 1
 SEMANTIC_SCHOLAR_RATE_LIMIT_RETRIES = 5
+SEMANTIC_SCHOLAR_RATE_LIMIT_BACKOFF_SECONDS = float(
+    os.getenv("S2_RATE_LIMIT_BACKOFF_SECONDS", "30")
+)
 SEMANTIC_SCHOLAR_PAPER_ID_PATTERN = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 ARXIV_ID_PATTERN = re.compile(r"^\d{4}\.\d{4,5}(v\d+)?$", re.IGNORECASE)
-PAPER_DETAIL_CACHE = {}
+
+
+def _parse_memory_cache_capacity(value, default=256):
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+class _BoundedPaperDetailCache:
+    def __init__(self, capacity):
+        self._groups = OrderedDict()
+        self._alias_to_group = {}
+        self.capacity = capacity
+
+    @property
+    def capacity(self):
+        return self._capacity
+
+    @capacity.setter
+    def capacity(self, value):
+        self._capacity = _parse_memory_cache_capacity(value)
+        self._trim()
+
+    def get(self, key):
+        group_key = self._alias_to_group.get(key)
+        if group_key is None:
+            return None
+        group = self._groups.pop(group_key)
+        self._groups[group_key] = group
+        return group["paper"]
+
+    def __setitem__(self, key, value):
+        self.set_many([key], value)
+
+    def set_many(self, keys, paper):
+        if self.capacity <= 0:
+            return
+        aliases = list(dict.fromkeys(key for key in keys if key))
+        if not aliases:
+            return
+        group_key = (
+            str(paper.get("paperId") or aliases[0])
+            if isinstance(paper, dict)
+            else aliases[0]
+        )
+        existing_group_keys = {
+            self._alias_to_group[alias]
+            for alias in aliases
+            if alias in self._alias_to_group
+        }
+        existing_group_keys.add(group_key)
+        for existing_group_key in existing_group_keys:
+            self._remove_group(existing_group_key)
+        self._groups[group_key] = {"paper": paper, "aliases": aliases}
+        for alias in aliases:
+            self._alias_to_group[alias] = group_key
+        self._trim()
+
+    def clear(self):
+        self._groups.clear()
+        self._alias_to_group.clear()
+
+    def __len__(self):
+        return len(self._groups)
+
+    def _remove_group(self, group_key):
+        group = self._groups.pop(group_key, None)
+        if group is None:
+            return
+        for alias in group["aliases"]:
+            self._alias_to_group.pop(alias, None)
+
+    def _trim(self):
+        while len(self._groups) > self.capacity:
+            group_key, group = self._groups.popitem(last=False)
+            for alias in group["aliases"]:
+                self._alias_to_group.pop(alias, None)
+
+
+PAPER_DETAIL_CACHE = _BoundedPaperDetailCache(
+    os.environ.get("SWARN_S2_MEMORY_CACHE_MAX", "256")
+)
 PAPER_DETAIL_CACHE_LOCK = Lock()
 PAPER_DETAIL_FETCH_LOCK = Lock()
 SEMANTIC_SCHOLAR_REQUEST_LOCK = Lock()
@@ -198,8 +316,7 @@ def _get_cached_paper_detail(paper_id):
     if paper:
         # Promote to in-memory cache so subsequent hits skip the file read.
         with PAPER_DETAIL_CACHE_LOCK:
-            for key in _paper_cache_keys_from_paper(paper):
-                PAPER_DETAIL_CACHE[key] = paper
+            PAPER_DETAIL_CACHE.set_many(_paper_cache_keys_from_paper(paper), paper)
         return paper
     return None
 
@@ -209,8 +326,7 @@ def _cache_paper_detail(paper):
         return
     keys = _paper_cache_keys_from_paper(paper)
     with PAPER_DETAIL_CACHE_LOCK:
-        for key in keys:
-            PAPER_DETAIL_CACHE[key] = paper
+        PAPER_DETAIL_CACHE.set_many(keys, paper)
     # Persist to disk cache (batched flush, atomic write).
     persistent_cache.put(keys, paper)
 
@@ -337,11 +453,41 @@ def _is_bad_request_error(exc):
     return getattr(getattr(exc, "response", None), "status_code", None) == 400
 
 
+def _rate_limit_backoff_seconds(exc):
+    headers = getattr(getattr(exc, "response", None), "headers", None) or {}
+    retry_after = headers.get("Retry-After") if hasattr(headers, "get") else None
+    try:
+        return max(0.0, float(retry_after))
+    except (TypeError, ValueError):
+        return SEMANTIC_SCHOLAR_RATE_LIMIT_BACKOFF_SECONDS
+
+
+def _rotate_semantic_scholar_api_key():
+    global _SEMANTIC_SCHOLAR_API_KEY_INDEX
+    if len(SEMANTIC_SCHOLAR_API_KEYS) < 2:
+        return False
+    with SEMANTIC_SCHOLAR_API_KEY_LOCK:
+        _SEMANTIC_SCHOLAR_API_KEY_INDEX = (
+            _SEMANTIC_SCHOLAR_API_KEY_INDEX + 1
+        ) % len(SEMANTIC_SCHOLAR_API_KEYS)
+        HEADERS["x-api-key"] = SEMANTIC_SCHOLAR_API_KEYS[
+            _SEMANTIC_SCHOLAR_API_KEY_INDEX
+        ]
+    print("  S2 rate limit: rotated to next API key")
+    return True
+
+
 def _run_semantic_scholar_request(request_func):
     """Serialize Semantic Scholar requests to respect the public 1 RPS limit."""
     with SEMANTIC_SCHOLAR_REQUEST_LOCK:
         sleep(SEMANTIC_SCHOLAR_REQUEST_DELAY_SECONDS)
-        return request_func()
+        try:
+            return request_func()
+        except Exception as exc:
+            if _is_rate_limit_error(exc):
+                if not _rotate_semantic_scholar_api_key():
+                    sleep(_rate_limit_backoff_seconds(exc))
+            raise
 
 
 def _semantic_scholar_post(
@@ -565,22 +711,41 @@ def _fetch_paper_abstracts_batch_by_arxiv_ids(arxiv_ids):
     if not arxiv_ids:
         return []
 
-    result = []
     ids = [
         paper_id if str(paper_id).startswith(("ArXiv:", "arXiv:", "ARXIV:")) else f"ArXiv:{paper_id}"
         for paper_id in arxiv_ids
     ]
     unique_ids = list(dict.fromkeys(ids))
-    for start in range(0, len(unique_ids), SEMANTIC_SCHOLAR_BATCH_LIMIT):
-        chunk = unique_ids[start:start + SEMANTIC_SCHOLAR_BATCH_LIMIT]
+    return _fetch_paper_abstracts_batch_chunk(unique_ids)
+
+
+def _fetch_paper_abstracts_batch_chunk(arxiv_ids):
+    if not arxiv_ids:
+        return []
+    if len(arxiv_ids) > SEMANTIC_SCHOLAR_BATCH_LIMIT:
+        result = []
+        for start in range(0, len(arxiv_ids), SEMANTIC_SCHOLAR_BATCH_LIMIT):
+            chunk = arxiv_ids[start:start + SEMANTIC_SCHOLAR_BATCH_LIMIT]
+            result.extend(_fetch_paper_abstracts_batch_chunk(chunk))
+        return result
+
+    try:
         data = _semantic_scholar_post(
             f"{GRAPH_BASE}/paper/batch",
-            {"ids": chunk},
+            {"ids": arxiv_ids},
             params={"fields": PAPER_ABSTRACT_FIELDS},
             headers=HEADERS,
         )
-        result.extend(paper for paper in _normalize_batch_response(data) if paper)
-    return result
+    except Exception as exc:
+        if not _is_rate_limit_error(exc):
+            raise
+        if len(arxiv_ids) == 1:
+            return []
+        mid = len(arxiv_ids) // 2
+        left = _fetch_paper_abstracts_batch_chunk(arxiv_ids[:mid])
+        right = _fetch_paper_abstracts_batch_chunk(arxiv_ids[mid:])
+        return left + right
+    return [paper for paper in _normalize_batch_response(data) if paper]
 
 
 def _format_recommendation_seed_ids(paper_ids):

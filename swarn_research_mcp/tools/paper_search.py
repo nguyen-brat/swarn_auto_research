@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 if __package__ is None or __package__ == "":
@@ -13,7 +14,7 @@ if __package__ is None or __package__ == "":
 
 _DEFAULT_BULK_SEARCH_CONFIG = {
     "trending_months": 12,
-    "trending_month_limit": 30,
+    "trending_month_limit": 40,
     "influence_windows": [
         {"label": "older", "year_offset_start": -4, "year_offset_end": -2,
          "limit": 10, "min_citation_count": 50, "depth": 1,
@@ -21,6 +22,9 @@ _DEFAULT_BULK_SEARCH_CONFIG = {
         {"label": "middle", "year_offset_start": -2, "year_offset_end": -1,
          "limit": 10, "min_citation_count": 30, "depth": 2,
          "citation_limit_per_level": 30, "min_citation_depth": 20, "max_papers": 100},
+        {"label": "fresh", "year_offset_start": -1, "year_offset_end": None,
+         "limit": 10, "min_citation_count": 5, "depth": 1,
+         "citation_limit_per_level": 20, "min_citation_depth": 5, "max_papers": 80},
         {"label": "recent", "year_offset_start": -1, "year_offset_end": None,
          "limit": 10, "min_citation_count": 10, "depth": 3,
          "citation_limit_per_level": 20, "min_citation_depth": 10, "max_papers": 100},
@@ -56,12 +60,40 @@ from swarn_research_mcp.services.semantic_scholar import (
 from swarn_research_mcp.tools.select_paper import select_papers
 from swarn_research_mcp.services.huggingface import search_huggingface_papers, collect_huggingface_trending_papers
 from swarn_research_mcp.services.arxiv import extract_markdown_section, get_arxiv_markdown
-from swarn_research_mcp.services.alphaxiv import get_alphaxiv_overview_markdown
+from swarn_research_mcp.services.alphaxiv import get_alphaxiv_overview_markdown, search_alphaxiv_papers
+from swarn_research_mcp.services.utils import safe_get
 from time import time
 from sdk.codex import AsyncCodex, build_config
 
 
-CODEX_RELEVANCE_SESSION_LIMIT = 20
+def _default_codex_relevance_session_limit():
+    configured = os.environ.get("SWARN_CODEX_RELEVANCE_SESSION_LIMIT")
+    if configured is not None:
+        return int(configured)
+    if Path(sys.argv[0]).name == "swarn-auto-research-mcp":
+        return 1
+    return 20
+
+
+CODEX_RELEVANCE_SESSION_LIMIT = _default_codex_relevance_session_limit()
+CODEX_RELEVANCE_TIMEOUT_SECONDS = float(
+    os.environ.get("SWARN_CODEX_RELEVANCE_TIMEOUT_SECONDS", str(2 * 3600))
+)
+
+
+def _codex_relevance_cwd():
+    return Path(
+        os.environ.get(
+            "SWARN_CODEX_RELEVANCE_CWD",
+            str(Path(tempfile.gettempdir()) / "swarn-auto-research-codex-relevance"),
+        )
+    )
+
+
+def _codex_relevance_config():
+    cwd = _codex_relevance_cwd()
+    cwd.mkdir(parents=True, exist_ok=True)
+    return build_config(cwd=cwd)
 
 
 def _recent_month_filters(current_year, current_month, month_count=12):
@@ -130,9 +162,13 @@ def _parse_codex_related_ids(response, allowed_ids):
 async def _validate_related_paper_chunk_with_codex(query_topic, paper_chunk, semaphore):
     async with semaphore:
         prompt = _format_codex_relevance_prompt(query_topic, paper_chunk)
-        async with AsyncCodex(config=build_config()) as codex:
+        async with AsyncCodex(config=_codex_relevance_config()) as codex:
             thread = await codex.thread_start(model="gpt-5.4-mini")
-            result = await thread.run(prompt, effort="low")
+            result = await thread.run(
+                prompt,
+                effort="low",
+                notification_timeout_s=CODEX_RELEVANCE_TIMEOUT_SECONDS,
+            )
         return _parse_codex_related_ids(result.final_response, set(paper_chunk))
 
 
@@ -285,7 +321,14 @@ async def bulk_normal_start_search(
             )
             influence_paper_result = influence_paper_result | window_result
         print(f"Bulk normal query {index}: Semantic Scholar pool={len(influence_paper_result)}")
-        _, enriched_influence_result = await recommendations_task
+        try:
+            _, enriched_influence_result = await recommendations_task
+        except Exception as exc:
+            print(
+                f"Bulk normal query {index}: recommendation search failed; "
+                f"continuing without recommendations: {type(exc).__name__}: {exc}"
+            )
+            enriched_influence_result = {}
         print(f"Bulk normal query {index}: recommendation results={len(enriched_influence_result)}")
 
         bulk_results = bulk_results | influence_paper_result | trending_paper_result | enriched_influence_result
@@ -396,6 +439,102 @@ async def bulk_normal_start_search(
             json.dump(selected_results["papers"], f, ensure_ascii=False, indent=2)
         selected_results["output_path"] = str(output_path)
     print("Bulk search done")
+    return selected_results
+
+
+async def gap_paper_search(
+    queries: list[str],
+    positive_keywords: list[str] | None = None,
+    negative_keywords: list[str] | None = None,
+    limit_per_query: int = 30,
+    output_dir: str | None = None,
+) -> dict:
+    """Lightweight Stage 6 candidate search using Hugging Face and alphaXiv.
+
+    This deliberately avoids Semantic Scholar citation expansion,
+    recommendation calls, and nested Codex relevance validation. Stage 6
+    agents still apply the final foundational/survey/canonical acceptance
+    rules before writing expansion artifacts.
+    """
+    queries = _coerce_string_list(queries, field_name="queries")
+    positive_keywords = _coerce_string_list(
+        positive_keywords or [], field_name="positive_keywords"
+    )
+    negative_keywords = _coerce_string_list(
+        negative_keywords or [], field_name="negative_keywords"
+    )
+    if not queries:
+        raise ValueError("queries must contain at least one non-empty string")
+    if limit_per_query < 1:
+        raise ValueError("limit_per_query must be >= 1")
+
+    def _summaries_from_alphaxiv_result(result) -> dict[str, str]:
+        items = result if isinstance(result, list) else result.get("results", [])
+        summaries: dict[str, str] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            arxiv_id = item.get("universal_paper_id") or item.get("arxiv_id")
+            if not arxiv_id:
+                continue
+            arxiv_id = str(arxiv_id).split("v")[0]
+            summary = item.get("abstract") or safe_get(item, "paper_summary.summary")
+            if summary:
+                summaries[arxiv_id] = summary
+        return summaries
+
+    paper_pool: dict[str, str] = {}
+    query_audit = []
+    for query in queries:
+        audit = {"query": query}
+        try:
+            huggingface_result = await search_huggingface_papers(
+                query=query,
+                limit=limit_per_query,
+            )
+        except Exception as exc:
+            huggingface_result = {}
+            audit["huggingface_error"] = f"{type(exc).__name__}: {exc}"
+        try:
+            alphaxiv_result = _summaries_from_alphaxiv_result(
+                await search_alphaxiv_papers(query=query)
+            )
+        except Exception as exc:
+            alphaxiv_result = {}
+            audit["alphaxiv_error"] = f"{type(exc).__name__}: {exc}"
+        query_result = {
+            **alphaxiv_result,
+            **huggingface_result,
+        }
+        audit.update({
+            "huggingface_candidate_count": len(huggingface_result),
+            "alphaxiv_candidate_count": len(alphaxiv_result),
+            "returned_candidate_count": len(query_result),
+            "returned_candidate_ids": list(query_result.keys()),
+        })
+        query_audit.append(audit)
+        paper_pool.update({
+            arxiv_id: abstract
+            for arxiv_id, abstract in query_result.items()
+            if arxiv_id not in paper_pool
+        })
+
+    selected_results = select_papers(
+        papers=paper_pool,
+        keywords=positive_keywords,
+        negative_keywords=negative_keywords,
+    )
+    selected_results["queries"] = queries
+    selected_results["query_audit"] = query_audit
+
+    out = _ensure_output_dir(output_dir)
+    if out is not None:
+        output_path = out / f"gap_search_results_{int(time())}.json"
+        output_path.write_text(
+            json.dumps(selected_results["papers"], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        selected_results["output_path"] = str(output_path)
     return selected_results
 
 

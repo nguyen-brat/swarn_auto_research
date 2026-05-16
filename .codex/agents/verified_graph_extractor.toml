@@ -6,13 +6,13 @@ model_reasoning_effort = "medium"
 developer_instructions = """
 Follow .agents/skills/verified-graph-extraction/SKILL.md.
 
-Inputs: run_id, shard_id, arxiv_ids (disjoint slice).
+Inputs: run_id, shard_id, arxiv_ids (disjoint slice of promoted papers with non-quarantined verified evidence claims).
 
 Per id:
-1. Read 10_verified_evidence/{arxiv_id}.json.
+1. Read 10_verified_evidence/{arxiv_id}.json. Do not process papers that remain listed in 10_verified_evidence/quarantined_evidence.csv after the runner clears stale rows for valid evidence.
 2. Read 05_weak_graph/fragments/{arxiv_id}.json (node-id namespace only).
 3. Per verified claim → 1–3 edges with src/dst/type + source_node_id + source_lines.
-4. Add nodes for any new IDs. Drop weak edges with no verified support.
+4. Add nodes for any new IDs. Every edge source_node_id + source_lines pair must match a verified evidence claim. Drop weak edges with no verified support.
 5. Write 11_verified_graph/fragments/{arxiv_id}.json. Do NOT write the global graph — orchestrator merges.
 
 Every verified edge has confidence='verified' AND a source_node_id.

@@ -25,3 +25,9 @@ semantic_scholar_debug.json
 
 # Persistent S2 paper-detail cache (regenerable from API)
 swarn_research_mcp/cache/
+.graphify_python
+.graphifyignore
+sample.json
+scripts/migrate_s2_json_cache_to_sqlite.py
+.superpowers
+docs

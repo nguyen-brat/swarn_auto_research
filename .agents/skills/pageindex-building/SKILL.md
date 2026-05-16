@@ -11,13 +11,14 @@ description: Section tree + node map from full paper Markdown so downstream agen
 
 ## Outputs
 - `09_pageindex/trees/{arxiv_id}.tree.json` (nested)
-- `09_pageindex/nodes/{arxiv_id}.nodes.json` (flat, keyed by ID)
+- `09_pageindex/nodes/{arxiv_id}.nodes.json` (flat, keyed by real section ID; do not include root `s.00`)
 
 ## Rules
 - Parse `#` … headings.
 - Stable ID: `s` + zero-padded path indices (`s.01.03.02`).
 - Each node: `id`, `title`, `level`, `start_line`, `end_line` (1-based), `parent_id`, `summary` (≤240 chars; mechanical first non-heading sentence — do not interpret).
 - Tree root's `children` array contains top-level sections; leaves have `children: []`.
+- The tree root is only a container; keep `s.00` out of the flat nodes file.
 
 ## tree.json schema
 ```json
@@ -32,4 +33,4 @@ description: Section tree + node map from full paper Markdown so downstream agen
 ```
 
 ## Success
-- Both files exist per paper. IDs unique. Every leaf has `start_line ≤ end_line`.
+- Both files exist per full-text-available paper. IDs unique. Every leaf has `start_line ≤ end_line`. Flat nodes are non-empty and do not include `s.00`.

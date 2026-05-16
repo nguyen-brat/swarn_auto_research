@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from swarn_research_mcp.tools.paper_search import (
     bulk_normal_start_search,
+    gap_paper_search,
     get_alphaxiv_overview,
     get_paper_markdown,
     get_paper_metadata,
@@ -60,6 +61,30 @@ MCP_TOOL_SPECS: tuple[MCPToolSpec, ...] = (
             "  }\n\n"
             "Each list parameter is auto-coerced if a string slips in (newlines or "
             "commas → list), but DO NOT rely on that — pass arrays."
+        ),
+        retry_attempts=1,
+    ),
+    MCPToolSpec(
+        function=gap_paper_search,
+        description=(
+            "Lightweight Stage 6 gap-expansion paper search using Hugging Face "
+            "paper search plus alphaXiv paper search. Use this for knowledge-gap "
+            "expansion shards instead of bulk_normal_start_search.\n\n"
+            "INPUT:\n"
+            "  - queries: list[str] — one gap search query per element.\n"
+            "  - positive_keywords (optional, list[str]) — kept paper abstracts "
+            "must mention at least one term when provided.\n"
+            "  - negative_keywords (optional, list[str]) — reject abstracts "
+            "matching any term.\n"
+            "  - limit_per_query (optional, int, default 30): Hugging Face search "
+            "limit for each query. alphaXiv search does not expose a local limit.\n"
+            "  - output_dir (optional, str): when set, writes the final "
+            "paper-id→abstract JSON to `{output_dir}/gap_search_results_{ts}.json`.\n\n"
+            "OUTPUT: dict with shape compatible with bulk_normal_start_search:\n"
+            "  {keywords, negative_keywords, total_input, total_kept, papers, "
+            "queries, query_audit, output_path?}.\n\n"
+            "This tool intentionally does NOT call Semantic Scholar, "
+            "recommendations, or Codex relevance validation."
         ),
         retry_attempts=1,
     ),

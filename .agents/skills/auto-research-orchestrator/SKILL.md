@@ -10,13 +10,14 @@ description: Run the auto-research pipeline end-to-end for one topic — Book_st
 For end-to-end runs, prefer:
 
 ```bash
-env PYTHONPATH=. python scripts/run_auto_research.py --topic "<topic>" --phase all --executor sdk --max-workers 20
-env PYTHONPATH=. python scripts/run_auto_research.py --run-id <run_id> --phase write --resume --executor sdk --max-workers 20
+env PYTHONPATH=. python scripts/run_auto_research.py --topic "<topic>" --phase all --executor sdk-cli-fallback --max-workers 20
+env PYTHONPATH=. python scripts/run_auto_research.py --run-id <run_id> --phase write --resume --executor sdk-cli-fallback --max-workers 20
 ```
 
 The Python runner owns durable stage state, shard manifests, artifact checks, retries, and deterministic merges. This skill remains the behavioral contract for every stage. The interactive parent Codex session should supervise the runner and repair failures, not manually execute the stage work in chat.
 
 The runner must execute Stages 0-10 as separate stage handlers. Do not ask one Codex SDK session to run multiple stages from 0 through 10.
+The runner caps effective shard fanout by stage: light/no-agent stages use up to 20 workers, normal sub-agent stages use up to 10, and memory-heavy sub-agent stages use up to 5. `SWARN_MAX_EFFECTIVE_WORKERS` applies a global cap, and `SWARN_STAGE_<N>_MAX_EFFECTIVE_WORKERS` overrides a specific stage cap for experiments, for example `SWARN_STAGE_10_MAX_EFFECTIVE_WORKERS=3`.
 
 ## Inputs
 - `topic` (required for `phase=draft|all`)
@@ -48,9 +49,9 @@ Before dispatching any stage, check whether its primary output exists. If yes, l
 | 5  | `06_expansion/knowledge_gap_report.json` + `expansion_need_queue.json` |
 | 6  | `06_expansion/expansion_round_01.json` (or queue empty) |
 | 7  | `07_scoring/paper_scores.csv` + `07_scoring/promotion_candidates.csv` + `07_scoring/promoted_papers.json` |
-| 8  | every promoted paper has `08_full_markdown/{arxiv_id}.md` |
-| 9  | every promoted paper has `09_pageindex/trees/{arxiv_id}.tree.json` + `09_pageindex/nodes/{arxiv_id}.nodes.json` |
-| 10 | every promoted paper has `10_verified_evidence/{arxiv_id}.json` |
+| 8  | every promoted paper has non-empty `08_full_markdown/{arxiv_id}.md` or `08_full_markdown/unavailable_markdown.csv` records why it is skipped |
+| 9  | every full-text-available promoted paper has `09_pageindex/trees/{arxiv_id}.tree.json` + `09_pageindex/nodes/{arxiv_id}.nodes.json` |
+| 10 | every full-text/PageIndex promoted paper has `10_verified_evidence/{arxiv_id}.json` or `10_verified_evidence/quarantined_evidence.csv` records why it is skipped |
 | 11 | `11_verified_graph/global_graph.json` |
 | 12 | `12_taxonomy/outline.json` (three-tier) |
 | 12.5 | `12_taxonomy/outline.json` (normalized — `python -m swarn_research_mcp.research_book {run_dir} --normalize-outline`) |
@@ -89,7 +90,7 @@ verified_sections_per_paper = 20
 5. Per-item outputs live at canonical filenames — shards never collide.
 6. Run any required sequential merge after all shards finish.
 
-Cap: ≤ 50 concurrent sub-agents per stage. If a stage has more than 50 shards, dispatch in concurrent waves of 50 — wait for one wave to finish, then launch the next. (Codex `max_threads` in `.codex/config.toml` may be higher to allow cross-stage headroom, but the per-stage ceiling stays at 50.)
+Cap: use the runner's stage-specific effective worker cap. Default caps are Stage 2/3/8/9/16/17/18 = 20; Stage 6/11/14 = 10; Stage 10/13/15 = 5. If a stage has more shards than its cap, dispatch in waves at that cap and wait for one wave before launching the next.
 
 ## Delegation hard rules
 - Do not replace Stages 12–17 with an inline parent-script generator. The parent orchestrator may create folders, merge shard outputs, and run deterministic validators, but taxonomy, packs, chapter prose, verification, and manifest/front-matter edits must come from the configured stage agents.
@@ -171,23 +172,24 @@ After acceptance, re-run Stage 2 for the new arxiv_ids only.
 ### 7 — Score and promote
 Dispatch `paper_ranker` with `min_promote_score`.
 
-### 8 — Full Markdown
-Per promoted paper: MCP `get_paper_markdown` → `08_full_markdown/{arxiv_id}.md`. Log each fetch.
+### 8 — Full Markdown [DETERMINISTIC PARALLEL]
+The runner fetches promoted arxiv_ids directly with the arxiv2md API and writes `08_full_markdown/{arxiv_id}.md`. Do not dispatch Codex sub-agents for this stage. A markdown file is complete only when it exists and is non-empty; blank files are retried. If upstream returns empty markdown, keep `07_scoring/promoted_papers.json` immutable and record the paper in `08_full_markdown/unavailable_markdown.csv`; downstream full-text stages skip that paper until markdown becomes available. Each paper gets a per-paper manifest under `run_control/stages/8/shards/` so resume retries only missing or blank markdown files. Stage 8 uses the light/no-agent cap of 20 unless overridden.
 
-### 9 — PageIndex [PARALLEL]
-Shard promoted arxiv_ids → `paper_indexer`. Per-paper output, no merge.
+### 9 — PageIndex [DETERMINISTIC PARALLEL]
+The runner parses non-empty `08_full_markdown/{arxiv_id}.md` files directly and writes `09_pageindex/trees/{arxiv_id}.tree.json` plus `09_pageindex/nodes/{arxiv_id}.nodes.json`. Do not dispatch Codex sub-agents for this stage. The flat nodes file contains real section nodes only, not `s.00`; invalid or empty existing PageIndex artifacts are rebuilt. Each paper gets a per-paper direct manifest under `run_control/stages/9/shards/` so resume skips only valid completed indexes.
 
 ### 10 — Verified evidence [PARALLEL]
-Shard promoted arxiv_ids → `verified_evidence_extractor`. Validation: every claim has non-empty `source_node_id` + `source_lines`. Zero-claim papers re-dispatched ONCE; still empty → log + drop from chapters (not fatal).
+Shard promoted arxiv_ids that have usable markdown and a valid PageIndex → `verified_evidence_extractor`. Validation: every claim has non-empty `source_node_id` + `source_lines`. Zero-claim papers are re-dispatched once with `force=True`; if a first extraction creates `claims: []`, retry that paper once before quarantine. Still empty → record in `10_verified_evidence/quarantined_evidence.csv` and drop from verified graph/chapters (not fatal). If evidence later becomes valid, stale quarantine rows are cleared.
 
 ### 11 — Verified graph [PARALLEL fragments + merge]
-Shard promoted arxiv_ids → `verified_graph_extractor`. Merge:
+Shard only promoted arxiv_ids with usable markdown, valid PageIndex, and verified evidence claims. Before dispatch, the runner clears stale quarantine rows for papers whose evidence is now valid. Merge only those eligible fragments, ignoring stale fragments for now-ineligible papers:
 - Dedupe nodes, union edges.
 - Compare against `weak_global_graph.json`; list weak edges with no verified counterpart.
+- Validate every edge endpoint exists in the fragment and every edge source grounding matches a claim in `10_verified_evidence/{arxiv_id}.json`.
 - Write `11_verified_graph/global_graph.json` + `graph_report.md`.
 
 ### 12 — Taxonomy and outline (sequential)
-Dispatch `outline_planner` → `12_taxonomy/communities.json`, `taxonomy.json`, `outline.json` (three-tier: 8 book sections + families (no upper cap) + one method per promoted paper). Stop if `outline.methods` is empty.
+Dispatch `outline_planner` → `12_taxonomy/communities.json`, `taxonomy.json`, `outline.json` (three-tier: 8 book sections + families (no upper cap) + one method per verified full-text paper). Stop if `outline.methods` is empty.
 
 ## Stage 12.5 — Normalize outline (deterministic)
 After Stage 12 writes `outline.json` and BEFORE Stage 13 builds packs, run:
@@ -257,7 +259,7 @@ This stage is deterministic and fixes the generated book artifacts that must be 
 - `16_book/appendices/` is generated through `_build_appendices_dir` with `glossary.md`, `notation.md`, `datasets.md`, `software.md`, and `references.md`.
 
 Validation is blocking for structural contract issues:
-- every promoted paper has a method entry, unless a future explicit drop list exists;
+- every verified full-text promoted paper has a method entry; promoted papers unavailable after Stage 8 or quarantined after Stage 10 are kept in Stage 7 but excluded from method chapters;
 - no duplicate normalized family titles;
 - no empty families;
 - no noisy sentence-like family titles;
@@ -281,11 +283,11 @@ On any stage failure, append a row to `run_log.csv` and stop. Sub-agent return s
 4. `knowledge_gap_report.json` has all three buckets.
 5. Every `accepted_candidates.csv` row has `added_for_gap` + `why_needed`.
 6. `paper_scores.csv` and `promotion_candidates.csv` score every paper exactly once; `promotion_candidates.csv` is sorted by descending `final_score`; `promoted_papers.json` includes every paper with `final_score ≥ min_promote_score`. No upper cap.
-7. `08_full_markdown/` has one file per promoted paper.
-8. `09_pageindex/trees/` has one valid tree per promoted paper.
-9. Every `10_verified_evidence/*.json` has claims with `source_node_id` + `source_lines`.
-10. `11_verified_graph/global_graph.json` exists; every edge has `confidence='verified'` + `source_node_id`.
-11. `outline.json` has 8 `book_sections`, ≥ 1 `families`, one `methods` entry per promoted paper.
+7. Every promoted paper has either non-empty `08_full_markdown/{arxiv_id}.md` or an unavailable entry in `08_full_markdown/unavailable_markdown.csv`; Stage 7 promotion artifacts remain immutable.
+8. `09_pageindex/trees/` and `09_pageindex/nodes/` have valid artifacts for every full-text-available promoted paper.
+9. Every full-text/PageIndex paper has either verified evidence claims with `source_node_id` + `source_lines` or a row in `10_verified_evidence/quarantined_evidence.csv`.
+10. `11_verified_graph/global_graph.json` exists for the verified eligible set only; every edge has `confidence='verified'` + `source_node_id`.
+11. `outline.json` has 8 `book_sections`, ≥ 1 `families`, one `methods` entry per verified full-text paper.
 12. Every method pack has non-empty `section_text` on theory/algorithm/example/limitations sources; every family pack has ≥ 1 method_id; all 8 book packs exist.
 13. Every outline ID has its markdown file in the right `14_chapters/{book|families|methods}/`.
 14. Every chapter has its verification file. Every method chapter passes (`claims_unsupported=0, gaps_missing=0, form_issue_count=0, word_count ≥ 1500, equations_rendered ≥ 1` when pack provides equations); every family chapter has `word_count ≥ 1000` and the required family headings including `## Core Idea`.

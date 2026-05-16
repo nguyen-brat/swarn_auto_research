@@ -6,7 +6,7 @@ description: Promote graph edges to verified using source-grounded claims; drop 
 # Verified Graph Extraction
 
 ## Inputs
-- `arxiv_ids` (sharded slice of promoted papers)
+- `arxiv_ids` (sharded slice of promoted papers with non-quarantined verified evidence claims)
 - `10_verified_evidence/{arxiv_id}.json`
 - `05_weak_graph/fragments/{arxiv_id}.json` (node-id namespace only — weak edges are NOT auto-promoted)
 
@@ -37,3 +37,5 @@ Same sets as weak graph (Paper, Concept, Method, ...; INTRODUCES, USES, ...).
 ## Success
 - Every edge: `confidence='verified'` + non-empty `source_node_id`.
 - Every edge endpoint exists in the fragment's node set.
+- Every edge `source_node_id` + `source_lines` pair exists in the paper's verified evidence claims.
+- Do not write fragments for papers that remain quarantined after the runner clears stale rows for valid evidence.

@@ -513,6 +513,7 @@ class Thread:
         sandbox_policy: SandboxPolicy | None = None,
         service_tier: ServiceTier | None = None,
         summary: ReasoningSummary | None = None,
+        notification_timeout_s: float | None = 600.0,
     ) -> RunResult:
         turn = self.turn(
             _normalize_run_input(input),
@@ -527,7 +528,7 @@ class Thread:
             service_tier=service_tier,
             summary=summary,
         )
-        stream = turn.stream()
+        stream = turn.stream(notification_timeout_s=notification_timeout_s)
         try:
             return _collect_run_result(stream, turn_id=turn.id)
         finally:
@@ -597,6 +598,7 @@ class AsyncThread:
         sandbox_policy: SandboxPolicy | None = None,
         service_tier: ServiceTier | None = None,
         summary: ReasoningSummary | None = None,
+        notification_timeout_s: float | None = 600.0,
     ) -> RunResult:
         turn = await self.turn(
             _normalize_run_input(input),
@@ -611,7 +613,7 @@ class AsyncThread:
             service_tier=service_tier,
             summary=summary,
         )
-        stream = turn.stream()
+        stream = turn.stream(notification_timeout_s=notification_timeout_s)
         try:
             return await _collect_async_run_result(stream, turn_id=turn.id)
         finally:

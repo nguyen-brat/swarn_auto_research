@@ -65,6 +65,7 @@ description: Source-grounded artifacts (claims + verbatim equations + verbatim p
 ```
 
 ## Success
-- One file per id. Every artifact has `source_node_id` (+ `source_lines` where applicable).
+- One file per id. Claims, when present, have `source_node_id` + `source_lines`.
+- If no source-grounded claims can be extracted, write an empty `claims` array; the orchestrator retries once and then records the paper in `10_verified_evidence/quarantined_evidence.csv`.
 - `equations` non-empty when method sections contain numbered display equations.
 - `algorithms[].pseudocode` non-empty when an Algorithm/pseudocode block exists.

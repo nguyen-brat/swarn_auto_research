@@ -19,7 +19,6 @@ EXPECTED_AGENTS = {
     "knowledge_gap_classifier",
     "paper_expander",
     "paper_ranker",
-    "paper_indexer",
     "verified_evidence_extractor",
     "verified_graph_extractor",
     "outline_planner",

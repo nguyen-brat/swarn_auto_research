@@ -1,7 +1,7 @@
 {
   "_comment": "MVP-light budgets for bulk_normal_start_search. Override path via SWARN_BULK_SEARCH_CONFIG. The tool may keep hundreds of raw papers; Stage 1 keeps every paper returned by the bulk search relevance gates.",
-  "trending_months": 2,
-  "trending_month_limit": 5,
+  "trending_months": 4,
+  "trending_month_limit": 8,
   "influence_windows": [
     {
       "label": "older",
@@ -26,6 +26,17 @@
       "max_papers": 10
     },
     {
+      "label": "fresh",
+      "year_offset_start": -1,
+      "year_offset_end": null,
+      "limit": 3,
+      "min_citation_count": 3,
+      "depth": 1,
+      "citation_limit_per_level": 5,
+      "min_citation_depth": 3,
+      "max_papers": 20
+    },
+    {
       "label": "recent",
       "year_offset_start": -1,
       "year_offset_end": null,
@@ -37,9 +48,9 @@
       "max_papers": 10
     }
   ],
-  "huggingface_search_limit": 15,
-  "recommendations_seed_cap": 10,
-  "recommendations_limit": 10,
+  "huggingface_search_limit": 20,
+  "recommendations_seed_cap": 15,
+  "recommendations_limit": 15,
   "survey_limit": 2,
   "survey_citation_limit_per_level": 5,
   "survey_max_papers": 10

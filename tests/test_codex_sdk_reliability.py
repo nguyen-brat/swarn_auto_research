@@ -84,6 +84,40 @@ def test_stream_notification_timeout_uses_bounded_poll_interval(
         api_module._next_notification_timeout(99.0)
 
 
+@pytest.mark.asyncio
+async def test_async_thread_run_accepts_notification_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[float | str | None] = []
+
+    class FakeStream:
+        async def aclose(self) -> None:
+            observed.append("closed")
+
+    class FakeTurn:
+        id = "turn-1"
+
+        def stream(self, notification_timeout_s: float | None = 600.0) -> FakeStream:
+            observed.append(notification_timeout_s)
+            return FakeStream()
+
+    async def fake_turn(self, *_args, **_kwargs) -> FakeTurn:
+        return FakeTurn()
+
+    async def fake_collect(_stream, *, turn_id: str):
+        assert turn_id == "turn-1"
+        return SimpleNamespace(final_response="ok", items=[], usage=None)
+
+    monkeypatch.setattr(api_module.AsyncThread, "turn", fake_turn)
+    monkeypatch.setattr(api_module, "_collect_async_run_result", fake_collect)
+
+    thread = api_module.AsyncThread(SimpleNamespace(), "thread-1")
+    result = await thread.run("hello", notification_timeout_s=7200.0)
+
+    assert result.final_response == "ok"
+    assert observed == [7200.0, "closed"]
+
+
 def test_sdk_public_type_hints_resolve() -> None:
     assert typing.get_type_hints(Codex.thread_start)
     assert typing.get_type_hints(Codex.thread_list)

@@ -14,8 +14,8 @@ Read: 02_paper_pool/paper_pool.json, 04_weak_evidence/*.json,
 Outputs to 07_scoring/:
 - paper_scores.csv (cols: arxiv_id,topic_relevance,graph_centrality,citation_or_influence,recency,implementation_impact,chapter_need,knowledge_gap_boost,final_score)
 - promotion_candidates.csv (every paper, sorted desc by final_score)
-- promoted_papers.json (rows above threshold sorted desc;
-  schema {arxiv_id, final_score, reason, is_gap_paper})
+- promoted_papers.json (JSON object, not top-level array; schema:
+  {"promoted_papers": [{arxiv_id, final_score, reason, is_gap_paper}]})
 
 Hard rules:
 - You must write all three output files.

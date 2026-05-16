@@ -189,6 +189,23 @@ def minimal_run(tmp_path: Path) -> Path:
     return run_dir
 
 
+def write_valid_pageindex(run_dir: Path, arxiv_id: str) -> None:
+    node = {
+        "id": "s.01",
+        "title": "Paper",
+        "level": 1,
+        "start_line": 1,
+        "end_line": 1,
+        "parent_id": "s.00",
+        "summary": "Paper.",
+    }
+    write_json(
+        run_dir / "09_pageindex" / "trees" / f"{arxiv_id}.tree.json",
+        {"root": {"id": "s.00", "title": "(root)", "children": [dict(node, children=[])]}},
+    )
+    write_json(run_dir / "09_pageindex" / "nodes" / f"{arxiv_id}.nodes.json", {"s.01": node})
+
+
 def test_validate_research_book_run_reports_contract_issues(tmp_path: Path):
     run_dir = minimal_run(tmp_path)
     outline = json.loads((run_dir / "12_taxonomy" / "outline.json").read_text())
@@ -246,6 +263,93 @@ def test_validate_research_book_run_requires_each_promoted_paper_once(tmp_path: 
     issues = validate_research_book_run(run_dir)
 
     assert "promoted_paper_with_multiple_methods" in {issue["code"] for issue in issues}
+
+
+def test_validate_research_book_run_allows_unverified_promoted_without_method(tmp_path: Path):
+    run_dir = minimal_run(tmp_path)
+    outline = json.loads((run_dir / "12_taxonomy" / "outline.json").read_text())
+    outline["methods"] = [
+        method for method in outline["methods"] if method.get("arxiv_id") != "2222.22222"
+    ]
+    outline["families"][1]["method_ids"] = ["second-method-extra"]
+    write_json(run_dir / "12_taxonomy" / "outline.json", outline)
+    (run_dir / "08_full_markdown").mkdir(parents=True)
+    (run_dir / "08_full_markdown" / "1111.11111.md").write_text("# Paper\n", encoding="utf-8")
+    write_valid_pageindex(run_dir, "1111.11111")
+    write_json(
+        run_dir / "10_verified_evidence" / "1111.11111.json",
+        {"claims": [{"source_node_id": "s.01", "source_lines": [1, 1]}]},
+    )
+    (run_dir / "08_full_markdown" / "unavailable_markdown.csv").write_text(
+        "arxiv_id,error_type,error\n2222.22222,Stage8MarkdownUnavailable,missing\n",
+        encoding="utf-8",
+    )
+
+    issues = validate_research_book_run(run_dir)
+
+    assert "promoted_paper_without_method" not in {issue["code"] for issue in issues}
+
+
+def test_validate_research_book_run_rejects_method_for_unverified_promoted(tmp_path: Path):
+    run_dir = minimal_run(tmp_path)
+    (run_dir / "08_full_markdown").mkdir(parents=True)
+    (run_dir / "08_full_markdown" / "1111.11111.md").write_text("# Paper\n", encoding="utf-8")
+    write_valid_pageindex(run_dir, "1111.11111")
+    write_json(
+        run_dir / "10_verified_evidence" / "1111.11111.json",
+        {"claims": [{"source_node_id": "s.01", "source_lines": [1, 1]}]},
+    )
+    (run_dir / "08_full_markdown" / "unavailable_markdown.csv").write_text(
+        "arxiv_id,error_type,error\n2222.22222,Stage8MarkdownUnavailable,missing\n",
+        encoding="utf-8",
+    )
+
+    issues = validate_research_book_run(run_dir)
+
+    assert any(
+        issue["code"] == "unverified_promoted_paper_with_method"
+        and "2222.22222" in issue["detail"]
+        for issue in issues
+    )
+
+
+def test_validate_research_book_run_rejects_method_for_invalid_pageindex(tmp_path: Path):
+    run_dir = minimal_run(tmp_path)
+    (run_dir / "08_full_markdown").mkdir(parents=True)
+    (run_dir / "08_full_markdown" / "1111.11111.md").write_text("# Paper\n", encoding="utf-8")
+    write_json(run_dir / "09_pageindex" / "trees" / "1111.11111.tree.json", {"root": {}})
+    write_json(run_dir / "09_pageindex" / "nodes" / "1111.11111.nodes.json", {"s.01": {}})
+    write_json(
+        run_dir / "10_verified_evidence" / "1111.11111.json",
+        {"claims": [{"source_node_id": "s.01", "source_lines": [1, 1]}]},
+    )
+
+    issues = validate_research_book_run(run_dir)
+
+    assert any(
+        issue["code"] == "unverified_promoted_paper_with_method"
+        and "1111.11111" in issue["detail"]
+        for issue in issues
+    )
+
+
+def test_validate_research_book_run_rejects_method_for_evidence_outside_pageindex(tmp_path: Path):
+    run_dir = minimal_run(tmp_path)
+    (run_dir / "08_full_markdown").mkdir(parents=True)
+    (run_dir / "08_full_markdown" / "1111.11111.md").write_text("# Paper\n", encoding="utf-8")
+    write_valid_pageindex(run_dir, "1111.11111")
+    write_json(
+        run_dir / "10_verified_evidence" / "1111.11111.json",
+        {"claims": [{"source_node_id": "s.99", "source_lines": [1, 1]}]},
+    )
+
+    issues = validate_research_book_run(run_dir)
+
+    assert any(
+        issue["code"] == "unverified_promoted_paper_with_method"
+        and "1111.11111" in issue["detail"]
+        for issue in issues
+    )
 
 
 def test_validate_research_book_run_reports_noisy_family_and_section_heading_method_id(

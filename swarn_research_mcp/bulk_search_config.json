@@ -1,6 +1,6 @@
 {
     "trending_months": 12,
-    "trending_month_limit": 30,
+    "trending_month_limit": 40,
     "influence_windows": [
         {"label": "older", "year_offset_start": -4, "year_offset_end": -2,
          "limit": 8, "min_citation_count": 50, "depth": 1,
@@ -8,13 +8,16 @@
         {"label": "middle", "year_offset_start": -2, "year_offset_end": -1,
          "limit": 8, "min_citation_count": 30, "depth": 1,
          "citation_limit_per_level": 20, "min_citation_depth": 20, "max_papers": 60},
+        {"label": "fresh", "year_offset_start": -1, "year_offset_end": null,
+         "limit": 8, "min_citation_count": 5, "depth": 1,
+         "citation_limit_per_level": 10, "min_citation_depth": 5, "max_papers": 40},
         {"label": "recent", "year_offset_start": -1, "year_offset_end": null,
          "limit": 10, "min_citation_count": 10, "depth": 2,
          "citation_limit_per_level": 15, "min_citation_depth": 10, "max_papers": 80}
     ],
-    "huggingface_search_limit": 60,
-    "recommendations_seed_cap": 50,
-    "recommendations_limit": 50,
+    "huggingface_search_limit": 80,
+    "recommendations_seed_cap": 60,
+    "recommendations_limit": 60,
     "survey_limit": 5,
     "survey_citation_limit_per_level": 20,
     "survey_max_papers": 60

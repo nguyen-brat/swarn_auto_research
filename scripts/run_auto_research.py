@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import csv
+import hashlib
 import inspect
 import json
+import os
+import requests
+import signal
 import subprocess
 import sys
 import re
@@ -13,7 +18,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from time import sleep
+from typing import Any, Iterable
 from urllib.parse import quote
 
 from swarn_research_mcp.research_book import BOOK_FILE_BY_ID
@@ -22,10 +28,35 @@ from knowledge_gap_aggregator import build_digest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNS_ROOT = REPO_ROOT / "research_runs"
+AUTO_RESEARCH_BULK_SEARCH_CONFIG = REPO_ROOT / "swarn_research_mcp" / "bulk_search_config.json"
+ARXIV2MD_MARKDOWN_URL = "https://arxiv2md.org/api/markdown"
+STAGE_8_MARKDOWN_FETCH_TIMEOUT_SECONDS = 45
 DEFAULT_SHARD_TIMEOUT_SECONDS = 3 * 3600
 BOOTSTRAP_TIMEOUT_SECONDS = 6 * 3600
-DEFAULT_EXECUTOR = "sdk"
+DEFAULT_SDK_NOTIFICATION_TIMEOUT_SECONDS = 15 * 60
+DEFAULT_EXECUTOR = "sdk-cli-fallback"
+DEFAULT_MAX_EFFECTIVE_WORKERS = 20
+DEFAULT_STAGE_MAX_EFFECTIVE_WORKERS = {
+    "2": 20,
+    "3": 20,
+    "6": 10,
+    "8": 20,
+    "9": 20,
+    "10": 5,
+    "11": 10,
+    "13": 5,
+    "14": 10,
+    "15": 5,
+    "16": 20,
+    "17": 20,
+    "18": 20,
+}
+DEFAULT_STAGE_6_CODEX_RELEVANCE_SESSION_LIMIT = 1
 MIN_BOOTSTRAP_PAPER_POOL = 40
+STAGE_1_MAX_NORMAL_QUERIES = 5
+STAGE_1_MAX_SURVEY_QUERIES = 3
+STAGE_1_MIN_ASPECTS = 4
+STAGE_1_MAX_ASPECTS = 5
 DIRECT_SHARD_RULES = [
     "Execute directly in this codex exec session.",
     "Do not spawn subagents, do not run nested codex commands, and do not wait for other agents.",
@@ -47,8 +78,11 @@ PRIMARY_ARTIFACTS = {
     "3": ("05_weak_graph/weak_global_graph.json",),
     "4": ("06_expansion/known_concepts_snapshot.json",),
     "5": (
+        "06_expansion/gap_candidates_digest.json",
+        "06_expansion/extracted_concepts.json",
         "06_expansion/knowledge_gap_report.json",
         "06_expansion/expansion_need_queue.json",
+        "06_expansion/stage5_metadata.json",
     ),
     "6": ("06_expansion/expansion_round_01.json",),
     "7": (
@@ -94,6 +128,10 @@ class ShardAttemptResult:
     executor: str
     thread_id: str | None = None
     turn_id: str | None = None
+
+
+class Stage8MarkdownUnavailable(RuntimeError):
+    """Raised when upstream answers but has no usable markdown for a paper."""
 
 
 def now_iso() -> str:
@@ -174,6 +212,39 @@ def _paper_pool_ids(paper_pool: Any) -> list[str]:
 
 def load_paper_pool_arxiv_ids(run_dir: Path) -> list[str]:
     return _paper_pool_ids(_load_json(run_dir / "02_paper_pool" / "paper_pool.json"))
+
+
+def load_paper_pool_records(run_dir: Path) -> list[dict[str, Any]]:
+    paper_pool = _load_json(run_dir / "02_paper_pool" / "paper_pool.json")
+    if isinstance(paper_pool, dict):
+        records = []
+        for arxiv_id, value in paper_pool.items():
+            if isinstance(value, dict):
+                record = dict(value)
+                record.setdefault("arxiv_id", str(arxiv_id))
+            else:
+                record = {"arxiv_id": str(arxiv_id), "abstract": value}
+            records.append(record)
+        return records
+    if isinstance(paper_pool, list):
+        records = []
+        for item in paper_pool:
+            if not isinstance(item, dict) or not item.get("arxiv_id"):
+                raise RuntimeError("paper_pool.json list entries must include arxiv_id")
+            records.append(dict(item))
+        return records
+    raise RuntimeError("paper_pool.json must be a list or object")
+
+
+def write_paper_pool_records(run_dir: Path, records: list[dict[str, Any]]) -> None:
+    _write_json(run_dir / "02_paper_pool" / "paper_pool.json", records)
+    csv_path = run_dir / "02_paper_pool" / "paper_pool.csv"
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["arxiv_id"])
+        writer.writeheader()
+        for record in records:
+            writer.writerow({"arxiv_id": str(record["arxiv_id"])})
 
 
 STAGE_7_SCORE_COLUMNS = (
@@ -276,6 +347,22 @@ def _promoted_ids(promoted: Any) -> list[str]:
     return ids
 
 
+def _promoted_ids_readonly(promoted: Any) -> list[str]:
+    if isinstance(promoted, dict):
+        return _promoted_ids(promoted)
+    if isinstance(promoted, list):
+        ids: list[str] = []
+        for entry in promoted:
+            if isinstance(entry, str):
+                ids.append(entry)
+            elif isinstance(entry, dict) and entry.get("arxiv_id"):
+                ids.append(str(entry["arxiv_id"]))
+            else:
+                raise RuntimeError("promoted_papers list entries must be strings or include arxiv_id")
+        return ids
+    raise RuntimeError("promoted_papers.json must be an object or legacy list")
+
+
 def validate_stage_7_outputs(
     run_dir: Path,
     *,
@@ -368,7 +455,10 @@ def normalize_stage_7_promoted_json(
     score_rows = _load_csv_rows(run_dir / "07_scoring" / "paper_scores.csv")
     promoted_path = run_dir / "07_scoring" / "promoted_papers.json"
     promoted_data = _load_json(promoted_path)
-    entries = promoted_data.get("promoted_papers") if isinstance(promoted_data, dict) else None
+    if isinstance(promoted_data, list):
+        entries = promoted_data
+    else:
+        entries = promoted_data.get("promoted_papers") if isinstance(promoted_data, dict) else None
     if not isinstance(entries, list):
         return False
 
@@ -394,7 +484,7 @@ def normalize_stage_7_promoted_json(
         payload["final_score"] = _float_score(row, path_name="paper_scores.csv")
         normalized_entries.append(payload)
 
-    if entries == normalized_entries:
+    if isinstance(promoted_data, dict) and entries == normalized_entries:
         return False
     promoted_path.write_text(
         json.dumps({"promoted_papers": normalized_entries}, indent=2, sort_keys=True) + "\n",
@@ -403,26 +493,57 @@ def normalize_stage_7_promoted_json(
     return True
 
 
-def validate_stage_1_keep_all_contract(run_dir: Path) -> list[str]:
+def validate_stage_1_search_plan(
+    run_dir: Path,
+    *,
+    enforce_query_budget: bool = False,
+) -> None:
     search_plan = _load_json(run_dir / "00_input" / "search_plan.json")
     aspects = search_plan.get("aspects") if isinstance(search_plan, dict) else None
-    if not isinstance(aspects, list) or not (4 <= len(aspects) <= 8):
-        raise RuntimeError("Stage 1 search_plan.json must contain 4..8 aspects")
+    if not isinstance(aspects, list) or not (STAGE_1_MIN_ASPECTS <= len(aspects) <= STAGE_1_MAX_ASPECTS):
+        raise RuntimeError(
+            f"Stage 1 search_plan.json must contain {STAGE_1_MIN_ASPECTS}..{STAGE_1_MAX_ASPECTS} aspects"
+        )
+    normal_query_count = 0
+    survey_query_count = 0
     for idx, aspect in enumerate(aspects):
         if not isinstance(aspect, dict):
             raise RuntimeError("Stage 1 search_plan aspects must be objects")
         aspect_id = str(aspect.get("aspect_id") or aspect.get("id") or "").strip()
         if not aspect_id:
             raise RuntimeError("Stage 1 search_plan aspects must include non-empty ids")
-        for field in ("normal_queries", "survey_queries", "positive_keywords"):
+        for field in ("normal_queries", "positive_keywords"):
             values = aspect.get(field)
             if not isinstance(values, list) or not any(
                 isinstance(value, str) and value.strip() for value in values
             ):
                 raise RuntimeError(
                     f"Stage 1 search_plan aspect {aspect_id} must include non-empty "
-                    "normal_queries, survey_queries, and positive_keywords"
+                    "normal_queries and positive_keywords"
                 )
+        survey_values = aspect.get("survey_queries")
+        if not isinstance(survey_values, list):
+            raise RuntimeError(
+                f"Stage 1 search_plan aspect {aspect_id} must include survey_queries list"
+            )
+        normal_query_count += len(_dedupe_str_list(aspect.get("normal_queries") or []))
+        survey_query_count += len(_dedupe_str_list(survey_values))
+    if enforce_query_budget and normal_query_count > STAGE_1_MAX_NORMAL_QUERIES:
+        raise RuntimeError(
+            f"Stage 1 search_plan normal query count must be <= {STAGE_1_MAX_NORMAL_QUERIES}"
+        )
+    if enforce_query_budget and survey_query_count > STAGE_1_MAX_SURVEY_QUERIES:
+        raise RuntimeError(
+            f"Stage 1 search_plan survey query count must be <= {STAGE_1_MAX_SURVEY_QUERIES}"
+        )
+
+
+def validate_stage_1_keep_all_contract(
+    run_dir: Path,
+    *,
+    enforce_query_budget: bool = False,
+) -> list[str]:
+    validate_stage_1_search_plan(run_dir, enforce_query_budget=enforce_query_budget)
 
     seed_pool = _load_json(run_dir / "01_seed_pool" / "seed_pool_raw.json")
     if not isinstance(seed_pool, dict):
@@ -482,8 +603,8 @@ def validate_stage_1_keep_all_contract(run_dir: Path) -> list[str]:
     candidate_report = _load_json(run_dir / "02_paper_pool" / "candidate_pool_report.json")
     if not isinstance(candidate_report, dict):
         raise RuntimeError("candidate_pool_report.json must be an object")
-    if int(candidate_report.get("selected_total", -1)) != len(paper_ids):
-        raise RuntimeError("candidate_pool_report.json selected_total must match paper_pool.json")
+    if int(candidate_report.get("selected_total", -1)) != raw_kept_count:
+        raise RuntimeError("candidate_pool_report.json selected_total must match seed_pool_raw.json")
     if int(candidate_report.get("raw_kept", -1)) != raw_kept_count:
         raise RuntimeError("candidate_pool_report.json raw_kept must match seed_pool_raw.json")
     per_aspect_selected = candidate_report.get("per_aspect_selected")
@@ -521,6 +642,124 @@ def validate_stage_1_keep_all_contract(run_dir: Path) -> list[str]:
     return paper_ids
 
 
+def _dedupe_str_list(values: list[Any]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        deduped.append(text)
+    return deduped
+
+
+def _build_stage_1_search_inputs(search_plan: dict[str, Any]) -> tuple[list[str], list[str], list[str], list[str]]:
+    aspects = search_plan.get("aspects")
+    if not isinstance(aspects, list):
+        raise RuntimeError("Stage 1 search_plan.json must contain aspects list")
+    queries: list[Any] = []
+    survey_queries: list[Any] = []
+    positive_keywords: list[Any] = []
+    negative_keywords: list[Any] = []
+    for aspect in aspects:
+        if not isinstance(aspect, dict):
+            raise RuntimeError("Stage 1 search_plan aspects must be objects")
+        normal_query = _dedupe_str_list(aspect.get("normal_queries") or [])[:1]
+        survey_query = _dedupe_str_list(aspect.get("survey_queries") or [])[:1]
+        queries.extend(normal_query)
+        survey_queries.extend(survey_query)
+        positive_keywords.extend(aspect.get("positive_keywords") or [])
+        negative_keywords.extend(aspect.get("negative_keywords") or [])
+    negative_keywords.extend(search_plan.get("global_negative_keywords") or [])
+    return (
+        _dedupe_str_list(queries)[:STAGE_1_MAX_NORMAL_QUERIES],
+        _dedupe_str_list(survey_queries)[:STAGE_1_MAX_SURVEY_QUERIES],
+        _dedupe_str_list(positive_keywords),
+        _dedupe_str_list(negative_keywords),
+    )
+
+
+def _paper_pool_records(seed_papers: Any) -> list[dict[str, Any]]:
+    if isinstance(seed_papers, dict):
+        return [
+            {"arxiv_id": str(arxiv_id), "abstract": abstract}
+            for arxiv_id, abstract in seed_papers.items()
+        ]
+    if not isinstance(seed_papers, list):
+        raise RuntimeError("seed_pool_raw.json papers must be an object or list")
+    records: list[dict[str, Any]] = []
+    for item in seed_papers:
+        if isinstance(item, str):
+            records.append({"arxiv_id": item})
+            continue
+        if isinstance(item, dict) and item.get("arxiv_id"):
+            records.append(dict(item))
+            continue
+        raise RuntimeError("seed_pool_raw.json papers list entries must be strings or include arxiv_id")
+    return records
+
+
+def _materialize_stage_1_seed_pool(run_dir: Path) -> None:
+    from swarn_research_mcp.tools.paper_search import bulk_normal_start_search
+
+    search_plan = _load_json(run_dir / "00_input" / "search_plan.json")
+    if not isinstance(search_plan, dict):
+        raise RuntimeError("Stage 1 search_plan.json must be an object")
+    queries, survey_queries, positive_keywords, negative_keywords = _build_stage_1_search_inputs(search_plan)
+    seed_pool_dir = run_dir / "01_seed_pool"
+    seed_pool_dir.mkdir(parents=True, exist_ok=True)
+    config_was_unset = "SWARN_BULK_SEARCH_CONFIG" not in os.environ
+    if config_was_unset:
+        os.environ["SWARN_BULK_SEARCH_CONFIG"] = str(AUTO_RESEARCH_BULK_SEARCH_CONFIG)
+    append_run_log(
+        run_dir,
+        "1",
+        "materializing",
+        (
+            f"bulk search config={os.environ['SWARN_BULK_SEARCH_CONFIG']}; "
+            f"normal_queries={len(queries)} survey_queries={len(survey_queries)}"
+        ),
+    )
+    try:
+        result = asyncio.run(
+            bulk_normal_start_search(
+                queries=queries,
+                survey_queries=survey_queries,
+                positive_keywords=positive_keywords,
+                negative_keywords=negative_keywords,
+                output_dir=str(seed_pool_dir),
+            )
+        )
+    finally:
+        if config_was_unset:
+            os.environ.pop("SWARN_BULK_SEARCH_CONFIG", None)
+    if not isinstance(result, dict) or not isinstance(result.get("papers"), (dict, list)):
+        raise RuntimeError("bulk_normal_start_search must return a result object with papers")
+    _write_json(seed_pool_dir / "seed_pool_raw.json", result)
+
+    paper_records = _paper_pool_records(result["papers"])
+    _write_json(run_dir / "02_paper_pool" / "paper_pool.json", paper_records)
+
+    csv_path = run_dir / "02_paper_pool" / "paper_pool.csv"
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["arxiv_id"])
+        writer.writeheader()
+        for record in paper_records:
+            writer.writerow({"arxiv_id": str(record["arxiv_id"])})
+
+    _write_json(
+        run_dir / "02_paper_pool" / "candidate_pool_report.json",
+        {
+            "raw_kept": len(paper_records),
+            "selected_total": len(paper_records),
+            "selection_policy": "keep_all_bulk_search_results",
+            "per_aspect_selected": {},
+        },
+    )
+
+
 def validate_bootstrap_stage_0_10_contract(run_dir: Path) -> None:
     """Fail closed if a bootstrap child skipped real discovery.
 
@@ -542,10 +781,13 @@ def validate_bootstrap_stage_0_10_contract(run_dir: Path) -> None:
     promoted_ids = _promoted_ids(_load_json(run_dir / "07_scoring" / "promoted_papers.json"))
     if not promoted_ids:
         raise RuntimeError("promoted_papers.json must promote at least one paper")
+    unavailable_ids = _stage_8_unavailable_ids(run_dir)
     for arxiv_id in promoted_ids:
-        if not (run_dir / "08_full_markdown" / f"{arxiv_id}.md").exists():
+        if not _markdown_is_usable(run_dir / "08_full_markdown" / f"{arxiv_id}.md"):
+            if arxiv_id in unavailable_ids:
+                continue
             raise RuntimeError(f"missing full markdown for promoted paper {arxiv_id}")
-        if not (run_dir / "09_pageindex" / "trees" / f"{arxiv_id}.tree.json").exists():
+        if not _pageindex_artifacts_valid(run_dir, arxiv_id):
             raise RuntimeError(f"missing pageindex tree for promoted paper {arxiv_id}")
         evidence = _load_json(run_dir / "10_verified_evidence" / f"{arxiv_id}.json")
         claims = evidence.get("claims") if isinstance(evidence, dict) else None
@@ -595,6 +837,454 @@ def _stable_stage_11_shard_id(arxiv_id: str) -> str:
     return f"vgraph-resume-{safe_stem}"
 
 
+def _stable_stage_8_shard_id(arxiv_id: str) -> str:
+    stem = quote(str(arxiv_id), safe="").replace("%", "pct")
+    return f"full-markdown-{stem}"
+
+
+def _fetch_arxiv_markdown_sync(arxiv_id: str) -> str:
+    response = requests.get(
+        ARXIV2MD_MARKDOWN_URL,
+        params={"url": arxiv_id, "remove_toc": "false"},
+        timeout=STAGE_8_MARKDOWN_FETCH_TIMEOUT_SECONDS,
+    )
+    if response.status_code in {400, 404, 410, 422}:
+        raise Stage8MarkdownUnavailable(f"HTTP {response.status_code} from arxiv2md for {arxiv_id}")
+    response.raise_for_status()
+    return response.text
+
+
+def _record_stage_8_unavailable_markdown(
+    run_dir: Path,
+    unavailable: list[tuple[str, BaseException]],
+) -> None:
+    path = run_dir / "08_full_markdown" / "unavailable_markdown.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing: dict[str, dict[str, str]] = {}
+    if path.exists():
+        with path.open(newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                arxiv_id = row.get("arxiv_id")
+                if arxiv_id:
+                    existing[arxiv_id] = row
+    for arxiv_id, error in unavailable:
+        existing[arxiv_id] = {
+            "arxiv_id": arxiv_id,
+            "error_type": type(error).__name__,
+            "error": str(error),
+        }
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["arxiv_id", "error_type", "error"])
+        writer.writeheader()
+        for arxiv_id in sorted(existing):
+            writer.writerow(existing[arxiv_id])
+
+
+def _clear_stage_8_unavailable_markdown(run_dir: Path, arxiv_ids: list[str]) -> None:
+    path = run_dir / "08_full_markdown" / "unavailable_markdown.csv"
+    if not path.exists() or not arxiv_ids:
+        return
+    cleared = set(arxiv_ids)
+    rows: list[dict[str, str]] = []
+    with path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            arxiv_id = row.get("arxiv_id")
+            if arxiv_id and arxiv_id not in cleared:
+                rows.append(row)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["arxiv_id", "error_type", "error"])
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(
+                {
+                    "arxiv_id": row.get("arxiv_id", ""),
+                    "error_type": row.get("error_type", ""),
+                    "error": row.get("error", ""),
+                }
+            )
+
+
+def _stage_8_unavailable_ids(run_dir: Path) -> set[str]:
+    path = run_dir / "08_full_markdown" / "unavailable_markdown.csv"
+    if not path.exists():
+        return set()
+    ids: set[str] = set()
+    with path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            arxiv_id = str(row.get("arxiv_id") or "").strip()
+            if arxiv_id:
+                ids.add(arxiv_id)
+    return ids
+
+
+def _markdown_is_usable(path: Path) -> bool:
+    if not path.exists() or not path.is_file():
+        return False
+    try:
+        return bool(path.read_text(encoding="utf-8").strip())
+    except OSError:
+        return False
+
+
+def load_fulltext_available_promoted_arxiv_ids(run_dir: Path) -> list[str]:
+    return [
+        arxiv_id
+        for arxiv_id in read_promoted_arxiv_ids(run_dir)
+        if _markdown_is_usable(run_dir / "08_full_markdown" / f"{arxiv_id}.md")
+    ]
+
+
+def _flat_pageindex_nodes(data: Any) -> dict[str, Any]:
+    if isinstance(data, dict) and isinstance(data.get("nodes"), dict):
+        return data["nodes"]
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def _tree_pageindex_nodes(root: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    found: dict[str, dict[str, Any]] = {}
+
+    def walk(node: dict[str, Any], parent_id: str) -> bool:
+        node_id = str(node.get("id") or "")
+        if not node_id or node_id in found:
+            return False
+        if node_id != "s.00":
+            found[node_id] = node
+            if node.get("parent_id") != parent_id:
+                return False
+        children = node.get("children")
+        if children is None:
+            return False
+        if not isinstance(children, list):
+            return False
+        return all(isinstance(child, dict) and walk(child, node_id) for child in children)
+
+    if not walk(root, ""):
+        return {}
+    return found
+
+
+def _pageindex_artifacts_valid(run_dir: Path, arxiv_id: str) -> bool:
+    tree_path = run_dir / "09_pageindex" / "trees" / f"{arxiv_id}.tree.json"
+    nodes_path = run_dir / "09_pageindex" / "nodes" / f"{arxiv_id}.nodes.json"
+    if not tree_path.exists() or not nodes_path.exists():
+        return False
+    try:
+        tree = json.loads(tree_path.read_text(encoding="utf-8"))
+        nodes = json.loads(nodes_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    nodes = _flat_pageindex_nodes(nodes)
+    if not isinstance(tree, dict) or not nodes:
+        return False
+    if "s.00" in nodes:
+        return False
+    root = tree.get("root")
+    if not isinstance(root, dict) or not root.get("children"):
+        return False
+    tree_nodes = _tree_pageindex_nodes(root)
+    if set(tree_nodes) != set(nodes):
+        return False
+    required = {"id", "title", "level", "start_line", "end_line", "parent_id", "summary"}
+    markdown_path = run_dir / "08_full_markdown" / f"{arxiv_id}.md"
+    line_count = 0
+    if markdown_path.exists():
+        try:
+            line_count = len(markdown_path.read_text(encoding="utf-8").splitlines())
+        except OSError:
+            return False
+    for node_id, node in nodes.items():
+        if not isinstance(node, dict) or not required.issubset(node):
+            return False
+        if node.get("id") != node_id:
+            return False
+        tree_node = tree_nodes.get(node_id)
+        if not tree_node:
+            return False
+        for field in required:
+            if tree_node.get(field) != node.get(field):
+                return False
+        try:
+            start_line = int(node["start_line"])
+            end_line = int(node["end_line"])
+            if start_line < 1 or start_line > end_line:
+                return False
+            if line_count and end_line > line_count:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def load_pageindexed_promoted_arxiv_ids(run_dir: Path) -> list[str]:
+    return [
+        arxiv_id
+        for arxiv_id in load_fulltext_available_promoted_arxiv_ids(run_dir)
+        if _pageindex_artifacts_valid(run_dir, arxiv_id)
+    ]
+
+
+def _stage_10_quarantine_path(run_dir: Path) -> Path:
+    return run_dir / "10_verified_evidence" / "quarantined_evidence.csv"
+
+
+def _stage_10_quarantined_ids(run_dir: Path) -> set[str]:
+    path = _stage_10_quarantine_path(run_dir)
+    if not path.exists():
+        return set()
+    ids: set[str] = set()
+    with path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            arxiv_id = str(row.get("arxiv_id") or "").strip()
+            if arxiv_id:
+                ids.add(arxiv_id)
+    return ids
+
+
+def _record_stage_10_quarantine(run_dir: Path, rows: list[dict[str, str]]) -> None:
+    path = _stage_10_quarantine_path(run_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing: dict[str, dict[str, str]] = {}
+    if path.exists():
+        with path.open(newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                arxiv_id = row.get("arxiv_id")
+                if arxiv_id:
+                    existing[arxiv_id] = row
+    for row in rows:
+        existing[row["arxiv_id"]] = row
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["arxiv_id", "reason"])
+        writer.writeheader()
+        for arxiv_id in sorted(existing):
+            writer.writerow(
+                {
+                    "arxiv_id": existing[arxiv_id].get("arxiv_id", ""),
+                    "reason": existing[arxiv_id].get("reason", ""),
+                }
+            )
+
+
+def _clear_stage_10_quarantine(run_dir: Path, arxiv_ids: Iterable[str]) -> None:
+    path = _stage_10_quarantine_path(run_dir)
+    if not path.exists():
+        return
+    cleared = {str(arxiv_id) for arxiv_id in arxiv_ids}
+    remaining: list[dict[str, str]] = []
+    with path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            arxiv_id = str(row.get("arxiv_id") or "").strip()
+            if arxiv_id and arxiv_id not in cleared:
+                remaining.append(
+                    {
+                        "arxiv_id": arxiv_id,
+                        "reason": str(row.get("reason") or ""),
+                    }
+                )
+    if not remaining:
+        path.unlink()
+        return
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["arxiv_id", "reason"])
+        writer.writeheader()
+        writer.writerows(remaining)
+
+
+def _verified_evidence_claims(run_dir: Path, arxiv_id: str) -> list[dict[str, Any]] | None:
+    evidence_path = run_dir / "10_verified_evidence" / f"{arxiv_id}.json"
+    if not evidence_path.exists():
+        return None
+    evidence = _load_json(evidence_path)
+    claims = evidence.get("claims") if isinstance(evidence, dict) else None
+    if not isinstance(claims, list):
+        return None
+    return claims
+
+
+def _claim_grounding_matches_pageindex(
+    run_dir: Path,
+    arxiv_id: str,
+    claim: dict[str, Any],
+) -> bool:
+    nodes_path = run_dir / "09_pageindex" / "nodes" / f"{arxiv_id}.nodes.json"
+    if not nodes_path.exists():
+        return False
+    try:
+        nodes = _flat_pageindex_nodes(json.loads(nodes_path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        return False
+    source_node_id = str(claim.get("source_node_id") or "")
+    node = nodes.get(source_node_id)
+    if not isinstance(node, dict):
+        return False
+    source_lines = claim.get("source_lines")
+    if not isinstance(source_lines, list) or not source_lines:
+        return False
+    try:
+        node_start = int(node["start_line"])
+        node_end = int(node["end_line"])
+        line_values = [int(value) for value in source_lines]
+    except (KeyError, TypeError, ValueError):
+        return False
+    return all(node_start <= line <= node_end for line in line_values)
+
+
+def _verified_evidence_is_valid(run_dir: Path, arxiv_id: str) -> bool:
+    claims = _verified_evidence_claims(run_dir, arxiv_id)
+    if not claims:
+        return False
+    return all(
+        claim.get("source_node_id")
+        and claim.get("source_lines")
+        and _claim_grounding_matches_pageindex(run_dir, arxiv_id, claim)
+        for claim in claims
+    )
+
+
+def load_verified_promoted_arxiv_ids(run_dir: Path) -> list[str]:
+    verified: list[str] = []
+    for arxiv_id in load_pageindexed_promoted_arxiv_ids(run_dir):
+        if _verified_evidence_is_valid(run_dir, arxiv_id):
+            verified.append(arxiv_id)
+    return verified
+
+
+PAGEINDEX_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+
+
+def _mechanical_summary(lines: list[str]) -> str:
+    text_parts: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or PAGEINDEX_HEADING_RE.match(stripped):
+            continue
+        text_parts.append(stripped)
+        joined = " ".join(text_parts)
+        match = re.search(r"(.+?[.!?])(?:\s|$)", joined)
+        if match:
+            return match.group(1).strip()[:240]
+        if len(joined) >= 240:
+            return joined[:240].strip()
+    return " ".join(text_parts).strip()[:240]
+
+
+def _pageindex_node_for_tree(node: dict[str, Any]) -> dict[str, Any]:
+    if node.get("id") == "s.00":
+        return {
+            "id": node["id"],
+            "title": node["title"],
+            "children": node["children"],
+        }
+    return {
+        "id": node["id"],
+        "title": node["title"],
+        "level": node["level"],
+        "start_line": node["start_line"],
+        "end_line": node["end_line"],
+        "parent_id": node["parent_id"],
+        "summary": node["summary"],
+        "children": node["children"],
+    }
+
+
+def _build_pageindex(markdown: str, *, arxiv_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    lines = markdown.splitlines()
+    total_lines = max(len(lines), 1)
+    root = {
+        "id": "s.00",
+        "title": "(root)",
+        "level": 0,
+        "start_line": 1,
+        "end_line": total_lines,
+        "parent_id": None,
+        "summary": "",
+        "children": [],
+    }
+    nodes: dict[str, dict[str, Any]] = {}
+    headings: list[dict[str, Any]] = []
+    for index, line in enumerate(lines, start=1):
+        match = PAGEINDEX_HEADING_RE.match(line.strip())
+        if match:
+            headings.append(
+                {
+                    "level": len(match.group(1)),
+                    "title": match.group(2).strip(),
+                    "start_line": index,
+                    "line_index": index - 1,
+                }
+            )
+    if not headings:
+        title = "Document"
+        content_lines = lines
+        child = {
+            "id": "s.01",
+            "title": title,
+            "level": 1,
+            "start_line": 1,
+            "end_line": total_lines,
+            "parent_id": "s.00",
+            "summary": _mechanical_summary(content_lines),
+            "children": [],
+        }
+        root["children"].append(child)
+        nodes["s.01"] = {
+            key: child[key]
+            for key in ("id", "title", "level", "start_line", "end_line", "parent_id", "summary")
+        }
+        return {"arxiv_id": arxiv_id, "root": _pageindex_node_for_tree(root)}, nodes
+
+    stack: list[tuple[dict[str, Any], list[int]]] = [(root, [])]
+    for idx, heading in enumerate(headings):
+        while stack and stack[-1][0]["level"] >= heading["level"]:
+            stack.pop()
+        parent, parent_path = stack[-1] if stack else (root, [])
+        current_path = [*parent_path, len(parent["children"]) + 1]
+        node_id = "s." + ".".join(f"{part:02d}" for part in current_path)
+
+        next_boundary = total_lines
+        for next_heading in headings[idx + 1:]:
+            if next_heading["level"] <= heading["level"]:
+                next_boundary = next_heading["start_line"] - 1
+                break
+        end_line = max(heading["start_line"], next_boundary)
+        content_lines = lines[heading["line_index"] + 1:end_line]
+        node = {
+            "id": node_id,
+            "title": heading["title"],
+            "level": heading["level"],
+            "start_line": heading["start_line"],
+            "end_line": end_line,
+            "parent_id": parent["id"],
+            "summary": _mechanical_summary(content_lines),
+            "children": [],
+        }
+        parent["children"].append(node)
+        nodes[node_id] = {
+            key: node[key]
+            for key in ("id", "title", "level", "start_line", "end_line", "parent_id", "summary")
+        }
+        stack.append((node, current_path))
+    return {"arxiv_id": arxiv_id, "root": _pageindex_node_for_tree(root)}, nodes
+
+
+def _build_pageindex_for_paper(run_dir: Path, arxiv_id: str) -> None:
+    markdown_path = run_dir / "08_full_markdown" / f"{arxiv_id}.md"
+    if not markdown_path.exists():
+        raise RuntimeError(f"missing full markdown for {arxiv_id}")
+    tree, nodes = _build_pageindex(markdown_path.read_text(encoding="utf-8"), arxiv_id=arxiv_id)
+    tree_path = run_dir / "09_pageindex" / "trees" / f"{arxiv_id}.tree.json"
+    nodes_path = run_dir / "09_pageindex" / "nodes" / f"{arxiv_id}.nodes.json"
+    tree_path.parent.mkdir(parents=True, exist_ok=True)
+    nodes_path.parent.mkdir(parents=True, exist_ok=True)
+    tree_tmp = tree_path.with_suffix(tree_path.suffix + ".tmp")
+    nodes_tmp = nodes_path.with_suffix(nodes_path.suffix + ".tmp")
+    tree_tmp.write_text(json.dumps(tree, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    nodes_tmp.write_text(json.dumps(nodes, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tree_tmp.replace(tree_path)
+    nodes_tmp.replace(nodes_path)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare an auto-research durable run.")
     parser.add_argument("--topic")
@@ -603,7 +1293,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--from-stage")
     parser.add_argument("--max-workers", type=int, default=1)
-    parser.add_argument("--executor", choices=("sdk", "cli"), default=DEFAULT_EXECUTOR)
+    parser.add_argument(
+        "--executor",
+        choices=("sdk", "cli", "sdk-cli-fallback"),
+        default=DEFAULT_EXECUTOR,
+    )
     parser.add_argument("--status", action="store_true")
     return parser.parse_args(argv)
 
@@ -618,33 +1312,71 @@ def _edge_key(edge: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def merge_verified_graph_fragments(run_dir: Path) -> dict[str, Any]:
+def _source_grounding_key(item: dict[str, Any]) -> tuple[str, tuple[str, ...]]:
+    return (
+        str(item.get("source_node_id") or ""),
+        tuple(str(value) for value in item.get("source_lines") or []),
+    )
+
+
+def _verified_evidence_source_keys(run_dir: Path, arxiv_id: str) -> set[tuple[str, tuple[str, ...]]]:
+    claims = _verified_evidence_claims(run_dir, arxiv_id)
+    if claims is None:
+        return set()
+    return {
+        _source_grounding_key(claim)
+        for claim in claims
+        if claim.get("source_node_id") and claim.get("source_lines")
+    }
+
+
+def merge_verified_graph_fragments(run_dir: Path, arxiv_ids: list[str] | None = None) -> dict[str, Any]:
     fragments_dir = run_dir / "11_verified_graph" / "fragments"
     if not fragments_dir.exists():
         raise FileNotFoundError(f"missing Stage 11 fragments directory: {fragments_dir}")
 
-    fragment_paths = sorted(fragments_dir.glob("*.json"))
-    if not fragment_paths:
+    if arxiv_ids is None:
+        fragment_items = [(path, None) for path in sorted(fragments_dir.glob("*.json"))]
+    else:
+        fragment_items = [
+            (run_dir / verified_graph_fragment_relpath(arxiv_id), arxiv_id)
+            for arxiv_id in arxiv_ids
+            if (run_dir / verified_graph_fragment_relpath(arxiv_id)).exists()
+        ]
+    if not fragment_items:
         raise ValueError(f"no Stage 11 fragment JSON files found in {fragments_dir}")
 
     nodes_by_id: dict[Any, dict[str, Any]] = {}
     edges_by_key: dict[tuple[Any, ...], dict[str, Any]] = {}
 
-    for fragment_path in fragment_paths:
+    for fragment_path, expected_arxiv_id in fragment_items:
         fragment = json.loads(fragment_path.read_text())
+        fragment_arxiv_id = str(expected_arxiv_id or fragment.get("arxiv_id") or fragment_path.stem)
+        evidence_path = run_dir / "10_verified_evidence" / f"{fragment_arxiv_id}.json"
+        if not evidence_path.exists():
+            raise ValueError(f"missing verified evidence for {fragment_arxiv_id}")
+        source_keys = _verified_evidence_source_keys(run_dir, fragment_arxiv_id)
+        if not source_keys:
+            raise ValueError(f"missing verified evidence sources for {fragment_arxiv_id}")
+        fragment_node_ids: set[Any] = set()
         for node in fragment.get("nodes", []):
             node_id = node.get("id")
             if not node_id:
                 raise ValueError(f"node missing id in {fragment_path}")
+            fragment_node_ids.add(node_id)
             if node_id not in nodes_by_id:
                 nodes_by_id[node_id] = node
         for edge in fragment.get("edges", []):
             if edge.get("confidence") != "verified":
                 raise ValueError(f"unverified edge in {fragment_path}")
+            if edge.get("src") not in fragment_node_ids or edge.get("dst") not in fragment_node_ids:
+                raise ValueError(f"edge endpoint missing in {fragment_path}")
             if not edge.get("source_node_id"):
                 raise ValueError(f"edge missing source_node_id in {fragment_path}")
             if not edge.get("source_lines"):
                 raise ValueError(f"edge missing source_lines in {fragment_path}")
+            if _source_grounding_key(edge) not in source_keys:
+                raise ValueError(f"edge source not found in verified evidence in {fragment_path}")
             key = _edge_key(edge)
             if key not in edges_by_key:
                 edges_by_key[key] = edge
@@ -655,6 +1387,70 @@ def merge_verified_graph_fragments(run_dir: Path) -> dict[str, Any]:
     }
 
 
+def validate_verified_global_graph(run_dir: Path) -> None:
+    path = run_dir / "11_verified_graph" / "global_graph.json"
+    graph = _load_json(path)
+    if not isinstance(graph, dict):
+        raise RuntimeError("global_graph.json must be an object")
+    nodes = graph.get("nodes")
+    edges = graph.get("edges")
+    if not isinstance(nodes, list) or not isinstance(edges, list):
+        raise RuntimeError("global_graph.json must contain nodes and edges lists")
+    node_ids = {
+        node.get("id")
+        for node in nodes
+        if isinstance(node, dict) and node.get("id")
+    }
+    for edge in edges:
+        if not isinstance(edge, dict):
+            raise RuntimeError("global_graph.json edges must be objects")
+        if edge.get("confidence") != "verified":
+            raise RuntimeError("global_graph.json edge confidence must be verified")
+        if edge.get("src") not in node_ids or edge.get("dst") not in node_ids:
+            raise RuntimeError("global_graph.json edge endpoint missing")
+        if not edge.get("source_node_id"):
+            raise RuntimeError("global_graph.json edge missing source_node_id")
+        if not edge.get("source_lines"):
+            raise RuntimeError("global_graph.json edge missing source_lines")
+
+
+def validate_outline_contract(run_dir: Path) -> None:
+    outline = load_outline(run_dir)
+    if not isinstance(outline, dict):
+        raise RuntimeError("outline.json must be an object")
+    book_sections = outline.get("book_sections")
+    families = outline.get("families")
+    methods = outline.get("methods")
+    if not isinstance(book_sections, list) or not isinstance(families, list) or not isinstance(methods, list):
+        raise RuntimeError("outline.json must contain book_sections, families, and methods lists")
+    expected_sections = list(BOOK_FILE_BY_ID)
+    section_ids = [section.get("id") for section in book_sections if isinstance(section, dict)]
+    if section_ids != expected_sections:
+        raise RuntimeError("outline.json book_sections must use the fixed 8-section order")
+    family_ids = {
+        str(family.get("id"))
+        for family in families
+        if isinstance(family, dict) and str(family.get("id") or "").strip()
+    }
+    if not family_ids:
+        raise RuntimeError("outline.json must contain at least one family")
+    method_arxiv_ids: list[str] = []
+    for method in methods:
+        if not isinstance(method, dict):
+            raise RuntimeError("outline.json methods must be objects")
+        method_id = str(method.get("id") or "").strip()
+        arxiv_id = str(method.get("arxiv_id") or "").strip()
+        family_id = str(method.get("family_id") or "").strip()
+        if not method_id or not arxiv_id or not family_id:
+            raise RuntimeError("outline.json methods must include id, arxiv_id, and family_id")
+        if family_id not in family_ids:
+            raise RuntimeError(f"outline.json method {method_id} references missing family {family_id}")
+        method_arxiv_ids.append(arxiv_id)
+    verified_ids = load_verified_promoted_arxiv_ids(run_dir)
+    if sorted(method_arxiv_ids) != sorted(verified_ids):
+        raise RuntimeError("outline.json must contain exactly one method per verified full-text paper")
+
+
 def _load_weak_edge_count(run_dir: Path) -> int:
     weak_graph_path = run_dir / "05_weak_graph" / "weak_global_graph.json"
     if not weak_graph_path.exists():
@@ -663,8 +1459,8 @@ def _load_weak_edge_count(run_dir: Path) -> int:
     return len(weak_graph.get("edges", []))
 
 
-def run_stage_11_merge(run_dir: Path) -> None:
-    graph = merge_verified_graph_fragments(run_dir)
+def run_stage_11_merge(run_dir: Path, arxiv_ids: list[str] | None = None) -> None:
+    graph = merge_verified_graph_fragments(run_dir, arxiv_ids=arxiv_ids)
     verified_graph_dir = run_dir / "11_verified_graph"
     verified_graph_dir.mkdir(parents=True, exist_ok=True)
 
@@ -844,6 +1640,27 @@ def _run_shard_attempt(
         return _run_cli_shard_attempt(spec, timeout_seconds)
     if executor == "sdk":
         return _run_sdk_shard_attempt(run_dir, spec, timeout_seconds)
+    if executor == "sdk-cli-fallback":
+        try:
+            return _run_sdk_shard_attempt(run_dir, spec, timeout_seconds)
+        except TimeoutError as error:
+            if expected_outputs_exist(run_dir, spec):
+                return ShardAttemptResult(
+                    returncode=0,
+                    stdout="",
+                    stderr=(
+                        "SDK executor timed out after producing expected outputs; "
+                        f"accepting artifacts. SDK error: {error}"
+                    ),
+                    executor="sdk",
+                )
+            result = _run_cli_shard_attempt(spec, timeout_seconds)
+            fallback_note = (
+                "SDK executor timed out waiting for app-server notifications; "
+                f"retried with CLI executor. SDK error: {error}"
+            )
+            result.stderr = "\n".join(part for part in (fallback_note, result.stderr) if part)
+            return result
     raise ValueError(f"unknown executor: {executor}")
 
 
@@ -941,7 +1758,7 @@ def run_shards(
 ) -> None:
     if max_workers < 1:
         raise ValueError(f"max_workers must be >= 1, got {max_workers}")
-    if executor not in {"sdk", "cli"}:
+    if executor not in {"sdk", "cli", "sdk-cli-fallback"}:
         raise ValueError(f"unknown executor: {executor}")
     pending = []
     for spec in specs:
@@ -1020,8 +1837,16 @@ def run_shards(
 
 def load_promoted_arxiv_ids(run_dir: Path) -> list[str]:
     path = run_dir / "07_scoring" / "promoted_papers.json"
-    data = json.loads(path.read_text())
-    return [str(item["arxiv_id"]) for item in data.get("promoted_papers", [])]
+    data = _load_json(path)
+    if isinstance(data, dict) and isinstance(data.get("promoted_papers"), list):
+        return _promoted_ids(data)
+    if normalize_stage_7_promoted_json(run_dir):
+        append_run_log(run_dir, "7", "normalized", "promoted_papers.json rebuilt before downstream load")
+    return _promoted_ids(_load_json(path))
+
+
+def read_promoted_arxiv_ids(run_dir: Path) -> list[str]:
+    return _promoted_ids_readonly(_load_json(run_dir / "07_scoring" / "promoted_papers.json"))
 
 
 def _stage_11_prompt(run_id: str, shard_id: str, arxiv_ids: list[str]) -> str:
@@ -1053,17 +1878,11 @@ def run_stage_11(
     max_workers: int = 1,
     executor: str = DEFAULT_EXECUTOR,
 ) -> None:
-    if primary_artifact_exists(run_dir, "11"):
-        append_run_log(run_dir, "11", "skipped", "global graph already present")
-        return
-
     run_id = run_dir.name
-    promoted = load_promoted_arxiv_ids(run_dir)
-    missing = [
-        aid
-        for aid in promoted
-        if not (run_dir / verified_graph_fragment_relpath(aid)).exists()
-    ]
+    promoted = load_verified_promoted_arxiv_ids(run_dir)
+    if not promoted:
+        raise RuntimeError("Stage 11 has no verified full-text papers to merge")
+    _clear_stage_10_quarantine(run_dir, promoted)
     specs = [
         ShardSpec(
             stage="11",
@@ -1073,11 +1892,14 @@ def run_stage_11(
             prompt=_stage_11_prompt(run_id, _stable_stage_11_shard_id(aid), [aid]),
             expected_outputs=[verified_graph_fragment_relpath(aid)],
         )
-        for aid in missing
+        for aid in promoted
     ]
     if specs:
-        append_run_log(run_dir, "11", "dispatching", f"{len(specs)} missing fragments")
-        run_shards(run_dir, specs, max_workers=max_workers, executor=executor)
+        append_run_log(run_dir, "11", "dispatching", f"{len(specs)} eligible fragments")
+        for spec in specs:
+            for relpath in spec.expected_outputs:
+                (run_dir / relpath).unlink(missing_ok=True)
+        run_shards(run_dir, specs, max_workers=max_workers, executor=executor, force=True)
 
     still_missing = [
         aid
@@ -1086,7 +1908,7 @@ def run_stage_11(
     ]
     if still_missing:
         raise RuntimeError(f"Stage 11 still missing fragments: {still_missing}")
-    run_stage_11_merge(run_dir)
+    run_stage_11_merge(run_dir, arxiv_ids=promoted)
 
 
 def run_deterministic_command(run_dir: Path, stage: str, cmd: list[str]) -> None:
@@ -1221,6 +2043,32 @@ def merge_weak_graph_fragments(run_dir: Path) -> None:
     )
 
 
+def validate_weak_global_graph(run_dir: Path) -> None:
+    path = run_dir / "05_weak_graph" / "weak_global_graph.json"
+    graph = _load_json(path)
+    if not isinstance(graph, dict):
+        raise RuntimeError("weak_global_graph.json must be an object")
+    nodes = graph.get("nodes")
+    edges = graph.get("edges")
+    if not isinstance(nodes, list) or not isinstance(edges, list):
+        raise RuntimeError("weak_global_graph.json must contain nodes and edges lists")
+    node_ids = {
+        str(node.get("id"))
+        for node in nodes
+        if isinstance(node, dict) and str(node.get("id") or "").strip()
+    }
+    if not node_ids:
+        raise RuntimeError("weak_global_graph.json must contain at least one node")
+    for edge in edges:
+        if not isinstance(edge, dict):
+            raise RuntimeError("weak_global_graph.json edges must be objects")
+        src = str(edge.get("src") or edge.get("source") or "").strip()
+        dst = str(edge.get("dst") or edge.get("target") or "").strip()
+        edge_type = str(edge.get("type") or edge.get("relation") or "").strip()
+        if not src or not dst or not edge_type:
+            raise RuntimeError("weak_global_graph.json edge missing source/target/relation")
+
+
 METHOD_PACK_SECTION_TITLES = [
     "Summary",
     "Motivation",
@@ -1271,6 +2119,7 @@ def run_stage_12(
     executor: str = DEFAULT_EXECUTOR,
 ) -> None:
     if primary_artifact_exists(run_dir, "12"):
+        validate_outline_contract(run_dir)
         append_run_log(run_dir, "12", "skipped", "outline already present")
         return
     expected_outputs = [
@@ -1293,6 +2142,7 @@ def run_stage_12(
         expected_outputs=expected_outputs,
     )
     run_shards(run_dir, [spec], max_workers=max_workers, executor=executor)
+    validate_outline_contract(run_dir)
 
 
 def _expected_chapter_pack(target: dict[str, str]) -> str:
@@ -1691,6 +2541,213 @@ def _knowledge_gap_candidates(run_dir: Path) -> list[str]:
             seen.add(normalized)
             candidates.append(concept)
     return sorted(candidates, key=lambda concept: len(concept.split()), reverse=True)
+
+
+STAGE_5_SCHEMA_VERSION = "stage5_digest_classifier_v1"
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _stage_5_paths(run_dir: Path) -> dict[str, Path]:
+    expansion = run_dir / "06_expansion"
+    return {
+        "digest": expansion / "gap_candidates_digest.json",
+        "extracted": expansion / "extracted_concepts.json",
+        "report": expansion / "knowledge_gap_report.json",
+        "queue": expansion / "expansion_need_queue.json",
+        "metadata": expansion / "stage5_metadata.json",
+    }
+
+
+def _stage_5_digest_concepts(run_dir: Path) -> set[str]:
+    digest = _load_json(_stage_5_paths(run_dir)["digest"])
+    candidates = digest.get("candidates") if isinstance(digest, dict) else None
+    if not isinstance(candidates, list):
+        raise RuntimeError("gap_candidates_digest.json candidates must be a list")
+    concepts: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        concept = candidate.get("concept")
+        if isinstance(concept, str) and concept.strip():
+            concepts.add(concept.strip())
+    return concepts
+
+
+def _stage_5_report_items(report: dict[str, Any]) -> list[Any]:
+    out: list[Any] = []
+    for key in ("known", "unknown_minor", "knowledge_gaps"):
+        items = report.get(key, [])
+        if not isinstance(items, list):
+            raise RuntimeError(f"knowledge_gap_report.json {key} must be a list")
+        out.extend(items)
+    return out
+
+
+def validate_stage_5_outputs(run_dir: Path) -> None:
+    paths = _stage_5_paths(run_dir)
+    for name, path in paths.items():
+        if name == "metadata":
+            continue
+        if not path.exists():
+            raise RuntimeError(f"Stage 5 missing required output: {path.name}")
+
+    digest_concepts = _stage_5_digest_concepts(run_dir)
+
+    extracted = _load_json(paths["extracted"])
+    extracted_items = extracted.get("concepts") if isinstance(extracted, dict) else extracted
+    if not isinstance(extracted_items, list):
+        raise RuntimeError("extracted_concepts.json must contain a concepts list")
+    for item in extracted_items:
+        concept = _gap_concept_text(item)
+        if concept and concept not in digest_concepts:
+            raise RuntimeError(
+                f"extracted_concepts.json concept is not in digest: {concept}"
+            )
+
+    report = _load_json(paths["report"])
+    if not isinstance(report, dict):
+        raise RuntimeError("knowledge_gap_report.json must be an object")
+    for item in _stage_5_report_items(report):
+        concept = _gap_concept_text(item)
+        if concept and concept not in digest_concepts:
+            raise RuntimeError(
+                f"knowledge_gap_report.json concept is not in digest: {concept}"
+            )
+
+    queue = _load_json(paths["queue"])
+    items = queue.get("items") if isinstance(queue, dict) else None
+    if not isinstance(items, list):
+        raise RuntimeError("expansion_need_queue.json items must be a list")
+    if len(items) > 5:
+        raise RuntimeError("expansion_need_queue.json must contain at most 5 items")
+    for item in items:
+        if not isinstance(item, dict):
+            raise RuntimeError("expansion_need_queue.json items must be objects")
+        concept = _gap_concept_text(item)
+        if not concept:
+            raise RuntimeError("expansion_need_queue.json item missing concept")
+        if concept not in digest_concepts:
+            raise RuntimeError(
+                f"expansion_need_queue.json concept is not in digest: {concept}"
+            )
+        priority = item.get("priority")
+        if not isinstance(priority, (int, float)) or float(priority) < 0.70:
+            raise RuntimeError(
+                f"expansion_need_queue.json priority must be >= 0.70 for {concept}"
+            )
+        queries = item.get("search_queries")
+        valid_queries = [
+            query for query in queries or []
+            if isinstance(query, str) and query.strip()
+        ]
+        if len(valid_queries) < 2:
+            raise RuntimeError(
+                f"expansion_need_queue.json item must include at least 2 search_queries for {concept}"
+            )
+
+
+def write_stage_5_metadata(run_dir: Path) -> None:
+    paths = _stage_5_paths(run_dir)
+    payload = {
+        "schema_version": STAGE_5_SCHEMA_VERSION,
+        "agent": "knowledge_gap_classifier",
+        "digest_sha256": _sha256_file(paths["digest"]),
+        "extracted_sha256": _sha256_file(paths["extracted"]),
+        "report_sha256": _sha256_file(paths["report"]),
+        "queue_sha256": _sha256_file(paths["queue"]),
+        "generated_at": now_iso(),
+    }
+    _write_json(paths["metadata"], payload)
+
+
+def stage_5_outputs_valid(run_dir: Path) -> bool:
+    paths = _stage_5_paths(run_dir)
+    if not all(path.exists() for path in paths.values()):
+        return False
+    try:
+        validate_stage_5_outputs(run_dir)
+        metadata = _load_json(paths["metadata"])
+    except Exception:
+        return False
+    return (
+        metadata.get("schema_version") == STAGE_5_SCHEMA_VERSION
+        and metadata.get("agent") == "knowledge_gap_classifier"
+        and metadata.get("digest_sha256") == _sha256_file(paths["digest"])
+        and metadata.get("extracted_sha256") == _sha256_file(paths["extracted"])
+        and metadata.get("report_sha256") == _sha256_file(paths["report"])
+        and metadata.get("queue_sha256") == _sha256_file(paths["queue"])
+    )
+
+
+def _stage_17_learning_suggestions(run_dir: Path) -> str:
+    paths = _stage_5_paths(run_dir)
+    digest = _load_json(paths["digest"])
+    report = _load_json(paths["report"])
+    queue = _load_json(paths["queue"])
+
+    candidate_by_concept = {
+        candidate.get("concept"): candidate
+        for candidate in digest.get("candidates", [])
+        if isinstance(candidate, dict) and isinstance(candidate.get("concept"), str)
+    }
+    queued_items = [
+        item for item in queue.get("items", [])
+        if isinstance(item, dict) and _gap_concept_text(item)
+    ]
+    queued_concepts = {_gap_concept_text(item) for item in queued_items}
+    report_gap_concepts = []
+    seen: set[str] = set()
+    for item in report.get("knowledge_gaps", []):
+        concept = _gap_concept_text(item)
+        if concept and concept not in seen and concept in candidate_by_concept:
+            seen.add(concept)
+            report_gap_concepts.append(concept)
+
+    def evidence_text(concept: str) -> str:
+        candidate = candidate_by_concept.get(concept) or {}
+        refs = candidate.get("evidence_refs") or []
+        arxiv_ids = [
+            str(ref.get("arxiv_id"))
+            for ref in refs
+            if isinstance(ref, dict) and ref.get("arxiv_id")
+        ]
+        if arxiv_ids:
+            return f" Evidence: {', '.join(arxiv_ids[:3])}."
+        return ""
+
+    lines = [
+        "# Suggested Knowledge Base Additions",
+        "",
+        f"Run: {run_dir.name}",
+        "",
+        "## Queued Expansion Gaps",
+        "",
+    ]
+    if queued_items:
+        for item in queued_items:
+            concept = _gap_concept_text(item)
+            priority = item.get("priority", "")
+            lines.append(f"- {concept} (priority: {priority}).{evidence_text(concept)}")
+    else:
+        lines.append("- No queued expansion gaps.")
+
+    remaining = [concept for concept in report_gap_concepts if concept not in queued_concepts]
+    remaining.sort(
+        key=lambda concept: candidate_by_concept.get(concept, {}).get("importance", 0),
+        reverse=True,
+    )
+    lines.extend(["", "## Additional High-Importance Gaps", ""])
+    if remaining:
+        for concept in remaining[:10]:
+            importance = candidate_by_concept.get(concept, {}).get("importance", "")
+            lines.append(f"- {concept} (importance: {importance}).{evidence_text(concept)}")
+    else:
+        lines.append("- No additional high-importance gaps.")
+
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _concept_match_spans(concept: str, evidence_text: str) -> list[tuple[int, int]]:
@@ -2424,24 +3481,10 @@ def run_stage_17(run_dir: Path, *, executor: str = DEFAULT_EXECUTOR) -> None:
             run_dir, "17", "skipped", "learning suggestions already present"
         )
         return
-    spec = ShardSpec(
-        stage="17",
-        shard_id="learning-suggestions",
-        agent="knowledge_gap_detector",
-        model="gpt-5.4-mini",
-        prompt="\n".join(
-            [
-                "Read AGENTS.md first.",
-                "Run Stage 17 learning suggestions only.",
-                f"run_id={run_dir.name}",
-                "Read 06_expansion/knowledge_gap_report.json.",
-                "Write 17_learning_suggestions/knowledge_to_add.md.",
-                "Do not modify .agents/knowledge_base.md.",
-            ]
-        ),
-        expected_outputs=["17_learning_suggestions/knowledge_to_add.md"],
-    )
-    run_shards(run_dir, [spec], executor=executor)
+    out = run_dir / "17_learning_suggestions" / "knowledge_to_add.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(_stage_17_learning_suggestions(run_dir), encoding="utf-8")
+    append_run_log(run_dir, "17", "completed", "learning suggestions written")
 
 
 def slugify_topic(topic: str) -> str:
@@ -2528,24 +3571,16 @@ def run_stage_1(run_dir: Path, *, executor: str = DEFAULT_EXECUTOR) -> None:
                 f"topic={topic}",
                 "Follow .codex/agents/query_planner.toml and .agents/skills/query-planning/SKILL.md.",
                 "Write 00_input/search_plan.json.",
-                "Call bulk_normal_start_search exactly once with query-planner unions.",
-                "Write 01_seed_pool/seed_pool_raw.json and preserve bulk_search_results_<timestamp>.json in 01_seed_pool/.",
-                "Build 02_paper_pool/paper_pool.json and paper_pool.csv from every paper in seed_pool_raw['papers']; do not downselect.",
-                "Write 02_paper_pool/candidate_pool_report.json with raw_kept, selected_total, selection_policy='keep_all_bulk_search_results', and optional per_aspect_selected={}.",
                 "Do not run Stage 2 or later.",
                 "Return the standard short success string.",
             ]
         ),
-        expected_outputs=[
-            "00_input/search_plan.json",
-            "01_seed_pool/seed_pool_raw.json",
-            "02_paper_pool/paper_pool.json",
-            "02_paper_pool/paper_pool.csv",
-            "02_paper_pool/candidate_pool_report.json",
-        ],
+        expected_outputs=["00_input/search_plan.json"],
     )
     run_shards(run_dir, [spec], executor=executor, timeout_seconds=BOOTSTRAP_TIMEOUT_SECONDS)
-    paper_ids = validate_stage_1_keep_all_contract(run_dir)
+    validate_stage_1_search_plan(run_dir, enforce_query_budget=True)
+    _materialize_stage_1_seed_pool(run_dir)
+    paper_ids = validate_stage_1_keep_all_contract(run_dir, enforce_query_budget=True)
     append_run_log(run_dir, "1", "completed", f"paper pool contains {len(paper_ids)} papers")
 
 
@@ -2590,15 +3625,16 @@ def run_stage_2(run_dir: Path, *, max_workers: int = 1, executor: str = DEFAULT_
 
 
 def run_stage_3(run_dir: Path, *, max_workers: int = 1, executor: str = DEFAULT_EXECUTOR) -> None:
-    if primary_artifact_exists(run_dir, "3"):
-        append_run_log(run_dir, "3", "skipped", "weak graph already present")
-        return
     paper_ids = load_paper_pool_arxiv_ids(run_dir)
     missing = [
         arxiv_id
         for arxiv_id in paper_ids
         if not (run_dir / "05_weak_graph" / "fragments" / f"{arxiv_id}.json").exists()
     ]
+    if primary_artifact_exists(run_dir, "3") and not missing:
+        validate_weak_global_graph(run_dir)
+        append_run_log(run_dir, "3", "skipped", "weak graph already present")
+        return
     specs = []
     for idx, chunk in enumerate(chunked(missing, 5), start=1):
         shard_id = f"weak-graph-{idx:03d}"
@@ -2650,13 +3686,18 @@ def run_stage_4(run_dir: Path, *, executor: str = DEFAULT_EXECUTOR) -> None:
 
 def run_stage_5_aggregate(run_dir: Path) -> None:
     """Stage 5a (Python): build gap_candidates_digest.json from weak graph + evidence."""
+    weak_graph = run_dir / "05_weak_graph" / "weak_global_graph.json"
+    if not weak_graph.exists():
+        raise RuntimeError("Stage 5 requires 05_weak_graph/weak_global_graph.json")
+    evidence_dir = run_dir / "04_weak_evidence"
+    if not evidence_dir.exists() or not any(evidence_dir.glob("*.json")):
+        raise RuntimeError("Stage 5 requires 04_weak_evidence/*.json")
+    kb_path = run_dir / "06_expansion" / "known_concepts_snapshot.json"
+    if not kb_path.exists():
+        raise RuntimeError("Stage 5 requires 06_expansion/known_concepts_snapshot.json")
     digest_path = run_dir / "06_expansion" / "gap_candidates_digest.json"
     if digest_path.exists():
         append_run_log(run_dir, "5a", "skipped", "digest already present")
-        return
-    weak_graph = run_dir / "05_weak_graph" / "weak_global_graph.json"
-    if not weak_graph.exists():
-        append_run_log(run_dir, "5a", "skipped", "no weak graph yet")
         return
     digest = build_digest(run_dir, run_id=run_dir.name)
     append_run_log(
@@ -2666,10 +3707,12 @@ def run_stage_5_aggregate(run_dir: Path) -> None:
 
 
 def run_stage_5(run_dir: Path, *, executor: str = DEFAULT_EXECUTOR) -> None:
-    if primary_artifact_exists(run_dir, "5"):
-        append_run_log(run_dir, "5", "skipped", "knowledge gap report already present")
+    if stage_5_outputs_valid(run_dir):
+        append_run_log(run_dir, "5", "skipped", "knowledge gap outputs already valid")
         return
     run_stage_5_aggregate(run_dir)
+    if not (run_dir / "06_expansion" / "gap_candidates_digest.json").exists():
+        raise RuntimeError("Stage 5 requires 06_expansion/gap_candidates_digest.json")
     spec = ShardSpec(
         stage="5",
         shard_id="knowledge-gaps",
@@ -2683,11 +3726,14 @@ def run_stage_5(run_dir: Path, *, executor: str = DEFAULT_EXECUTOR) -> None:
             {},
         ),
         expected_outputs=[
+            "06_expansion/extracted_concepts.json",
             "06_expansion/knowledge_gap_report.json",
             "06_expansion/expansion_need_queue.json",
         ],
     )
-    run_shards(run_dir, [spec], executor=executor)
+    run_shards(run_dir, [spec], executor=executor, force=True)
+    validate_stage_5_outputs(run_dir)
+    write_stage_5_metadata(run_dir)
     queue = _load_json(run_dir / "06_expansion" / "expansion_need_queue.json")
     items = queue.get("items", []) if isinstance(queue, dict) else []
     append_run_log(
@@ -2705,6 +3751,101 @@ def load_expansion_gap_items(run_dir: Path) -> list[dict[str, Any]]:
 
 def _first_existing_path(paths: list[Path]) -> Path | None:
     return next((path for path in paths if path.exists()), None)
+
+
+def _accepted_expansion_rows(run_dir: Path) -> list[dict[str, str]]:
+    path = run_dir / "06_expansion" / "accepted_candidates.csv"
+    if not path.exists():
+        return []
+    with path.open(newline="") as handle:
+        return [dict(row) for row in csv.DictReader(handle) if row.get("arxiv_id")]
+
+
+def merge_accepted_expansion_into_paper_pool(run_dir: Path) -> int:
+    rows = _accepted_expansion_rows(run_dir)
+    if not rows:
+        return 0
+    records = load_paper_pool_records(run_dir)
+    existing_ids = {str(record.get("arxiv_id")) for record in records}
+    added = 0
+    for row in rows:
+        arxiv_id = str(row.get("arxiv_id") or "").strip()
+        if not arxiv_id or arxiv_id in existing_ids:
+            continue
+        gap = str(row.get("unknown_concept") or row.get("gap_id") or "").strip()
+        record = {
+            "arxiv_id": arxiv_id,
+            "title": str(row.get("title") or "").strip(),
+            "status": "DISCOVERED",
+            "source": "knowledge_gap_expansion",
+            "added_for_gap": gap,
+            "gap_id": str(row.get("gap_id") or "").strip(),
+            "why_needed": str(row.get("why_needed") or "").strip(),
+            "candidate_role": str(row.get("candidate_role") or "").strip(),
+            "expansion_round": 1,
+        }
+        score = str(row.get("score") or "").strip()
+        if score:
+            record["score"] = score
+        records.append(record)
+        existing_ids.add(arxiv_id)
+        added += 1
+    if added:
+        write_paper_pool_records(run_dir, records)
+    return added
+
+
+def validate_stage_6_outputs(run_dir: Path) -> None:
+    expansion_dir = run_dir / "06_expansion"
+    round_path = expansion_dir / "expansion_round_01.json"
+    accepted_path = expansion_dir / "accepted_candidates.csv"
+    rejected_path = expansion_dir / "rejected_candidates.csv"
+    for path in (round_path, accepted_path, rejected_path):
+        if not path.exists():
+            raise RuntimeError(f"Stage 6 missing required output: {path.name}")
+    round_data = json.loads(round_path.read_text())
+    if not isinstance(round_data, dict):
+        raise RuntimeError("expansion_round_01.json must be an object")
+    if round_data.get("status") not in {"completed", "skipped"}:
+        raise RuntimeError("expansion_round_01.json status must be completed or skipped")
+    if not isinstance(round_data.get("items"), list):
+        raise RuntimeError("expansion_round_01.json items must be a list")
+    accepted_rows = _accepted_expansion_rows(run_dir)
+    pool_ids = set(load_paper_pool_arxiv_ids(run_dir))
+    for row in accepted_rows:
+        arxiv_id = str(row.get("arxiv_id") or "").strip()
+        if not arxiv_id:
+            raise RuntimeError("accepted_candidates.csv rows must include arxiv_id")
+        if arxiv_id not in pool_ids:
+            raise RuntimeError(f"accepted Stage 6 paper missing from paper_pool.json: {arxiv_id}")
+        if not str(row.get("unknown_concept") or row.get("gap_id") or "").strip():
+            raise RuntimeError(f"accepted_candidates.csv row missing gap for {arxiv_id}")
+        if not str(row.get("why_needed") or "").strip():
+            raise RuntimeError(f"accepted_candidates.csv row missing why_needed for {arxiv_id}")
+
+
+def backfill_expanded_paper_artifacts(
+    run_dir: Path,
+    *,
+    max_workers: int,
+    executor: str,
+) -> None:
+    missing_weak = [
+        arxiv_id
+        for arxiv_id in load_paper_pool_arxiv_ids(run_dir)
+        if not (run_dir / "04_weak_evidence" / f"{arxiv_id}.json").exists()
+    ]
+    if missing_weak:
+        append_run_log(run_dir, "6", "backfill", f"weak evidence for {len(missing_weak)} expanded papers")
+        run_stage_2(run_dir, max_workers=max_workers, executor=executor)
+    missing_graph = [
+        arxiv_id
+        for arxiv_id in load_paper_pool_arxiv_ids(run_dir)
+        if not (run_dir / "05_weak_graph" / "fragments" / f"{arxiv_id}.json").exists()
+    ]
+    if missing_graph:
+        append_run_log(run_dir, "6", "backfill", f"weak graph for {len(missing_graph)} expanded papers")
+        run_stage_3(run_dir, max_workers=max_workers, executor=executor)
 
 
 def merge_expansion_shards(run_dir: Path, shard_ids: list[str]) -> None:
@@ -2725,7 +3866,11 @@ def merge_expansion_shards(run_dir: Path, shard_ids: list[str]) -> None:
         if round_path:
             data = json.loads(round_path.read_text())
             if isinstance(data, dict):
-                round_items.extend(data.get("items", []) or [])
+                items = data.get("items", []) or []
+                if isinstance(items, list) and items:
+                    round_items.extend(items)
+                elif data.get("status") == "completed":
+                    round_items.append(data)
         for paths, rows in (
             (
                 [
@@ -2760,11 +3905,19 @@ def merge_expansion_shards(run_dir: Path, shard_ids: list[str]) -> None:
         )
         + "\n"
     )
+    merge_accepted_expansion_into_paper_pool(run_dir)
+    validate_stage_6_outputs(run_dir)
 
 
 def run_stage_6(run_dir: Path, *, max_workers: int = 1, executor: str = DEFAULT_EXECUTOR) -> None:
     if primary_artifact_exists(run_dir, "6"):
-        append_run_log(run_dir, "6", "skipped", "expansion round already present")
+        added = merge_accepted_expansion_into_paper_pool(run_dir)
+        validate_stage_6_outputs(run_dir)
+        backfill_expanded_paper_artifacts(run_dir, max_workers=max_workers, executor=executor)
+        detail = "expansion round already present"
+        if added:
+            detail += f"; merged {added} accepted papers into pool"
+        append_run_log(run_dir, "6", "skipped", detail)
         return
     gap_items = load_expansion_gap_items(run_dir)
     expansion_dir = run_dir / "06_expansion"
@@ -2806,8 +3959,20 @@ def run_stage_6(run_dir: Path, *, max_workers: int = 1, executor: str = DEFAULT_
                 ],
             )
         )
-    run_shards(run_dir, specs, max_workers=max_workers, executor=executor)
+    previous_relevance_limit = os.environ.get("SWARN_CODEX_RELEVANCE_SESSION_LIMIT")
+    os.environ["SWARN_CODEX_RELEVANCE_SESSION_LIMIT"] = os.environ.get(
+        "SWARN_STAGE_6_CODEX_RELEVANCE_SESSION_LIMIT",
+        previous_relevance_limit or str(DEFAULT_STAGE_6_CODEX_RELEVANCE_SESSION_LIMIT),
+    )
+    try:
+        run_shards(run_dir, specs, max_workers=max_workers, executor=executor)
+    finally:
+        if previous_relevance_limit is None:
+            os.environ.pop("SWARN_CODEX_RELEVANCE_SESSION_LIMIT", None)
+        else:
+            os.environ["SWARN_CODEX_RELEVANCE_SESSION_LIMIT"] = previous_relevance_limit
     merge_expansion_shards(run_dir, shard_ids)
+    backfill_expanded_paper_artifacts(run_dir, max_workers=max_workers, executor=executor)
     append_run_log(run_dir, "6", "completed", f"expanded {len(gap_items)} gaps")
 
 
@@ -2856,116 +4021,295 @@ def run_stage_7(run_dir: Path, *, executor: str = DEFAULT_EXECUTOR) -> None:
     append_run_log(run_dir, "7", "completed", f"{len(paper_ids)} scored, {len(promoted_ids)} promoted")
 
 
-def run_stage_8(run_dir: Path, *, executor: str = DEFAULT_EXECUTOR) -> None:
-    promoted_ids = load_promoted_arxiv_ids(run_dir)
+def run_stage_8(
+    run_dir: Path,
+    *,
+    max_workers: int = 1,
+    executor: str = DEFAULT_EXECUTOR,
+) -> None:
+    del executor
+    promoted_ids = read_promoted_arxiv_ids(run_dir)
     missing = [
         arxiv_id
         for arxiv_id in promoted_ids
-        if not (run_dir / "08_full_markdown" / f"{arxiv_id}.md").exists()
+        if not _markdown_is_usable(run_dir / "08_full_markdown" / f"{arxiv_id}.md")
     ]
     if not missing:
         append_run_log(run_dir, "8", "skipped", "markdown already present")
         return
-    spec = ShardSpec(
-        stage="8",
-        shard_id="full-markdown",
-        agent="knowledge_base_reader",
-        model="gpt-5.4-mini",
-        prompt="\n".join(
-            [
-                "Read AGENTS.md first.",
-                *DIRECT_SHARD_RULES,
-                "Run Stage 8 full markdown fetch only.",
-                f"run_id={run_dir.name}",
-                f"arxiv_ids={missing}",
-                "For each arxiv_id, call get_paper_markdown and write 08_full_markdown/{arxiv_id}.md.",
-                "Do not run Stage 9 or later.",
-                "Return the standard short success string.",
-            ]
-        ),
-        expected_outputs=[f"08_full_markdown/{arxiv_id}.md" for arxiv_id in missing],
+    failures: list[tuple[str, BaseException]] = []
+    unavailable: list[tuple[str, BaseException]] = []
+    successes: list[str] = []
+
+    def fetch_one(arxiv_id: str) -> None:
+        spec = ShardSpec(
+            stage="8",
+            shard_id=_stable_stage_8_shard_id(arxiv_id),
+            agent="direct_markdown_fetcher",
+            model="python",
+            prompt=f"fetch arxiv markdown for {arxiv_id}",
+            expected_outputs=[f"08_full_markdown/{arxiv_id}.md"],
+        )
+        attempt = _next_shard_attempt(run_dir, spec)
+        shard_dir = _shard_dir(run_dir, spec)
+        stdout_path = shard_dir / f"{spec.shard_id}.attempt-{attempt}.stdout.txt"
+        stderr_path = shard_dir / f"{spec.shard_id}.attempt-{attempt}.stderr.txt"
+        output_path = run_dir / "08_full_markdown" / f"{arxiv_id}.md"
+        attempt_error: BaseException | None = None
+        try:
+            markdown = _fetch_arxiv_markdown_sync(arxiv_id)
+            if not markdown.strip():
+                if output_path.exists() and not _markdown_is_usable(output_path):
+                    output_path.unlink()
+                raise Stage8MarkdownUnavailable(f"empty markdown returned for {arxiv_id}")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+            tmp_path.write_text(markdown, encoding="utf-8")
+            tmp_path.replace(output_path)
+            successes.append(arxiv_id)
+            result = ShardAttemptResult(
+                returncode=0,
+                stdout=f"ok: wrote {output_path.relative_to(run_dir)}\n",
+                stderr="",
+                executor="direct",
+            )
+            status = "completed"
+        except BaseException as error:
+            attempt_error = error
+            result = ShardAttemptResult(
+                returncode=None,
+                stdout="",
+                stderr="".join(traceback.format_exception(type(error), error, error.__traceback__)),
+                executor="direct",
+            )
+            status = "unavailable" if isinstance(error, Stage8MarkdownUnavailable) else "failed"
+        stdout_path.write_text(result.stdout or "", encoding="utf-8")
+        stderr_path.write_text(result.stderr or "", encoding="utf-8")
+        _write_shard_manifest(
+            run_dir,
+            spec,
+            attempt=attempt,
+            status=status,
+            result=result,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+        )
+        if status != "completed":
+            assert attempt_error is not None
+            raise attempt_error
+
+    worker_count = min(max_workers, len(missing))
+    if worker_count <= 1:
+        for arxiv_id in missing:
+            try:
+                fetch_one(arxiv_id)
+            except BaseException as error:
+                if isinstance(error, Stage8MarkdownUnavailable):
+                    unavailable.append((arxiv_id, error))
+                else:
+                    failures.append((arxiv_id, error))
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            futures = {pool.submit(fetch_one, arxiv_id): arxiv_id for arxiv_id in missing}
+            for future in as_completed(futures):
+                arxiv_id = futures[future]
+                try:
+                    future.result()
+                except BaseException as error:
+                    if isinstance(error, Stage8MarkdownUnavailable):
+                        unavailable.append((arxiv_id, error))
+                    else:
+                        failures.append((arxiv_id, error))
+    if successes:
+        _clear_stage_8_unavailable_markdown(run_dir, successes)
+    if unavailable:
+        _record_stage_8_unavailable_markdown(run_dir, unavailable)
+        append_run_log(
+            run_dir,
+            "8",
+            "quarantined",
+            f"{len(unavailable)} promoted paper(s) kept in Stage 7 but skipped downstream because markdown was unavailable",
+        )
+    if failures:
+        append_run_log(
+            run_dir,
+            "8",
+            "failed",
+            f"{len(failures)} markdown fetches failed; first={failures[0][0]}",
+        )
+        raise RuntimeError(
+            f"{len(failures)} markdown fetch(es) failed; first={failures[0][0]}: {failures[0][1]}"
+        )
+    append_run_log(
+        run_dir,
+        "8",
+        "completed",
+        f"markdown fetched for {len(missing) - len(unavailable)} papers; unavailable={len(unavailable)}",
     )
-    run_shards(run_dir, [spec], executor=executor, timeout_seconds=BOOTSTRAP_TIMEOUT_SECONDS)
-    append_run_log(run_dir, "8", "completed", f"markdown fetched for {len(missing)} papers")
 
 
 def run_stage_9(run_dir: Path, *, max_workers: int = 1, executor: str = DEFAULT_EXECUTOR) -> None:
-    promoted_ids = load_promoted_arxiv_ids(run_dir)
+    del executor
+    promoted_ids = load_fulltext_available_promoted_arxiv_ids(run_dir)
     missing = [
         arxiv_id
         for arxiv_id in promoted_ids
-        if not (run_dir / "09_pageindex" / "trees" / f"{arxiv_id}.tree.json").exists()
-        or not (run_dir / "09_pageindex" / "nodes" / f"{arxiv_id}.nodes.json").exists()
+        if not _pageindex_artifacts_valid(run_dir, arxiv_id)
     ]
-    specs = []
-    for idx, chunk in enumerate(chunked(missing, 2), start=1):
-        shard_id = f"pageindex-{idx:03d}"
-        specs.append(
-            ShardSpec(
-                stage="9",
-                shard_id=shard_id,
-                agent="paper_indexer",
-                model="gpt-5.4-mini",
-                prompt=_generic_agent_prompt(
-                    ".codex/agents/paper_indexer.toml",
-                    run_dir.name,
-                    "9",
-                    shard_id,
-                    {"arxiv_ids": chunk},
-                ),
-                expected_outputs=[
-                    output
-                    for arxiv_id in chunk
-                    for output in (
-                        f"09_pageindex/trees/{arxiv_id}.tree.json",
-                        f"09_pageindex/nodes/{arxiv_id}.nodes.json",
-                    )
-                ],
-            )
+    failures: list[tuple[str, BaseException]] = []
+
+    def build_one(arxiv_id: str) -> None:
+        shard_stem = quote(str(arxiv_id), safe="").replace("%", "pct")
+        spec = ShardSpec(
+            stage="9",
+            shard_id=f"pageindex-{shard_stem}",
+            agent="direct_pageindex_builder",
+            model="python",
+            prompt=f"build pageindex for {arxiv_id}",
+            expected_outputs=[
+                f"09_pageindex/trees/{arxiv_id}.tree.json",
+                f"09_pageindex/nodes/{arxiv_id}.nodes.json",
+            ],
         )
-    if specs:
-        run_shards(run_dir, specs, max_workers=max_workers, executor=executor)
+        attempt = _next_shard_attempt(run_dir, spec)
+        shard_dir = _shard_dir(run_dir, spec)
+        stdout_path = shard_dir / f"{spec.shard_id}.attempt-{attempt}.stdout.txt"
+        stderr_path = shard_dir / f"{spec.shard_id}.attempt-{attempt}.stderr.txt"
+        attempt_error: BaseException | None = None
+        try:
+            _build_pageindex_for_paper(run_dir, arxiv_id)
+            nodes = _load_json(run_dir / "09_pageindex" / "nodes" / f"{arxiv_id}.nodes.json")
+            result = ShardAttemptResult(
+                returncode=0,
+                stdout=f"ok: indexed {arxiv_id}, {len(nodes)} nodes\n",
+                stderr="",
+                executor="direct",
+            )
+            status = "completed"
+        except BaseException as error:
+            attempt_error = error
+            result = ShardAttemptResult(
+                returncode=None,
+                stdout="",
+                stderr="".join(traceback.format_exception(type(error), error, error.__traceback__)),
+                executor="direct",
+            )
+            status = "failed"
+        stdout_path.write_text(result.stdout or "", encoding="utf-8")
+        stderr_path.write_text(result.stderr or "", encoding="utf-8")
+        _write_shard_manifest(
+            run_dir,
+            spec,
+            attempt=attempt,
+            status=status,
+            result=result,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+        )
+        if status != "completed":
+            assert attempt_error is not None
+            raise attempt_error
+
+    worker_count = min(max_workers, len(missing))
+    if worker_count <= 1:
+        for arxiv_id in missing:
+            try:
+                build_one(arxiv_id)
+            except BaseException as error:
+                failures.append((arxiv_id, error))
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            futures = {pool.submit(build_one, arxiv_id): arxiv_id for arxiv_id in missing}
+            for future in as_completed(futures):
+                arxiv_id = futures[future]
+                try:
+                    future.result()
+                except BaseException as error:
+                    failures.append((arxiv_id, error))
+    if failures:
+        append_run_log(run_dir, "9", "failed", f"{len(failures)} PageIndex builds failed; first={failures[0][0]}")
+        raise RuntimeError(
+            f"{len(failures)} PageIndex build(s) failed; first={failures[0][0]}: {failures[0][1]}"
+        )
     append_run_log(run_dir, "9", "completed", f"page indexes ready for {len(promoted_ids)} papers")
 
 
 def run_stage_10(run_dir: Path, *, max_workers: int = 1, executor: str = DEFAULT_EXECUTOR) -> None:
-    promoted_ids = load_promoted_arxiv_ids(run_dir)
+    promoted_ids = load_pageindexed_promoted_arxiv_ids(run_dir)
+    valid_ids = [
+        arxiv_id
+        for arxiv_id in promoted_ids
+        if _verified_evidence_is_valid(run_dir, arxiv_id)
+    ]
+    _clear_stage_10_quarantine(run_dir, valid_ids)
+    quarantined = _stage_10_quarantined_ids(run_dir)
+    initial_zero_claim_ids = {
+        arxiv_id
+        for arxiv_id in promoted_ids
+        if _verified_evidence_claims(run_dir, arxiv_id) == []
+    }
     missing = [
         arxiv_id
         for arxiv_id in promoted_ids
-        if not (run_dir / "10_verified_evidence" / f"{arxiv_id}.json").exists()
+        if arxiv_id not in quarantined and not _verified_evidence_is_valid(run_dir, arxiv_id)
     ]
-    specs = []
-    for idx, chunk in enumerate(chunked(missing, 1), start=1):
-        shard_id = f"verified-evidence-{idx:03d}"
-        specs.append(
-            ShardSpec(
-                stage="10",
-                shard_id=shard_id,
-                agent="verified_evidence_extractor",
-                model="gpt-5.4-mini",
-                prompt=_generic_agent_prompt(
-                    ".codex/agents/verified_evidence_extractor.toml",
-                    run_dir.name,
-                    "10",
-                    shard_id,
-                    {"arxiv_ids": chunk},
-                ),
-                expected_outputs=[f"10_verified_evidence/{arxiv_id}.json" for arxiv_id in chunk],
+
+    def evidence_specs(arxiv_ids: list[str], *, shard_prefix: str) -> list[ShardSpec]:
+        specs = []
+        for idx, chunk in enumerate(chunked(arxiv_ids, 1), start=1):
+            shard_id = f"{shard_prefix}-{idx:03d}"
+            specs.append(
+                ShardSpec(
+                    stage="10",
+                    shard_id=shard_id,
+                    agent="verified_evidence_extractor",
+                    model="gpt-5.4-mini",
+                    prompt=_generic_agent_prompt(
+                        ".codex/agents/verified_evidence_extractor.toml",
+                        run_dir.name,
+                        "10",
+                        shard_id,
+                        {"arxiv_ids": chunk},
+                    ),
+                    expected_outputs=[f"10_verified_evidence/{arxiv_id}.json" for arxiv_id in chunk],
+                )
             )
-        )
+        return specs
+
+    specs = evidence_specs(missing, shard_prefix="verified-evidence")
     if specs:
-        run_shards(run_dir, specs, max_workers=max_workers, executor=executor)
+        run_shards(run_dir, specs, max_workers=max_workers, executor=executor, force=True)
+    first_pass_zero_claim_ids = [
+        arxiv_id
+        for arxiv_id in promoted_ids
+        if (
+            arxiv_id not in quarantined
+            and arxiv_id not in initial_zero_claim_ids
+            and _verified_evidence_claims(run_dir, arxiv_id) == []
+        )
+    ]
+    retry_specs = evidence_specs(first_pass_zero_claim_ids, shard_prefix="verified-evidence-retry")
+    if retry_specs:
+        run_shards(run_dir, retry_specs, max_workers=max_workers, executor=executor, force=True)
+    quarantines: list[dict[str, str]] = []
     for arxiv_id in promoted_ids:
-        evidence = _load_json(run_dir / "10_verified_evidence" / f"{arxiv_id}.json")
-        claims = evidence.get("claims") if isinstance(evidence, dict) else None
+        if arxiv_id in quarantined and not _verified_evidence_is_valid(run_dir, arxiv_id):
+            continue
+        claims = _verified_evidence_claims(run_dir, arxiv_id)
         if not claims:
-            raise RuntimeError(f"verified evidence for {arxiv_id} has no claims")
+            quarantines.append({"arxiv_id": arxiv_id, "reason": "no_claims"})
+            continue
         for claim in claims:
             if not claim.get("source_node_id") or not claim.get("source_lines"):
                 raise RuntimeError(f"verified claim for {arxiv_id} is missing source grounding")
+    if quarantines:
+        _record_stage_10_quarantine(run_dir, quarantines)
+        append_run_log(run_dir, "10", "quarantined", f"{len(quarantines)} paper(s) had no verified claims")
     append_run_log(
-        run_dir, "10", "completed", f"verified evidence ready for {len(promoted_ids)} papers"
+        run_dir,
+        "10",
+        "completed",
+        f"verified evidence ready for {len(load_verified_promoted_arxiv_ids(run_dir))} papers; quarantined={len(_stage_10_quarantined_ids(run_dir))}",
     )
 
 
@@ -2994,7 +4338,139 @@ def _run_sdk_prompt(
         model=model,
         cwd=REPO_ROOT,
         timeout=float(timeout_seconds),
+        notification_timeout=_sdk_notification_timeout_seconds(timeout_seconds),
     )
+
+
+def _sdk_notification_timeout_seconds(timeout_seconds: int) -> float:
+    configured = os.environ.get("SWARN_SDK_NOTIFICATION_TIMEOUT_SECONDS")
+    if configured is None:
+        return min(float(DEFAULT_SDK_NOTIFICATION_TIMEOUT_SECONDS), float(timeout_seconds))
+    return min(float(configured), float(timeout_seconds))
+
+
+def _stage_max_workers_env_name(stage: str) -> str:
+    safe_stage = re.sub(r"[^A-Za-z0-9]+", "_", str(stage)).strip("_")
+    return f"SWARN_STAGE_{safe_stage}_MAX_EFFECTIVE_WORKERS"
+
+
+def _effective_max_workers(requested_workers: int, *, stage: str | None = None) -> int:
+    raw_cap = os.environ.get("SWARN_MAX_EFFECTIVE_WORKERS")
+    if raw_cap is None:
+        cap = DEFAULT_MAX_EFFECTIVE_WORKERS
+    else:
+        try:
+            cap = int(raw_cap)
+        except ValueError as error:
+            raise ValueError("SWARN_MAX_EFFECTIVE_WORKERS must be an integer") from error
+    if cap < 1:
+        raise ValueError("SWARN_MAX_EFFECTIVE_WORKERS must be >= 1")
+    if stage is not None:
+        stage_key = str(stage)
+        env_name = _stage_max_workers_env_name(stage_key)
+        raw_stage_cap = os.environ.get(env_name)
+        if raw_stage_cap is not None:
+            try:
+                stage_cap = int(raw_stage_cap)
+            except ValueError as error:
+                raise ValueError(f"{env_name} must be an integer") from error
+            if stage_cap < 1:
+                raise ValueError(f"{env_name} must be >= 1")
+        else:
+            stage_cap = DEFAULT_STAGE_MAX_EFFECTIVE_WORKERS.get(stage_key)
+        if stage_cap is not None:
+            if stage_cap < 1:
+                raise ValueError(f"default cap for stage {stage_key} must be >= 1")
+            cap = min(cap, stage_cap)
+    return min(requested_workers, cap)
+
+
+def _path_is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _read_proc_cmdline(proc_dir: Path) -> list[str]:
+    try:
+        raw = (proc_dir / "cmdline").read_bytes()
+    except OSError:
+        return []
+    return [part.decode(errors="replace") for part in raw.split(b"\0") if part]
+
+
+def _proc_cwd_is_under_repo(proc_dir: Path, repo_root: Path) -> bool:
+    try:
+        cwd = (proc_dir / "cwd").resolve()
+    except OSError:
+        return False
+    return cwd == repo_root or _path_is_relative_to(cwd, repo_root)
+
+
+def _find_research_mcp_pids(
+    *,
+    proc_root: Path = Path("/proc"),
+    repo_root: Path = REPO_ROOT,
+    current_pid: int | None = None,
+) -> list[int]:
+    repo_root = repo_root.resolve()
+    current_pid = os.getpid() if current_pid is None else current_pid
+    pids: list[int] = []
+    for proc_dir in proc_root.iterdir():
+        if not proc_dir.name.isdigit():
+            continue
+        pid = int(proc_dir.name)
+        if pid == current_pid:
+            continue
+        cmdline = _read_proc_cmdline(proc_dir)
+        joined = " ".join(cmdline)
+        if "swarn-auto-research-mcp" not in joined:
+            continue
+        if _proc_cwd_is_under_repo(proc_dir, repo_root) or str(repo_root) in joined:
+            pids.append(pid)
+    return sorted(pids)
+
+
+def cleanup_orphaned_research_mcp_processes(
+    *,
+    proc_root: Path = Path("/proc"),
+    repo_root: Path = REPO_ROOT,
+    grace_seconds: float = 2.0,
+    kill_func: Any = os.kill,
+) -> list[int]:
+    pids = _find_research_mcp_pids(proc_root=proc_root, repo_root=repo_root)
+    for pid in pids:
+        try:
+            kill_func(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    if pids and grace_seconds > 0:
+        sleep(grace_seconds)
+    for pid in pids:
+        if not (proc_root / str(pid)).exists():
+            continue
+        try:
+            kill_func(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    return pids
+
+
+def cleanup_stage_6_research_mcp_processes(run_dir: Path) -> None:
+    try:
+        cleaned = cleanup_orphaned_research_mcp_processes()
+    except Exception as error:
+        append_run_log(run_dir, "6", "cleanup_failed", f"{type(error).__name__}: {error}")
+        return
+    if cleaned:
+        append_run_log(
+            run_dir,
+            "6",
+            "cleanup",
+            f"terminated orphaned research MCP processes: {cleaned}",
+        )
 
 
 def _run_stage_handler(
@@ -3023,31 +4499,19 @@ def _validate_stage_1_before_later_start(run_dir: Path, start: str) -> None:
 
 
 def _latest_shard_manifest(run_dir: Path) -> dict[str, Any] | None:
-    manifests = [
-        path
-        for path in (run_dir / "run_control" / "stages").glob("*/*/*.json")
-        if path.parent.name == "shards"
-    ]
-    if not manifests:
-        return None
-    failed = []
-    for path in manifests:
+    latest: tuple[float, dict[str, Any]] | None = None
+    for path in (run_dir / "run_control" / "stages").glob("*/*/*.json"):
+        if path.parent.name != "shards":
+            continue
         try:
             data = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError):
             continue
         data["_manifest_path"] = str(path.relative_to(run_dir))
-        if data.get("status") == "failed":
-            failed.append((path.stat().st_mtime, data))
-    if failed:
-        return max(failed, key=lambda item: item[0])[1]
-    latest_path = max(manifests, key=lambda path: path.stat().st_mtime)
-    try:
-        data = json.loads(latest_path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    data["_manifest_path"] = str(latest_path.relative_to(run_dir))
-    return data
+        item = (path.stat().st_mtime, data)
+        if latest is None or item[0] > latest[0]:
+            latest = item
+    return latest[1] if latest else None
 
 
 def format_run_status(run_dir: Path) -> str:
@@ -3059,6 +4523,10 @@ def format_run_status(run_dir: Path) -> str:
         f"current_stage={state.get('current_stage', '')}",
         f"last_completed_stage={state.get('last_completed_stage', '')}",
     ]
+    if state.get("status") in {"failed", "interrupted"}:
+        lines.append(f"failed_stage={state.get('failed_stage', '')}")
+        lines.append(f"error_type={state.get('error_type', '')}")
+        lines.append(f"error={state.get('error', '')}")
     if shard:
         if shard.get("status") == "failed":
             lines.append(f"failed_stage={shard.get('stage', '')}")
@@ -3072,6 +4540,28 @@ def format_run_status(run_dir: Path) -> str:
         lines.append(f"manifest={shard.get('_manifest_path', '')}")
         lines.append(f"stderr={shard.get('stderr_path') or ''}")
     return "\n".join(lines) + "\n"
+
+
+def _record_run_failure(
+    run_dir: Path,
+    *,
+    stage: str,
+    error: BaseException,
+    status: str = "failed",
+) -> None:
+    error_text = str(error) or repr(error)
+    save_run_state(
+        run_dir,
+        {
+            **load_run_state(run_dir),
+            "status": status,
+            "current_stage": stage,
+            "failed_stage": stage,
+            "error_type": type(error).__name__,
+            "error": error_text,
+        },
+    )
+    append_run_log(run_dir, stage, status, f"{type(error).__name__}: {error_text}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -3151,40 +4641,62 @@ def main(argv: list[str] | None = None) -> int:
     handler_stages = {stage for stage, _ in handlers}
     if start not in handler_stages:
         raise SystemExit(f"stage {start} is not available for phase {args.phase}")
-    _validate_stage_1_before_later_start(run_dir, start)
-    state.update(
-        {
-            "run_id": run_id,
-            "phase": args.phase,
-            "topic": args.topic or state.get("topic", ""),
-            "status": "running",
-            "current_stage": start,
-            "resume": args.resume,
-        }
-    )
-    save_run_state(run_dir, state)
+    try:
+        _validate_stage_1_before_later_start(run_dir, start)
+        state.update(
+            {
+                "run_id": run_id,
+                "phase": args.phase,
+                "topic": args.topic or state.get("topic", ""),
+                "status": "running",
+                "current_stage": start,
+                "resume": args.resume,
+            }
+        )
+        save_run_state(run_dir, state)
 
-    active = False
-    for stage, handler in handlers:
-        if stage == start:
-            active = True
-        if not active:
-            continue
+        active = False
+        current_stage = start
+        for stage, handler in handlers:
+            if stage == start:
+                active = True
+            if not active:
+                continue
 
-        save_run_state(
+            current_stage = stage
+            save_run_state(
+                run_dir,
+                {**load_run_state(run_dir), "current_stage": stage, "status": "running"},
+            )
+            try:
+                max_workers = _effective_max_workers(args.max_workers, stage=stage)
+            except ValueError as error:
+                raise SystemExit(str(error)) from error
+            try:
+                _run_stage_handler(
+                    handler,
+                    run_dir,
+                    max_workers=max_workers,
+                    executor=args.executor,
+                )
+            finally:
+                if stage == "6":
+                    cleanup_stage_6_research_mcp_processes(run_dir)
+            save_run_state(
+                run_dir,
+                {**load_run_state(run_dir), "last_completed_stage": stage},
+            )
+    except KeyboardInterrupt as error:
+        _record_run_failure(
             run_dir,
-            {**load_run_state(run_dir), "current_stage": stage, "status": "running"},
+            stage=current_stage if "current_stage" in locals() else start,
+            error=error,
+            status="interrupted",
         )
-        _run_stage_handler(
-            handler,
-            run_dir,
-            max_workers=args.max_workers,
-            executor=args.executor,
-        )
-        save_run_state(
-            run_dir,
-            {**load_run_state(run_dir), "last_completed_stage": stage},
-        )
+        raise
+    except Exception as error:
+        _record_run_failure(run_dir, stage=current_stage if "current_stage" in locals() else start, error=error)
+        raise
 
     save_run_state(run_dir, {**load_run_state(run_dir), "status": "completed"})
     print(f"{args.phase} phase complete. run_id={run_id}")

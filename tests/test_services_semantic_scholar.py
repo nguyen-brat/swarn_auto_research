@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -9,11 +10,65 @@ from swarn_research_mcp.services import semantic_scholar
 class SemanticScholarServiceTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         semantic_scholar.PAPER_DETAIL_CACHE.clear()
+        self.original_s2_keys = semantic_scholar.SEMANTIC_SCHOLAR_API_KEYS
+        self.original_s2_key_index = semantic_scholar._SEMANTIC_SCHOLAR_API_KEY_INDEX
+        self.original_s2_headers = dict(semantic_scholar.HEADERS)
+        semantic_scholar.SEMANTIC_SCHOLAR_API_KEYS = ["test-key"]
+        semantic_scholar._SEMANTIC_SCHOLAR_API_KEY_INDEX = 0
+        semantic_scholar.HEADERS.clear()
+        semantic_scholar.HEADERS["x-api-key"] = "test-key"
         self.sleep_patch = patch("swarn_research_mcp.services.semantic_scholar.sleep")
         self.mock_sleep = self.sleep_patch.start()
 
     def tearDown(self):
         self.sleep_patch.stop()
+        semantic_scholar.SEMANTIC_SCHOLAR_API_KEYS = self.original_s2_keys
+        semantic_scholar._SEMANTIC_SCHOLAR_API_KEY_INDEX = self.original_s2_key_index
+        semantic_scholar.HEADERS.clear()
+        semantic_scholar.HEADERS.update(self.original_s2_headers)
+
+    @patch.dict(os.environ, {"S2_KEY": "primary-key", "S2_KEYS": "fallback-1, fallback-2"})
+    def test_parse_semantic_scholar_api_keys_keeps_order_and_dedupes(self):
+        self.assertEqual(
+            semantic_scholar._parse_semantic_scholar_api_keys(),
+            ["fallback-1", "fallback-2", "primary-key"],
+        )
+
+    @patch("swarn_research_mcp.services.semantic_scholar.http_get")
+    def test_semantic_scholar_get_rotates_key_after_rate_limit(self, mock_http_get):
+        response = type("Response", (), {"status_code": 429, "headers": {}})()
+        seen_headers = []
+
+        def fake_http_get(*args, headers=None, **kwargs):
+            seen_headers.append(dict(headers or {}))
+            if len(seen_headers) == 1:
+                raise requests.HTTPError("rate limited", response=response)
+            return {"data": []}
+
+        mock_http_get.side_effect = fake_http_get
+        original_keys = semantic_scholar.SEMANTIC_SCHOLAR_API_KEYS
+        original_index = semantic_scholar._SEMANTIC_SCHOLAR_API_KEY_INDEX
+        original_headers = dict(semantic_scholar.HEADERS)
+        try:
+            semantic_scholar.SEMANTIC_SCHOLAR_API_KEYS = ["key-a", "key-b"]
+            semantic_scholar._SEMANTIC_SCHOLAR_API_KEY_INDEX = 0
+            semantic_scholar.HEADERS.clear()
+            semantic_scholar.HEADERS["x-api-key"] = "key-a"
+
+            result = semantic_scholar._semantic_scholar_get(
+                "https://api.semanticscholar.org/graph/v1/paper/search",
+                params={"query": "transformer"},
+                headers=semantic_scholar.HEADERS,
+            )
+        finally:
+            semantic_scholar.SEMANTIC_SCHOLAR_API_KEYS = original_keys
+            semantic_scholar._SEMANTIC_SCHOLAR_API_KEY_INDEX = original_index
+            semantic_scholar.HEADERS.clear()
+            semantic_scholar.HEADERS.update(original_headers)
+
+        self.assertEqual(result, {"data": []})
+        self.assertEqual(seen_headers[0]["x-api-key"], "key-a")
+        self.assertEqual(seen_headers[1]["x-api-key"], "key-b")
 
     def test_paper_model_serializes_to_json_shape(self):
         paper = semantic_scholar.SemanticScholarPaper(
@@ -80,7 +135,32 @@ class SemanticScholarServiceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, {"data": []})
         self.assertEqual(mock_http_post.call_count, 2)
-        self.assertEqual(self.mock_sleep.call_count, 2)
+        self.assertEqual(self.mock_sleep.call_count, 3)
+        self.assertEqual(
+            self.mock_sleep.call_args_list[1].args[0],
+            semantic_scholar.SEMANTIC_SCHOLAR_RATE_LIMIT_BACKOFF_SECONDS,
+        )
+
+    @patch("swarn_research_mcp.services.semantic_scholar.http_post")
+    def test_semantic_scholar_post_waits_extra_after_rate_limit(self, mock_http_post):
+        response = type("Response", (), {"status_code": 429, "headers": {}})()
+        mock_http_post.side_effect = [
+            requests.HTTPError("rate limited", response=response),
+            {"data": []},
+        ]
+
+        result = semantic_scholar._semantic_scholar_post(
+            "https://api.semanticscholar.org/graph/v1/paper/batch",
+            {"ids": ["paper-id"]},
+            params={"fields": semantic_scholar.PAPER_WITH_LINKED_FIELDS},
+            headers=semantic_scholar.HEADERS,
+        )
+
+        self.assertEqual(result, {"data": []})
+        self.assertIn(
+            semantic_scholar.SEMANTIC_SCHOLAR_RATE_LIMIT_BACKOFF_SECONDS,
+            self.mock_sleep.call_args_list[1].args,
+        )
 
     @patch("swarn_research_mcp.services.semantic_scholar.http_get")
     def test_semantic_scholar_get_retries_after_rate_limit(self, mock_http_get):
@@ -98,7 +178,11 @@ class SemanticScholarServiceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, {"data": []})
         self.assertEqual(mock_http_get.call_count, 2)
-        self.assertEqual(self.mock_sleep.call_count, 2)
+        self.assertEqual(self.mock_sleep.call_count, 3)
+        self.assertEqual(
+            self.mock_sleep.call_args_list[1].args[0],
+            semantic_scholar.SEMANTIC_SCHOLAR_RATE_LIMIT_BACKOFF_SECONDS,
+        )
 
     @patch("swarn_research_mcp.services.semantic_scholar.http_post")
     @patch("swarn_research_mcp.services.semantic_scholar.http_get")
@@ -885,6 +969,62 @@ class SemanticScholarServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mock_http_post.call_count, 2)
         self.assertEqual(mock_http_post.call_args_list[0].args[1], {"ids": ["paper-1"]})
         self.assertEqual(mock_http_post.call_args_list[1].args[1], {"ids": ["paper-2"]})
+
+    def test_paper_detail_memory_cache_is_bounded(self):
+        original_capacity = semantic_scholar.PAPER_DETAIL_CACHE.capacity
+        semantic_scholar.PAPER_DETAIL_CACHE.capacity = 2
+        try:
+            semantic_scholar.PAPER_DETAIL_CACHE.clear()
+            semantic_scholar.PAPER_DETAIL_CACHE["p1"] = {"paperId": "p1"}
+            semantic_scholar.PAPER_DETAIL_CACHE["p2"] = {"paperId": "p2"}
+            semantic_scholar.PAPER_DETAIL_CACHE["p3"] = {"paperId": "p3"}
+
+            self.assertIsNone(semantic_scholar.PAPER_DETAIL_CACHE.get("p1"))
+            self.assertEqual(
+                semantic_scholar.PAPER_DETAIL_CACHE.get("p2"),
+                {"paperId": "p2"},
+            )
+            self.assertEqual(
+                semantic_scholar.PAPER_DETAIL_CACHE.get("p3"),
+                {"paperId": "p3"},
+            )
+        finally:
+            semantic_scholar.PAPER_DETAIL_CACHE.capacity = original_capacity
+            semantic_scholar.PAPER_DETAIL_CACHE.clear()
+
+    def test_paper_detail_memory_cache_invalid_capacity_falls_back_to_default(self):
+        cache = semantic_scholar._BoundedPaperDetailCache("bad")
+
+        self.assertEqual(cache.capacity, 256)
+
+    def test_paper_detail_memory_cache_capacity_counts_papers_not_aliases(self):
+        original_capacity = semantic_scholar.PAPER_DETAIL_CACHE.capacity
+        paper = {
+            "paperId": "paper-1",
+            "externalIds": {"ArXiv": "1234.5678"},
+        }
+        semantic_scholar.PAPER_DETAIL_CACHE.capacity = 1
+        try:
+            semantic_scholar.PAPER_DETAIL_CACHE.clear()
+            with patch.object(semantic_scholar.persistent_cache, "put"):
+                semantic_scholar._cache_paper_detail(paper)
+
+            self.assertEqual(
+                semantic_scholar.PAPER_DETAIL_CACHE.get("paper-1"),
+                paper,
+            )
+            self.assertEqual(
+                semantic_scholar.PAPER_DETAIL_CACHE.get("1234.5678"),
+                paper,
+            )
+            self.assertEqual(
+                semantic_scholar.PAPER_DETAIL_CACHE.get("ArXiv:1234.5678"),
+                paper,
+            )
+            self.assertEqual(len(semantic_scholar.PAPER_DETAIL_CACHE), 1)
+        finally:
+            semantic_scholar.PAPER_DETAIL_CACHE.capacity = original_capacity
+            semantic_scholar.PAPER_DETAIL_CACHE.clear()
 
     @patch("swarn_research_mcp.services.semantic_scholar.http_post")
     async def test_recommendations_multi_sends_seed_ids_directly(self, mock_http_post):

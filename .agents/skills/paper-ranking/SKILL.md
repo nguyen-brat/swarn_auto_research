@@ -28,10 +28,15 @@ arxiv_id,topic_relevance,graph_centrality,citation_or_influence,recency,implemen
 
 `promotion_candidates.csv` contains every paper sorted descending by `final_score`.
 
-`promoted_papers.json` contains rows above threshold sorted descending, with schema:
+`promoted_papers.json` is an object with a `promoted_papers` array containing
+rows above threshold sorted descending:
 
 ```json
-{"arxiv_id": "...", "final_score": 0.0, "reason": "...", "is_gap_paper": false}
+{
+  "promoted_papers": [
+    {"arxiv_id": "...", "final_score": 0.0, "reason": "...", "is_gap_paper": false}
+  ]
+}
 ```
 
 ## Scoring Formula
@@ -72,6 +77,7 @@ Add `knowledge_gap_boost` up to `+0.20` only when all conditions hold:
 - `paper_scores.csv` must include every `paper_pool` `arxiv_id` exactly once.
 - `promotion_candidates.csv` must include the same rows sorted by `final_score` descending.
 - `promoted_papers.json` must include every row with `final_score >= min_promote_score`.
+- `promoted_papers.json` must be a JSON object, not a top-level array.
 - Do not cap the promoted list.
 - If zero rows meet the threshold, promote exactly the top-scored paper as fallback.
 

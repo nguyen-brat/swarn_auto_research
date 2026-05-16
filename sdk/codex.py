@@ -58,6 +58,7 @@ async def run_one_shot(
     model: str,
     cwd: Path | str | None = None,
     timeout: float = 3600.0,
+    notification_timeout: float | None = None,
 ) -> OneShotResult:
     async with AsyncCodex(config=build_config(cwd)) as codex:
         thread = await codex.thread_start(
@@ -71,7 +72,11 @@ async def run_one_shot(
             cwd=str(cwd or REPO_ROOT),
             approval_policy="never",
         )
-        stream = turn.stream(notification_timeout_s=timeout)
+        stream = turn.stream(
+            notification_timeout_s=(
+                timeout if notification_timeout is None else notification_timeout
+            )
+        )
         try:
             result = await asyncio.wait_for(
                 _collect_async_run_result(stream, turn_id=turn.id),
@@ -94,9 +99,16 @@ def run_one_shot_sync(
     model: str,
     cwd: Path | str | None = None,
     timeout: float = 3600.0,
+    notification_timeout: float | None = None,
 ) -> OneShotResult:
     return asyncio.run(
-        run_one_shot(prompt=prompt, model=model, cwd=cwd, timeout=timeout)
+        run_one_shot(
+            prompt=prompt,
+            model=model,
+            cwd=cwd,
+            timeout=timeout,
+            notification_timeout=notification_timeout,
+        )
     )
 
 

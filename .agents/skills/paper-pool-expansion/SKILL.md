@@ -22,7 +22,8 @@ description: Add foundational papers that EXPLAIN unknown concepts. Relevance is
 - Exactly ONE round in MVP.
 - Non-empty slice → MUST search every item. Skipping is never valid.
 - "Seed papers mention X" ≠ "seed papers explain X" — only the second substitutes for expansion.
-- Per item: `bulk_normal_start_search(search_queries)` and log raw results into the round file even when every result is rejected.
+- Per item: call MCP `gap_paper_search` with the item's `search_queries`, positive keywords derived from the gap concept/query terms, and only narrow negative keywords for obvious off-topic domains. The tool combines Hugging Face paper search and alphaXiv paper search. Log the returned `queries`, `total_input`, `total_kept`, `query_audit`, and `output_path` into the round file even when every result is rejected.
+- Do not call `bulk_normal_start_search` in Stage 6. That tool is reserved for Stage 1 seed-pool discovery.
 - Accept only when ALL hold: directly explains the concept (foundational/survey/canonical) AND has arxiv_id AND not already in pool AND needed for a key paper.
 - No paper-count cap. Reject loosely-related / application-specific / duplicate / low-relevance with `why_rejected`.
 - Every acceptance has `added_for_gap` and `why_needed`.

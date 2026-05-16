@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from scripts.run_auto_research import run_stage_5
+from scripts.run_auto_research import run_stage_5, run_stage_17
 
 FIXTURE = Path(__file__).parent / "fixtures" / "weak_graph_mini"
 
@@ -32,16 +32,27 @@ def run_dir(tmp_path):
 def test_run_stage_5_dispatches_classifier(run_dir):
     captured = []
 
-    def fake_run_shards(_run_dir, specs, *, executor):
+    def fake_run_shards(_run_dir, specs, *, executor, force=False):
         captured.extend(specs)
         out = _run_dir / "06_expansion"
+        digest = json.loads((out / "gap_candidates_digest.json").read_text())
+        concept = digest["candidates"][0]["concept"]
         (out / "knowledge_gap_report.json").write_text(
-            json.dumps({"known": [], "unknown_minor": [], "knowledge_gaps": []})
+            json.dumps({"known": [], "unknown_minor": [], "knowledge_gaps": [
+                {"concept": concept}
+            ]})
         )
         (out / "expansion_need_queue.json").write_text(
-            json.dumps({"items": []})
+            json.dumps({"items": [{
+                "gap_id": "gap_1",
+                "concept": concept,
+                "priority": 0.70,
+                "search_queries": [f"{concept} arxiv", f"{concept} survey"],
+            }]})
         )
-        (out / "extracted_concepts.json").write_text(json.dumps([]))
+        (out / "extracted_concepts.json").write_text(
+            json.dumps({"concepts": [{"concept": concept, "bucket": "knowledge_gap"}]})
+        )
 
     with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
         run_stage_5(run_dir)
@@ -49,15 +60,152 @@ def test_run_stage_5_dispatches_classifier(run_dir):
     assert (run_dir / "06_expansion" / "gap_candidates_digest.json").exists()
     assert len(captured) == 1
     assert captured[0].agent == "knowledge_gap_classifier"
+    assert "06_expansion/extracted_concepts.json" in captured[0].expected_outputs
+    assert (run_dir / "06_expansion" / "stage5_metadata.json").exists()
 
 
-def test_run_stage_5_idempotent_when_primary_artifacts_present(run_dir):
-    (run_dir / "06_expansion" / "knowledge_gap_report.json").write_text(
+def test_run_stage_5_reruns_old_detector_artifacts_without_metadata(run_dir):
+    out = run_dir / "06_expansion"
+    (out / "knowledge_gap_report.json").write_text(
         json.dumps({"known": [], "unknown_minor": [], "knowledge_gaps": []})
     )
-    (run_dir / "06_expansion" / "expansion_need_queue.json").write_text(
+    (out / "expansion_need_queue.json").write_text(
         json.dumps({"items": []})
     )
+    captured = []
+
+    def fake_run_shards(_run_dir, specs, *, executor, force=False):
+        captured.append((specs[0], force))
+        digest = json.loads((out / "gap_candidates_digest.json").read_text())
+        concept = digest["candidates"][0]["concept"]
+        (out / "knowledge_gap_report.json").write_text(
+            json.dumps({"known": [], "unknown_minor": [], "knowledge_gaps": [
+                {"concept": concept}
+            ]})
+        )
+        (out / "expansion_need_queue.json").write_text(
+            json.dumps({"items": [{
+                "gap_id": "gap_1",
+                "concept": concept,
+                "priority": 0.70,
+                "search_queries": [f"{concept} arxiv", f"{concept} survey"],
+            }]})
+        )
+        (out / "extracted_concepts.json").write_text(
+            json.dumps({"concepts": [{"concept": concept, "bucket": "knowledge_gap"}]})
+        )
+
+    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+        run_stage_5(run_dir)
+
+    assert len(captured) == 1
+    assert captured[0][0].agent == "knowledge_gap_classifier"
+    assert captured[0][1] is True
+
+
+def test_run_stage_5_idempotent_when_metadata_matches(run_dir):
+    def fake_run_shards(_run_dir, specs, *, executor, force=False):
+        out = _run_dir / "06_expansion"
+        digest = json.loads((out / "gap_candidates_digest.json").read_text())
+        concept = digest["candidates"][0]["concept"]
+        (out / "knowledge_gap_report.json").write_text(
+            json.dumps({"known": [], "unknown_minor": [], "knowledge_gaps": [
+                {"concept": concept}
+            ]})
+        )
+        (out / "expansion_need_queue.json").write_text(
+            json.dumps({"items": [{
+                "gap_id": "gap_1",
+                "concept": concept,
+                "priority": 0.70,
+                "search_queries": [f"{concept} arxiv", f"{concept} survey"],
+            }]})
+        )
+        (out / "extracted_concepts.json").write_text(
+            json.dumps({"concepts": [{"concept": concept, "bucket": "knowledge_gap"}]})
+        )
+
+    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+        run_stage_5(run_dir)
     with patch("scripts.run_auto_research.run_shards") as m:
         run_stage_5(run_dir)
         m.assert_not_called()
+
+
+def test_run_stage_5_raises_when_weak_graph_missing(run_dir):
+    (run_dir / "05_weak_graph" / "weak_global_graph.json").unlink()
+
+    with patch("scripts.run_auto_research.run_shards") as m:
+        with pytest.raises(RuntimeError, match="Stage 5 requires"):
+            run_stage_5(run_dir)
+        m.assert_not_called()
+
+
+def test_run_stage_5_raises_when_weak_graph_missing_even_if_digest_exists(run_dir):
+    (run_dir / "06_expansion" / "gap_candidates_digest.json").write_text(
+        json.dumps({"candidates": []})
+    )
+    (run_dir / "05_weak_graph" / "weak_global_graph.json").unlink()
+
+    with patch("scripts.run_auto_research.run_shards") as m:
+        with pytest.raises(RuntimeError, match="Stage 5 requires"):
+            run_stage_5(run_dir)
+        m.assert_not_called()
+
+
+def test_run_stage_5_fails_when_classifier_omits_extracted_concepts(run_dir):
+    def fake_run_shards(_run_dir, specs, *, executor, force=False):
+        out = _run_dir / "06_expansion"
+        digest = json.loads((out / "gap_candidates_digest.json").read_text())
+        concept = digest["candidates"][0]["concept"]
+        (out / "knowledge_gap_report.json").write_text(
+            json.dumps({"known": [], "unknown_minor": [], "knowledge_gaps": [
+                {"concept": concept}
+            ]})
+        )
+        (out / "expansion_need_queue.json").write_text(
+            json.dumps({"items": [{
+                "gap_id": "gap_1",
+                "concept": concept,
+                "priority": 0.70,
+                "search_queries": [f"{concept} arxiv", f"{concept} survey"],
+            }]})
+        )
+
+    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+        with pytest.raises(RuntimeError, match="extracted_concepts"):
+            run_stage_5(run_dir)
+
+
+def test_run_stage_17_writes_learning_suggestions_without_agent(tmp_path):
+    run = tmp_path / "run"
+    out = run / "06_expansion"
+    out.mkdir(parents=True)
+    (out / "gap_candidates_digest.json").write_text(json.dumps({
+        "candidates": [
+            {
+                "concept": "CLIP vision encoder",
+                "importance": 0.91,
+                "evidence_refs": [{"arxiv_id": "2304.08485"}],
+            }
+        ]
+    }))
+    (out / "knowledge_gap_report.json").write_text(json.dumps({
+        "knowledge_gaps": [{"concept": "CLIP vision encoder"}]
+    }))
+    (out / "expansion_need_queue.json").write_text(json.dumps({
+        "items": [{
+            "gap_id": "gap_clip",
+            "concept": "CLIP vision encoder",
+            "priority": 0.91,
+            "search_queries": ["CLIP vision encoder arxiv", "CLIP survey"],
+        }]
+    }))
+
+    with patch("scripts.run_auto_research.run_shards") as m:
+        run_stage_17(run)
+        m.assert_not_called()
+
+    text = (run / "17_learning_suggestions" / "knowledge_to_add.md").read_text()
+    assert "CLIP vision encoder" in text
+    assert "2304.08485" in text

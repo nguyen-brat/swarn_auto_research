@@ -1,8 +1,8 @@
 """Pytest session-wide configuration.
 
-Redirects the persistent Semantic Scholar paper-detail cache at a
-per-session temp directory so tests never read or mutate the developer's
-real cache file at `swarn_research_mcp/cache/s2_paper_details.json`.
+Redirects the persistent Semantic Scholar cache at a per-session temp
+directory so tests never read or mutate the developer's real cache files
+under `swarn_research_mcp/cache`.
 """
 from __future__ import annotations
 
@@ -13,6 +13,31 @@ import tempfile
 from pathlib import Path
 
 import pytest
+
+
+def _reload_persistent_cache():
+    try:
+        from swarn_research_mcp.services import persistent_cache
+    except ImportError:
+        return None
+    persistent_cache.close()
+    return importlib.reload(persistent_cache)
+
+
+def _remove_session_cache_db(config):
+    cache_db = getattr(config, "_swarn_s2_cache_db", None)
+    if not cache_db:
+        return
+    path = Path(cache_db)
+    try:
+        if not (path.parent.is_dir() and path.parent.name.startswith("swarn-s2-cache-")):
+            return
+        for suffix in ("", "-wal", "-shm"):
+            candidate = Path(str(path) + suffix)
+            if candidate.is_file():
+                candidate.unlink()
+    except OSError:
+        pass
 
 
 def pytest_configure(config):
@@ -28,26 +53,39 @@ def pytest_configure(config):
     # without an explicit override, nothing touches the developer's real
     # cache files.
     tmp_dir = Path(tempfile.mkdtemp(prefix="swarn-s2-cache-"))
+    cache_db = tmp_dir / "s2_cache.sqlite"
+    config._swarn_s2_cache_db = cache_db
+    os.environ["SWARN_S2_CACHE_DB"] = str(cache_db)
     os.environ["SWARN_S2_CACHE_PATH"] = str(tmp_dir / "s2_paper_details.json")
     os.environ["SWARN_S2_SEARCH_CACHE_PATH"] = str(tmp_dir / "s2_search_results.json")
 
+    _reload_persistent_cache()
+
+
+@pytest.fixture(autouse=True)
+def _reset_s2_cache_state(request):
+    yield
+    persistent_cache = _reload_persistent_cache()
+    _remove_session_cache_db(request.config)
+    if persistent_cache is None:
+        return
     try:
-        from swarn_research_mcp.services import persistent_cache
-        importlib.reload(persistent_cache)
+        from swarn_research_mcp.services import semantic_scholar
     except ImportError:
-        pass
+        return
+    semantic_scholar.PAPER_DETAIL_CACHE.clear()
 
 
 def pytest_unconfigure(config):
     # Best-effort teardown: don't fail the session if cleanup misses.
-    cache_dir = os.environ.get("SWARN_S2_CACHE_PATH")
-    if cache_dir:
-        path = Path(cache_dir)
+    _remove_session_cache_db(config)
+    cache_db = getattr(config, "_swarn_s2_cache_db", None)
+    if cache_db:
         try:
-            if path.is_file():
-                path.unlink()
-            if path.parent.is_dir() and path.parent.name.startswith("swarn-s2-cache-"):
-                path.parent.rmdir()
+            path = Path(cache_db)
+            if not path.parent.name.startswith("swarn-s2-cache-"):
+                return
+            path.parent.rmdir()
         except OSError:
             pass
 

@@ -16,7 +16,10 @@ Hard rules:
 - No paper-count cap (skill enforces relevance only).
 - Do NOT update paper_pool.json — orchestrator merges shard outputs.
 
-Per item: bulk_normal_start_search(search_queries) → per-result accept/reject.
+Per item: gap_paper_search(search_queries, positive_keywords, negative_keywords)
+→ per-result accept/reject. Build positive keywords from the gap concept,
+target paper types, and query terms; use narrow negative keywords only for
+obvious off-topic domains. Do not call bulk_normal_start_search in Stage 6.
 
 Write to 06_expansion/:
 - expansion_round_01_shard_{shard_id}.json (status='completed', full audit)
