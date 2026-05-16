@@ -1,0 +1,25 @@
+{
+  "arxiv_id": "p2",
+  "title": "CLIP Variants",
+  "year": 2023,
+  "trust_level": "OVERVIEW_DERIVED",
+  "paper_type": "method",
+  "topic_tags": ["multimodal"],
+  "problem": ["align text and image embeddings"],
+  "solution": ["contrastive training over a vision encoder"],
+  "methods": ["CLIP vision encoder", "Transformer"],
+  "datasets": ["LAION"],
+  "benchmarks": ["ImageNet zero-shot"],
+  "metrics": [],
+  "baselines": ["ViT"],
+  "results": [],
+  "limitations": [],
+  "mentioned_entities": [],
+  "mentioned_papers": [],
+  "reader_needed_concepts": [],
+  "book_usage": {
+    "possible_chapters": ["CLIP Family"],
+    "role": "central",
+    "importance_score_1_to_5": 4
+  }
+}

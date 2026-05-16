@@ -1,0 +1,23 @@
+{
+  "nodes": [
+    {"id": "p1", "type": "Paper", "display": "Paper One: ViT for Vision"},
+    {"id": "p2", "type": "Paper", "display": "Paper Two: CLIP Variants"},
+    {"id": "p3", "type": "Paper", "display": "Paper Three: ASR Baselines"},
+    {"id": "vit", "type": "Method", "display": "ViT"},
+    {"id": "clip vision encoder", "type": "Method", "display": "CLIP vision encoder"},
+    {"id": "transformer", "type": "Method", "display": "Transformer"},
+    {"id": "wav2vec", "type": "Method", "display": "wav2vec"},
+    {"id": "mel spectrogram", "type": "Dataset", "display": "Mel spectrogram"},
+    {"id": "graph only concept", "type": "Method", "display": "Graph Only Concept"}
+  ],
+  "edges": [
+    {"src": "p1", "dst": "vit", "type": "INTRODUCES", "confidence": "weak"},
+    {"src": "p1", "dst": "transformer", "type": "USES", "confidence": "weak"},
+    {"src": "p2", "dst": "vit", "type": "USES", "confidence": "weak"},
+    {"src": "p2", "dst": "clip vision encoder", "type": "INTRODUCES", "confidence": "weak"},
+    {"src": "p2", "dst": "transformer", "type": "USES", "confidence": "weak"},
+    {"src": "p3", "dst": "wav2vec", "type": "USES", "confidence": "weak"},
+    {"src": "p3", "dst": "mel spectrogram", "type": "USES_DATASET", "confidence": "weak"},
+    {"src": "p2", "dst": "graph only concept", "type": "USES", "confidence": "weak"}
+  ]
+}

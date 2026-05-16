@@ -1,0 +1,25 @@
+{
+  "arxiv_id": "p1",
+  "title": "ViT for Vision",
+  "year": 2021,
+  "trust_level": "OVERVIEW_DERIVED",
+  "paper_type": "method",
+  "topic_tags": ["computer vision"],
+  "problem": ["image classification needs a new architecture"],
+  "solution": ["apply a Transformer directly to image patches"],
+  "methods": ["ViT", "Transformer"],
+  "datasets": [],
+  "benchmarks": [],
+  "metrics": [],
+  "baselines": [],
+  "results": [],
+  "limitations": [],
+  "mentioned_entities": [],
+  "mentioned_papers": [],
+  "reader_needed_concepts": ["attention"],
+  "book_usage": {
+    "possible_chapters": ["Vision Transformers"],
+    "role": "central",
+    "importance_score_1_to_5": 5
+  }
+}
