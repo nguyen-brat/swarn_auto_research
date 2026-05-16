@@ -125,3 +125,78 @@ def is_method_of_core_per_concept(
                 else:
                     out.setdefault(norm, False)
     return out
+
+
+_METHOD_OF_CORE_GRAPH_EDGES = {"USES", "INTRODUCES", "USES_DATASET", "EXTENDS"}
+
+
+def _paper_ids(graph: dict[str, Any]) -> set[str]:
+    return {n["id"] for n in graph.get("nodes", []) if n.get("type") == "Paper"}
+
+
+def graph_concept_ids(graph: dict[str, Any]) -> dict[str, str]:
+    """Map normalized concept id -> display name, for every non-paper node."""
+    out: dict[str, str] = {}
+    for n in graph.get("nodes", []):
+        if n.get("type") == "Paper":
+            continue
+        norm = normalize(n["id"])
+        if norm:
+            out[norm] = n.get("display") or n["id"]
+    return out
+
+
+def graph_paper_count_per_concept(graph: dict[str, Any]) -> dict[str, int]:
+    """Distinct paper sources pointing to each non-paper node."""
+    papers = _paper_ids(graph)
+    seen: dict[str, set[str]] = defaultdict(set)
+    for e in graph.get("edges", []):
+        if e["src"] in papers and e["dst"] not in papers:
+            seen[normalize(e["dst"])].add(e["src"])
+    return {k: len(v) for k, v in seen.items()}
+
+
+def is_method_of_core_via_graph(
+    graph: dict[str, Any],
+    evidence: dict[str, dict[str, Any]],
+    *,
+    threshold: int = 4,
+) -> dict[str, bool]:
+    """True if any method-type edge from a core paper reaches the concept."""
+    papers = _paper_ids(graph)
+    out: dict[str, bool] = {}
+    for e in graph.get("edges", []):
+        if e.get("type") not in _METHOD_OF_CORE_GRAPH_EDGES:
+            continue
+        src, dst = e["src"], e["dst"]
+        if src in papers and dst not in papers:
+            dst_norm = normalize(dst)
+            if _importance_score(evidence.get(src, {})) >= threshold:
+                out[dst_norm] = True
+            else:
+                out.setdefault(dst_norm, False)
+    return out
+
+
+def graph_neighbors_per_concept(
+    graph: dict[str, Any], *, limit: int = 5,
+) -> dict[str, list[str]]:
+    """For each non-paper node, up-to-`limit` co-occurring concepts (via shared paper)."""
+    papers = _paper_ids(graph)
+    display = graph_concept_ids(graph)
+    paper_to_concepts: dict[str, set[str]] = defaultdict(set)
+    for e in graph.get("edges", []):
+        if e["src"] in papers and e["dst"] not in papers:
+            paper_to_concepts[e["src"]].add(normalize(e["dst"]))
+    co: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for concepts in paper_to_concepts.values():
+        clist = list(concepts)
+        for i, a in enumerate(clist):
+            for b in clist[i + 1:]:
+                co[a][b] += 1
+                co[b][a] += 1
+    out: dict[str, list[str]] = {}
+    for k, neigh in co.items():
+        ranked = sorted(neigh.items(), key=lambda x: (-x[1], x[0]))[:limit]
+        out[k] = [display.get(n, n) for n, _ in ranked]
+    return out

@@ -123,3 +123,69 @@ def test_is_method_of_core_baselines_do_not_count():
     out = is_method_of_core_per_concept(evidence, threshold=4)
     # baselines map to slot "result", not "method of core"
     assert out.get("gpt 2", False) is False
+
+
+from knowledge_gap_aggregator.signals import (
+    graph_concept_ids,
+    graph_paper_count_per_concept,
+    is_method_of_core_via_graph,
+    graph_neighbors_per_concept,
+)
+
+
+def _graph():
+    return {
+        "nodes": [
+            {"id": "p1", "type": "Paper"},
+            {"id": "p2", "type": "Paper"},
+            {"id": "vit", "type": "Method", "display": "ViT"},
+            {"id": "clip vision encoder", "type": "Method", "display": "CLIP vision encoder"},
+            {"id": "graph only concept", "type": "Method", "display": "Graph Only Concept"},
+        ],
+        "edges": [
+            {"src": "p1", "dst": "vit", "type": "INTRODUCES"},
+            {"src": "p2", "dst": "vit", "type": "USES"},
+            {"src": "p2", "dst": "clip vision encoder", "type": "INTRODUCES"},
+            {"src": "p2", "dst": "graph only concept", "type": "USES"},
+        ],
+    }
+
+
+def test_graph_concept_ids_excludes_papers():
+    ids = graph_concept_ids(_graph())
+    assert "p1" not in ids and "p2" not in ids
+    assert "vit" in ids
+    assert "graph only concept" in ids
+
+
+def test_graph_paper_count_per_concept():
+    counts = graph_paper_count_per_concept(_graph())
+    assert counts["vit"] == 2
+    assert counts["clip vision encoder"] == 1
+    assert counts["graph only concept"] == 1
+
+
+def test_is_method_of_core_via_graph_recognises_method_edge_types():
+    graph = _graph()
+    evidence = {"p1": _p("p1", importance=5), "p2": _p("p2", importance=2)}
+    out = is_method_of_core_via_graph(graph, evidence, threshold=4)
+    assert out.get("vit") is True            # INTRODUCES from core p1
+    assert out.get("clip vision encoder") is False  # INTRODUCES only from non-core p2
+
+
+def test_is_method_of_core_via_graph_ignores_non_method_types():
+    graph = {
+        "nodes": [{"id": "p1", "type": "Paper"}, {"id": "x", "type": "Method"}],
+        "edges": [{"src": "p1", "dst": "x", "type": "MENTIONS"}],
+    }
+    evidence = {"p1": _p("p1", importance=5)}
+    out = is_method_of_core_via_graph(graph, evidence, threshold=4)
+    assert out.get("x", False) is False
+
+
+def test_graph_neighbors_via_shared_papers():
+    graph = _graph()
+    n = graph_neighbors_per_concept(graph, limit=5)
+    # vit and clip vision encoder share p2 -> neighbors of each other.
+    assert "CLIP vision encoder" in n["vit"]
+    assert "ViT" in n["clip vision encoder"]
