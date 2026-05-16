@@ -154,7 +154,7 @@ Shard same list → `weak_graph_extractor` writing only `05_weak_graph/fragments
 Dispatch `knowledge_base_reader`.
 
 ### 5 — Detect gaps
-Dispatch `knowledge_gap_detector`. Skip Stage 6 only if `expansion_need_queue.json.items` is empty.
+Stage 5 runs the Python aggregator (`knowledge_gap_aggregator.build_digest`) to write `06_expansion/gap_candidates_digest.json`, then dispatches `knowledge_gap_classifier` which reads only the digest. Skip Stage 6 only if `expansion_need_queue.json.items` is empty.
 
 ### 6 — Expand pool [PARALLEL per gap]
 Shard queue items → `paper_expander` (one gap per shard by default). Each shard writes shard-local round file + accepted/rejected CSVs.
