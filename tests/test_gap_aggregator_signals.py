@@ -3,6 +3,8 @@ from knowledge_gap_aggregator.signals import (
     concepts_in_paper,
     paper_count_per_concept,
     core_paper_count_per_concept,
+    in_slots_per_concept,
+    is_method_of_core_per_concept,
 )
 
 
@@ -86,3 +88,38 @@ def test_core_paper_count_uses_book_usage_importance():
     }
     counts = core_paper_count_per_concept(evidence, threshold=4)
     assert counts["vit"] == 1
+
+
+def test_in_slots_aggregates_across_papers():
+    evidence = {
+        "p1": _p("p1", importance=5, title="ViT for Vision",
+                 methods=["ViT"], topic_tags=["vision"]),
+        "p2": _p("p2", importance=3, baselines=["ViT"]),
+    }
+    slots = in_slots_per_concept(evidence)
+    # ViT appears as method (p1), title (p1), and result via baselines (p2)
+    assert sorted(slots["vit"]) == ["method", "result", "title"]
+    assert "abstract" in slots["vision"]
+
+
+def test_is_method_of_core_true_when_methods_of_core_paper():
+    evidence = {
+        "p1": _p("p1", importance=5, methods=["ViT"]),
+        "p2": _p("p2", importance=2, methods=["wav2vec"]),
+    }
+    out = is_method_of_core_per_concept(evidence, threshold=4)
+    assert out.get("vit") is True
+    assert out.get("wav2vec") is False  # core threshold not met
+
+
+def test_is_method_of_core_datasets_also_count():
+    evidence = {"p1": _p("p1", importance=5, datasets=["LAION"])}
+    out = is_method_of_core_per_concept(evidence, threshold=4)
+    assert out.get("laion") is True
+
+
+def test_is_method_of_core_baselines_do_not_count():
+    evidence = {"p1": _p("p1", importance=5, baselines=["GPT-2"])}
+    out = is_method_of_core_per_concept(evidence, threshold=4)
+    # baselines map to slot "result", not "method of core"
+    assert out.get("gpt 2", False) is False

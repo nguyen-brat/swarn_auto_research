@@ -88,3 +88,40 @@ def core_paper_count_per_concept(
         for c in concepts_in_paper(paper):
             seen[c["normalized"]].add(arxiv_id)
     return {k: len(v) for k, v in seen.items()}
+
+
+_METHOD_OF_CORE_FIELDS = ("methods", "datasets")
+
+
+def in_slots_per_concept(
+    evidence: dict[str, dict[str, Any]],
+) -> dict[str, list[str]]:
+    """Aggregate distinct slot labels a concept appears in, across all papers."""
+    slots: dict[str, set[str]] = defaultdict(set)
+    for paper in evidence.values():
+        for c in concepts_in_paper(paper):
+            slots[c["normalized"]].add(c["slot"])
+    return {k: sorted(v) for k, v in slots.items()}
+
+
+def is_method_of_core_per_concept(
+    evidence: dict[str, dict[str, Any]],
+    *,
+    threshold: int = 4,
+) -> dict[str, bool]:
+    """True if a concept appears in `methods` or `datasets` of any core paper."""
+    out: dict[str, bool] = {}
+    for paper in evidence.values():
+        is_core = _importance_score(paper) >= threshold
+        for field in _METHOD_OF_CORE_FIELDS:
+            for raw in paper.get(field, []) or []:
+                if not isinstance(raw, str):
+                    continue
+                norm = normalize(raw)
+                if not norm:
+                    continue
+                if is_core:
+                    out[norm] = True
+                else:
+                    out.setdefault(norm, False)
+    return out
