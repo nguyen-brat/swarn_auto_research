@@ -17,7 +17,6 @@ class Signals:
     core_paper_count: int
     in_slots: list[str]
     is_method_of_core: bool
-    alias_hit: bool
 
 
 @dataclass

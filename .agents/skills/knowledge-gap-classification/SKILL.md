@@ -6,7 +6,7 @@ description: Classify a pre-ranked digest of concept candidates into known / unk
 # Knowledge Gap Classification
 
 ## Inputs
-- `06_expansion/gap_candidates_digest.json` (ranked shortlist, ≤120 entries)
+- `06_expansion/gap_candidates_digest.json` (ranked shortlist, ≤180 entries)
 - `06_expansion/known_concepts_snapshot.json` (aliases map only)
 
 You do NOT read `05_weak_graph/weak_global_graph.json` or `04_weak_evidence/*.json`. The digest already summarizes them.

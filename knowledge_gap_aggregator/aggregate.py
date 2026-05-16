@@ -41,7 +41,7 @@ def _load_evidence(run_dir: Path) -> dict[str, dict[str, Any]]:
     ev_dir = run_dir / "04_weak_evidence"
     if not ev_dir.exists():
         return out
-    for path in ev_dir.glob("*.json"):
+    for path in sorted(ev_dir.glob("*.json")):
         data = _load_json(path)
         if isinstance(data, dict):
             out[data.get("arxiv_id", path.stem)] = data
@@ -153,7 +153,6 @@ def build_digest(
             core_paper_count=cpc.get(norm, 0),
             in_slots=sl,
             is_method_of_core=imoc_evidence.get(norm, False) or imoc_graph.get(norm, False),
-            alias_hit=False,
         )
         imp = importance(
             paper_count=sigs.paper_count,
