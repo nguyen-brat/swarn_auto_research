@@ -1,4 +1,4 @@
-# Stage 5 Context-Bounded Gap Detection — Implementation Plan (rev 2)
+# Stage 5 Context-Bounded Gap Detection — Implementation Plan (rev 3)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -11,6 +11,13 @@
 **Spec reference:** `docs/superpowers/specs/2026-05-16-stage5-context-bounded-gap-detection-design.md` (rev 2)
 
 **Revision note (rev 2):** Previous revision used a fabricated `04_weak_evidence` schema with a `concepts[]` array and `slot` field. Real schema has concepts spread across `methods`/`datasets`/`benchmarks`/`baselines`/`mentioned_entities`/`reader_needed_concepts`/`topic_tags` and importance under `book_usage.importance_score_1_to_5`. Signals and fixtures rewritten. `bridge_score` and `networkx` dropped from v1. `top_n` raised 40 → 100. Detector deletion split into its own milestone (M1.5).
+
+**Revision note (rev 3):** Five fixes after second expert review:
+1. Aggregator actually uses `weak_global_graph.json`. Candidate universe = evidence concepts ∪ non-paper graph nodes. New `graph_paper_count_per_concept` signal; `paper_count` is union of evidence + graph paper sources. `is_method_of_core` also recognises graph edges of type `USES`/`INTRODUCES`/`USES_DATASET`/`EXTENDS` from core papers. Neighbors are derived from real graph edges, not just evidence co-occurrence.
+2. Fixture uses real edge types (`USES`, `INTRODUCES`, `USES_DATASET`, …). `PROPOSES` was invented — actual weak-graph schema allows: `INTRODUCES, USES, USES_DATASET, EVALUATES_ON, MEASURES_WITH, COMPARES_TO, IMPROVES_OVER, HAS_RESULT, HAS_LIMITATION, SOLVES, EXTENDS, MENTIONS, RELATED_TO, BELONGS_TO, CITES, CONTRADICTS`.
+3. Title matching is word-boundary (regex `\b…\b` against the normalised title), not naive substring — `vit` no longer matches `gravity`.
+4. Automated digest size guard. Test asserts the written file is ≤ 100 KB on a synthetic high-text fixture; aggregator also caps snippet length and neighbor name length at write time.
+5. Regression check (M1.5) expanded: in addition to old-queue coverage, manually confirm the digest covers concepts from `reader_needed_concepts`, central `methods`, `benchmarks`, and high-degree graph nodes.
 
 ---
 
@@ -60,6 +67,8 @@ Produces `gap_candidates_digest.json` alongside the existing pipeline. Old agent
 
 - [ ] **Step 1: weak_global_graph.json**
 
+Note `graph_only_concept` — present in the graph but in no evidence file. The aggregator must still include it in the candidate universe. All edge types are from the real weak-graph allowed list (`INTRODUCES`, `USES`, `USES_DATASET`, …).
+
 ```json
 {
   "nodes": [
@@ -70,16 +79,18 @@ Produces `gap_candidates_digest.json` alongside the existing pipeline. Old agent
     {"id": "clip vision encoder", "type": "Method", "display": "CLIP vision encoder"},
     {"id": "transformer", "type": "Method", "display": "Transformer"},
     {"id": "wav2vec", "type": "Method", "display": "wav2vec"},
-    {"id": "mel spectrogram", "type": "Dataset", "display": "Mel spectrogram"}
+    {"id": "mel spectrogram", "type": "Dataset", "display": "Mel spectrogram"},
+    {"id": "graph only concept", "type": "Method", "display": "Graph Only Concept"}
   ],
   "edges": [
-    {"src": "p1", "dst": "vit", "type": "USES", "confidence": "weak"},
+    {"src": "p1", "dst": "vit", "type": "INTRODUCES", "confidence": "weak"},
     {"src": "p1", "dst": "transformer", "type": "USES", "confidence": "weak"},
     {"src": "p2", "dst": "vit", "type": "USES", "confidence": "weak"},
-    {"src": "p2", "dst": "clip vision encoder", "type": "PROPOSES", "confidence": "weak"},
+    {"src": "p2", "dst": "clip vision encoder", "type": "INTRODUCES", "confidence": "weak"},
     {"src": "p2", "dst": "transformer", "type": "USES", "confidence": "weak"},
     {"src": "p3", "dst": "wav2vec", "type": "USES", "confidence": "weak"},
-    {"src": "p3", "dst": "mel spectrogram", "type": "USES", "confidence": "weak"}
+    {"src": "p3", "dst": "mel spectrogram", "type": "USES_DATASET", "confidence": "weak"},
+    {"src": "p2", "dst": "graph only concept", "type": "USES", "confidence": "weak"}
   ]
 }
 ```
@@ -435,6 +446,16 @@ def test_concepts_in_paper_title_match_case_insensitive():
     assert ("clip", "method") in slots
 
 
+def test_concepts_in_paper_title_match_is_word_boundary():
+    # "vit" must NOT match a title containing "gravity".
+    paper = _p("p1", importance=5, title="Gravity and Inertia",
+               methods=["ViT"])
+    out = concepts_in_paper(paper)
+    slots = {(c["normalized"], c["slot"]) for c in out}
+    assert ("vit", "method") in slots
+    assert ("vit", "title") not in slots
+
+
 def test_paper_count_per_concept_from_evidence():
     evidence = {
         "p1": _p("p1", importance=5, methods=["ViT", "Transformer"]),
@@ -467,6 +488,7 @@ uv run pytest tests/test_gap_aggregator_signals.py -v
 ```python
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from typing import Any
 
@@ -491,6 +513,26 @@ def _importance_score(paper: dict[str, Any]) -> int:
     return int(val) if isinstance(val, (int, float)) else 0
 
 
+_TOKEN = re.compile(r"\w+")
+
+
+def _title_tokens(title: str) -> set[str]:
+    """Normalized token set of a paper title — used for word-boundary concept matching."""
+    norm = normalize(title)
+    return set(_TOKEN.findall(norm))
+
+
+def _concept_in_title(norm: str, title_tokens: set[str]) -> bool:
+    """True iff every word of the normalized concept appears as a whole token in the title.
+
+    Prevents 'vit' from matching 'gravity'. Multi-word concepts are matched as
+    a bag-of-tokens: 'clip vision encoder' matches a title containing all three
+    tokens. This is conservative but safe.
+    """
+    parts = _TOKEN.findall(norm)
+    return bool(parts) and all(p in title_tokens for p in parts)
+
+
 def concepts_in_paper(paper: dict[str, Any]) -> list[dict[str, str]]:
     """Walk all concept-bearing fields and emit one entry per (concept, slot).
 
@@ -498,7 +540,7 @@ def concepts_in_paper(paper: dict[str, Any]) -> list[dict[str, str]]:
     Returned entries: {"raw": ..., "normalized": ..., "slot": ...}
     """
     out: list[dict[str, str]] = []
-    title = (paper.get("title") or "").lower()
+    title_tokens = _title_tokens(paper.get("title") or "")
     for field, slot in SLOT_BY_FIELD.items():
         for raw in paper.get(field, []) or []:
             if not isinstance(raw, str) or not raw.strip():
@@ -507,8 +549,8 @@ def concepts_in_paper(paper: dict[str, Any]) -> list[dict[str, str]]:
             if not norm:
                 continue
             out.append({"raw": raw, "normalized": norm, "slot": slot})
-            # Promote to "title" slot if the concept name appears in the title.
-            if norm in title:
+            # Promote to "title" slot only on whole-token match.
+            if _concept_in_title(norm, title_tokens):
                 out.append({"raw": raw, "normalized": norm, "slot": "title"})
     return out
 
@@ -661,6 +703,184 @@ uv run pytest tests/test_gap_aggregator_signals.py -v
 ```bash
 git add knowledge_gap_aggregator/signals.py tests/test_gap_aggregator_signals.py
 git commit -m "feat: signals.in_slots + is_method_of_core (evidence-derived)"
+```
+
+---
+
+### Task 5b: Signals — graph-derived (TDD)
+
+This task adds graph usage. Without it, the aggregator silently ignores `weak_global_graph.json`.
+
+**Files:**
+- Modify: `knowledge_gap_aggregator/signals.py`
+- Modify: `tests/test_gap_aggregator_signals.py`
+
+- [ ] **Step 1: Append tests**
+
+```python
+from knowledge_gap_aggregator.signals import (
+    graph_concept_ids,
+    graph_paper_count_per_concept,
+    is_method_of_core_via_graph,
+    graph_neighbors_per_concept,
+)
+
+
+def _graph():
+    return {
+        "nodes": [
+            {"id": "p1", "type": "Paper"},
+            {"id": "p2", "type": "Paper"},
+            {"id": "vit", "type": "Method", "display": "ViT"},
+            {"id": "clip vision encoder", "type": "Method", "display": "CLIP vision encoder"},
+            {"id": "graph only concept", "type": "Method", "display": "Graph Only Concept"},
+        ],
+        "edges": [
+            {"src": "p1", "dst": "vit", "type": "INTRODUCES"},
+            {"src": "p2", "dst": "vit", "type": "USES"},
+            {"src": "p2", "dst": "clip vision encoder", "type": "INTRODUCES"},
+            {"src": "p2", "dst": "graph only concept", "type": "USES"},
+        ],
+    }
+
+
+def test_graph_concept_ids_excludes_papers():
+    ids = graph_concept_ids(_graph())
+    assert "p1" not in ids and "p2" not in ids
+    assert "vit" in ids
+    assert "graph only concept" in ids
+
+
+def test_graph_paper_count_per_concept():
+    counts = graph_paper_count_per_concept(_graph())
+    assert counts["vit"] == 2
+    assert counts["clip vision encoder"] == 1
+    assert counts["graph only concept"] == 1
+
+
+def test_is_method_of_core_via_graph_recognises_method_edge_types():
+    graph = _graph()
+    # Mark p1 as core (importance >= 4 via evidence).
+    evidence = {"p1": _p("p1", importance=5), "p2": _p("p2", importance=2)}
+    out = is_method_of_core_via_graph(graph, evidence, threshold=4)
+    assert out.get("vit") is True            # INTRODUCES from core p1
+    assert out.get("clip vision encoder") is False  # INTRODUCES only from non-core p2
+
+
+def test_is_method_of_core_via_graph_ignores_non_method_types():
+    graph = {
+        "nodes": [{"id": "p1", "type": "Paper"}, {"id": "x", "type": "Method"}],
+        "edges": [{"src": "p1", "dst": "x", "type": "MENTIONS"}],
+    }
+    evidence = {"p1": _p("p1", importance=5)}
+    out = is_method_of_core_via_graph(graph, evidence, threshold=4)
+    assert out.get("x", False) is False
+
+
+def test_graph_neighbors_via_shared_papers():
+    graph = _graph()
+    n = graph_neighbors_per_concept(graph, limit=5)
+    # vit and clip vision encoder share p2 → neighbors of each other.
+    assert "CLIP vision encoder" in n["vit"]
+    assert "ViT" in n["clip vision encoder"]
+```
+
+- [ ] **Step 2: Run — expect ImportError**
+
+```bash
+uv run pytest tests/test_gap_aggregator_signals.py -v -k "graph_"
+```
+
+- [ ] **Step 3: Append implementations to `signals.py`**
+
+```python
+_METHOD_OF_CORE_GRAPH_EDGES = {"USES", "INTRODUCES", "USES_DATASET", "EXTENDS"}
+
+
+def _paper_ids(graph: dict[str, Any]) -> set[str]:
+    return {n["id"] for n in graph.get("nodes", []) if n.get("type") == "Paper"}
+
+
+def graph_concept_ids(graph: dict[str, Any]) -> dict[str, str]:
+    """Map normalized concept id -> display name, for every non-paper node."""
+    out: dict[str, str] = {}
+    for n in graph.get("nodes", []):
+        if n.get("type") == "Paper":
+            continue
+        norm = normalize(n["id"])
+        if norm:
+            out[norm] = n.get("display") or n["id"]
+    return out
+
+
+def graph_paper_count_per_concept(graph: dict[str, Any]) -> dict[str, int]:
+    """Distinct paper sources pointing to each non-paper node."""
+    papers = _paper_ids(graph)
+    seen: dict[str, set[str]] = defaultdict(set)
+    for e in graph.get("edges", []):
+        if e["src"] in papers and e["dst"] not in papers:
+            seen[normalize(e["dst"])].add(e["src"])
+    return {k: len(v) for k, v in seen.items()}
+
+
+def is_method_of_core_via_graph(
+    graph: dict[str, Any],
+    evidence: dict[str, dict[str, Any]],
+    *,
+    threshold: int = 4,
+) -> dict[str, bool]:
+    """True if any method-type edge from a core paper reaches the concept."""
+    papers = _paper_ids(graph)
+    out: dict[str, bool] = {}
+    for e in graph.get("edges", []):
+        if e.get("type") not in _METHOD_OF_CORE_GRAPH_EDGES:
+            continue
+        src, dst = e["src"], e["dst"]
+        if src in papers and dst not in papers:
+            dst_norm = normalize(dst)
+            if _importance_score(evidence.get(src, {})) >= threshold:
+                out[dst_norm] = True
+            else:
+                out.setdefault(dst_norm, False)
+    return out
+
+
+def graph_neighbors_per_concept(
+    graph: dict[str, Any], *, limit: int = 5,
+) -> dict[str, list[str]]:
+    """For each non-paper node, up-to-`limit` co-occurring concepts (via shared paper)."""
+    papers = _paper_ids(graph)
+    display = graph_concept_ids(graph)
+    # paper -> set of concept ids (normalized)
+    paper_to_concepts: dict[str, set[str]] = defaultdict(set)
+    for e in graph.get("edges", []):
+        if e["src"] in papers and e["dst"] not in papers:
+            paper_to_concepts[e["src"]].add(normalize(e["dst"]))
+    co: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for concepts in paper_to_concepts.values():
+        clist = list(concepts)
+        for i, a in enumerate(clist):
+            for b in clist[i + 1:]:
+                co[a][b] += 1
+                co[b][a] += 1
+    out: dict[str, list[str]] = {}
+    for k, neigh in co.items():
+        ranked = sorted(neigh.items(), key=lambda x: (-x[1], x[0]))[:limit]
+        out[k] = [display.get(n, n) for n, _ in ranked]
+    return out
+```
+
+- [ ] **Step 4: Run — expect PASS**
+
+```bash
+uv run pytest tests/test_gap_aggregator_signals.py -v
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add knowledge_gap_aggregator/signals.py tests/test_gap_aggregator_signals.py
+git commit -m "feat: graph-derived signals (concept ids, paper_count, method_of_core, neighbors)"
 ```
 
 ---
@@ -883,6 +1103,60 @@ def test_build_digest_writes_aggregator_log(run_dir):
     assert log.exists()
     data = json.loads(log.read_text())
     assert "dropped" in data
+
+
+def test_build_digest_includes_graph_only_concepts(run_dir):
+    """A concept present in weak_global_graph.json but in no evidence file
+    must still appear as a candidate (or be in `dropped` with a real reason)."""
+    build_digest(run_dir, run_id="test-run")
+    names = [c["normalized"] for c in _load_digest(run_dir)["candidates"]]
+    log = json.loads(
+        (run_dir / "06_expansion" / "aggregator_log.json").read_text()
+    )
+    dropped_names = [d["concept"].lower() for d in log["dropped"]]
+    assert "graph only concept" in names or "graph only concept" in dropped_names
+
+
+def test_build_digest_neighbors_use_graph_not_just_evidence(run_dir):
+    """If two concepts share a paper in the GRAPH but never co-occur in
+    evidence fields, the graph co-occurrence still surfaces them as neighbors."""
+    build_digest(run_dir, run_id="test-run")
+    data = _load_digest(run_dir)
+    by_norm = {c["normalized"]: c for c in data["candidates"]}
+    # p2 has graph edges to both 'vit' and 'graph only concept' -> neighbors.
+    if "vit" in by_norm:
+        assert any("graph only" in n.lower() for n in by_norm["vit"]["graph_neighbors"]) \
+            or any("clip" in n.lower() for n in by_norm["vit"]["graph_neighbors"])
+
+
+def test_build_digest_enforces_size_budget(tmp_path):
+    """Synthetic high-text fixture: snippets and names are long enough that
+    naive serialization would blow past 100 KB. The aggregator must cap."""
+    run = tmp_path / "run"
+    (run / "05_weak_graph").mkdir(parents=True)
+    (run / "04_weak_evidence").mkdir()
+    (run / "06_expansion").mkdir()
+
+    long_word = "x" * 500
+    methods = [f"{long_word}_{i}" for i in range(300)]
+    long_text = ["aaaa " * 200] * 5  # long solution/problem arrays
+    (run / "05_weak_graph" / "weak_global_graph.json").write_text(
+        json.dumps({"nodes": [{"id": "p1", "type": "Paper"}], "edges": []})
+    )
+    (run / "04_weak_evidence" / "p1.json").write_text(json.dumps({
+        "arxiv_id": "p1", "title": "", "methods": methods,
+        "datasets": [], "benchmarks": [], "baselines": [], "metrics": [],
+        "topic_tags": [], "mentioned_entities": [], "reader_needed_concepts": [],
+        "problem": long_text, "solution": long_text,
+        "book_usage": {"importance_score_1_to_5": 5},
+    }))
+    (run / "06_expansion" / "known_concepts_snapshot.json").write_text(
+        json.dumps({"aliases": {}})
+    )
+    build_digest(run, run_id="big")
+    out = run / "06_expansion" / "gap_candidates_digest.json"
+    size = out.stat().st_size
+    assert size <= 100_000, f"digest file is {size} bytes — exceeds 100 KB budget"
 ```
 
 - [ ] **Step 2: Run — expect ImportError**
@@ -912,11 +1186,20 @@ from knowledge_gap_aggregator.schema import (
 from knowledge_gap_aggregator.signals import (
     concepts_in_paper,
     core_paper_count_per_concept,
+    graph_concept_ids,
+    graph_neighbors_per_concept,
+    graph_paper_count_per_concept,
     importance,
     in_slots_per_concept,
     is_method_of_core_per_concept,
+    is_method_of_core_via_graph,
     paper_count_per_concept,
 )
+
+# Hard caps applied at write time so a noisy run cannot inflate the digest.
+_SNIPPET_MAX_CHARS = 200
+_NEIGHBOR_NAME_MAX_CHARS = 80
+_DIGEST_SIZE_HARD_LIMIT_BYTES = 100_000  # 100 KB; tests pin this.
 
 
 def _load_json(path: Path) -> Any:
@@ -935,8 +1218,8 @@ def _load_evidence(run_dir: Path) -> dict[str, dict[str, Any]]:
     return out
 
 
-def _display_name_index(evidence: dict[str, dict[str, Any]]) -> dict[str, str]:
-    """Map normalized -> first observed display (raw) form, preserving casing."""
+def _evidence_display_index(evidence: dict[str, dict[str, Any]]) -> dict[str, str]:
+    """Map normalized -> first observed raw form across evidence files."""
     seen: dict[str, str] = {}
     for paper in evidence.values():
         for c in concepts_in_paper(paper):
@@ -944,30 +1227,20 @@ def _display_name_index(evidence: dict[str, dict[str, Any]]) -> dict[str, str]:
     return seen
 
 
-def _neighbors_from_graph(
-    graph: dict[str, Any],
+def _union_paper_count(
     evidence: dict[str, dict[str, Any]],
-    limit: int = 5,
-) -> dict[str, list[str]]:
-    """For each concept (normalized), top-`limit` co-occurring concept displays.
-
-    Co-occurrence: two concepts share at least one paper that mentions both.
-    Sourced from evidence (graph not required for v1).
-    """
-    co: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    for paper in evidence.values():
-        names_in_paper = {c["normalized"]: c["raw"] for c in concepts_in_paper(paper)}
-        keys = list(names_in_paper.keys())
-        for i, a in enumerate(keys):
-            for b in keys[i + 1:]:
-                co[a][b] += 1
-                co[b][a] += 1
-    out: dict[str, list[str]] = {}
-    display = _display_name_index(evidence)
-    for k, neigh in co.items():
-        ranked = sorted(neigh.items(), key=lambda x: (-x[1], x[0]))[:limit]
-        out[k] = [display.get(n, n) for n, _ in ranked]
-    return out
+    graph: dict[str, Any],
+) -> dict[str, int]:
+    """Distinct paper sources per concept, unioning evidence mentions and graph edges."""
+    papers_in_graph = {n["id"] for n in graph.get("nodes", []) if n.get("type") == "Paper"}
+    seen: dict[str, set[str]] = defaultdict(set)
+    for arxiv_id, paper in evidence.items():
+        for c in concepts_in_paper(paper):
+            seen[c["normalized"]].add(arxiv_id)
+    for e in graph.get("edges", []):
+        if e["src"] in papers_in_graph and e["dst"] not in papers_in_graph:
+            seen[normalize(e["dst"])].add(e["src"])
+    return {k: len(v) for k, v in seen.items()}
 
 
 def _evidence_refs_for(
@@ -975,7 +1248,7 @@ def _evidence_refs_for(
     evidence: dict[str, dict[str, Any]],
     *,
     max_refs: int = 2,
-    max_chars: int = 200,
+    max_chars: int = _SNIPPET_MAX_CHARS,
 ) -> list[EvidenceRef]:
     refs: list[EvidenceRef] = []
     for arxiv_id, paper in evidence.items():
@@ -994,6 +1267,10 @@ def _evidence_refs_for(
     return refs
 
 
+def _cap_neighbors(names: list[str]) -> list[str]:
+    return [n[:_NEIGHBOR_NAME_MAX_CHARS] for n in names[:5]]
+
+
 def build_digest(
     run_dir: Path,
     *,
@@ -1007,34 +1284,46 @@ def build_digest(
     graph = _load_json(run_dir / "05_weak_graph" / "weak_global_graph.json")
     kb = _load_json(run_dir / "06_expansion" / "known_concepts_snapshot.json")
 
-    pc = paper_count_per_concept(evidence)
+    # Per-source counts (evidence-only retained for diagnostic completeness).
+    paper_count_evidence_only = paper_count_per_concept(evidence)
+    paper_count_graph_only = graph_paper_count_per_concept(graph)
+    paper_count_union = _union_paper_count(evidence, graph)
+
     cpc = core_paper_count_per_concept(evidence)
     slots = in_slots_per_concept(evidence)
-    imoc = is_method_of_core_per_concept(evidence)
-    neighbors = _neighbors_from_graph(graph, evidence)
-    display = _display_name_index(evidence)
+    imoc_evidence = is_method_of_core_per_concept(evidence)
+    imoc_graph = is_method_of_core_via_graph(graph, evidence)
+    neighbors = graph_neighbors_per_concept(graph)
 
-    all_concepts = sorted(set(pc) | set(slots))
+    evidence_display = _evidence_display_index(evidence)
+    graph_display = graph_concept_ids(graph)
+
+    # Universe: evidence concepts ∪ graph non-paper nodes (normalized keys).
+    universe = (
+        set(paper_count_evidence_only)
+        | set(slots)
+        | set(paper_count_graph_only)
+        | set(graph_display)
+    )
 
     candidates: list[Candidate] = []
     dropped: list[dict[str, str]] = []
 
-    for norm in all_concepts:
-        raw = display.get(norm, norm)
+    for norm in sorted(universe):
+        raw = evidence_display.get(norm) or graph_display.get(norm, norm)
         if is_known(raw, kb) or is_known(norm, kb):
             dropped.append({"concept": raw, "reason": "known"})
             continue
-        p = pc.get(norm, 0)
+        p = paper_count_union.get(norm, 0)
         sl = slots.get(norm, [])
-        # Pre-filter: a single mention in only mention/reader_needed-style slots.
-        if p <= 1 and set(sl).issubset({"mention", "reader_needed"}):
+        if p <= 1 and set(sl).issubset({"mention", "reader_needed"}) and not imoc_graph.get(norm, False):
             dropped.append({"concept": raw, "reason": "too_minor"})
             continue
         sigs = Signals(
             paper_count=p,
             core_paper_count=cpc.get(norm, 0),
             in_slots=sl,
-            is_method_of_core=imoc.get(norm, False),
+            is_method_of_core=imoc_evidence.get(norm, False) or imoc_graph.get(norm, False),
             alias_hit=False,
         )
         imp = importance(
@@ -1047,12 +1336,12 @@ def build_digest(
             dropped.append({"concept": raw, "reason": "low_score"})
             continue
         candidates.append(Candidate(
-            concept=raw,
+            concept=raw[:_NEIGHBOR_NAME_MAX_CHARS],
             normalized=norm,
             importance=imp,
             signals=sigs,
             evidence_refs=_evidence_refs_for(norm, evidence),
-            graph_neighbors=neighbors.get(norm, []),
+            graph_neighbors=_cap_neighbors(neighbors.get(norm, [])),
         ))
 
     candidates.sort(key=lambda c: c.importance, reverse=True)
@@ -1069,6 +1358,7 @@ def build_digest(
             "hard_cap": hard_cap,
             "min_importance_score": min_score,
             "kb_alias_normalized": True,
+            "size_hard_limit_bytes": _DIGEST_SIZE_HARD_LIMIT_BYTES,
         },
         kb_summary={
             "known_count": len(aliases_map),
@@ -1079,7 +1369,14 @@ def build_digest(
 
     out_path = run_dir / "06_expansion" / "gap_candidates_digest.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(digest.to_dict(), indent=2))
+    payload = json.dumps(digest.to_dict(), indent=2)
+    if len(payload.encode("utf-8")) > _DIGEST_SIZE_HARD_LIMIT_BYTES:
+        raise RuntimeError(
+            f"gap_candidates_digest.json exceeded size budget "
+            f"({len(payload.encode('utf-8'))} > {_DIGEST_SIZE_HARD_LIMIT_BYTES} bytes); "
+            f"tighten snippet/neighbor caps or lower hard_cap."
+        )
+    out_path.write_text(payload)
 
     log_path = run_dir / "06_expansion" / "aggregator_log.json"
     log_path.write_text(json.dumps({"dropped": dropped}, indent=2))
@@ -1541,7 +1838,14 @@ for c in d.candidates[:15]:
 cat research_runs/ai-agent-system-in-coding-that-can-accelerate-my-working-process-20260515-152516/06_expansion/expansion_need_queue.json | python -m json.tool
 ```
 
-Compare: every concept in the old queue (≤5 items) should appear somewhere in the new digest's top 20. If one is missing **and** it's clearly important (subjective check by the author), tune weights in `signals.py` and re-run. If the digest looks reasonable, proceed.
+Compare across **four dimensions** (don't just match the old queue, or we risk overfitting to it):
+
+1. **Old queue coverage** — every concept in the old `expansion_need_queue.json` should appear in the new digest's top-20.
+2. **`reader_needed_concepts` coverage** — sample 10 of these from a few core papers; ≥80% should appear somewhere in the digest (top-120).
+3. **Central methods coverage** — sample 10 entries from the `methods` field of core papers (importance ≥ 4); all should appear in the digest with `is_method_of_core=true`.
+4. **High-degree graph nodes** — top 10 concepts by `graph_paper_count_per_concept` (computable from the graph file directly); all should appear in the digest.
+
+If any of (1)–(4) shows a clearly-important concept missing, tune weights in `signals.py` and re-run. Document the comparison in `aggregator_regression.md` (next step).
 
 - [ ] **Step 3: Inspect digest file size**
 
@@ -1553,10 +1857,17 @@ Expected: ≤ ~80 KB. If much larger, investigate — likely a bug in `hard_cap`
 
 - [ ] **Step 4: Author records sign-off**
 
-Add a one-line note to `06_expansion/aggregator_regression.md` in the existing run dir:
+Add a short report to `06_expansion/aggregator_regression.md` in the existing run dir:
 
 ```
-Regression check 2026-05-16: digest top-20 covers old queue. OK to delete detector.
+Regression 2026-05-16
+
+1. Old-queue coverage: PASS (5/5 in top-20)
+2. reader_needed sample: PASS (8/10 present)
+3. Core-paper methods: PASS (10/10, is_method_of_core=true)
+4. High-degree graph nodes: PASS (10/10)
+
+Decision: OK to delete detector.
 ```
 
 `git add` + commit.

@@ -2,9 +2,16 @@
 
 **Date:** 2026-05-16
 **Author:** brainstorming session (Claude + user)
-**Status:** Approved, revised post expert review (rev 2)
+**Status:** Approved, revised post expert review (rev 3)
 
 ## Revision history
+
+- **rev 3 (2026-05-16, post 2nd expert review):**
+  - Aggregator now actually reads `weak_global_graph.json` — candidate universe = evidence concepts ∪ non-paper graph nodes; new `graph_paper_count`/`graph_neighbors`/`is_method_of_core_via_graph` signals; `paper_count` is the union of evidence and graph paper sources.
+  - Fixture edge types corrected against the real weak-graph schema (`INTRODUCES`, `USES`, `USES_DATASET`, `EVALUATES_ON`, …; no `PROPOSES`).
+  - Title matching is word-boundary (tokenized), not naive substring.
+  - Automated digest size guard: `build_digest` raises if serialized JSON > 100 KB; test fixture verifies the cap.
+  - Regression check (M1.5) widened to four dimensions: old-queue coverage, `reader_needed_concepts` sample, core-paper `methods` sample, high-degree graph nodes.
 
 - **rev 2 (2026-05-16, post expert review):**
   - Real `04_weak_evidence/*.json` schema documented (concepts in `methods`/`benchmarks`/`datasets`/`baselines`/`mentioned_entities`/`reader_needed_concepts`; importance in `book_usage.importance_score_1_to_5`). Original fixture/signal design assumed a `concepts[]` array with `slot` — corrected.
