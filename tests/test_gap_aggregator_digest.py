@@ -41,8 +41,8 @@ def test_build_digest_writes_file(run_dir):
     data = _load_digest(run_dir)
     assert data["run_id"] == "test-run"
     assert "candidates" in data
-    assert data["params"]["top_n"] == 100
-    assert data["params"]["hard_cap"] == 120
+    assert data["params"]["top_n"] == 150
+    assert data["params"]["hard_cap"] == 180
 
 
 def test_build_digest_drops_known_concepts(run_dir):
@@ -77,7 +77,7 @@ def test_build_digest_respects_hard_cap(tmp_path):
         json.dumps({"aliases": {}})
     )
     build_digest(run, run_id="big")
-    assert len(_load_digest(run)["candidates"]) <= 120
+    assert len(_load_digest(run)["candidates"]) <= 180
 
 
 def test_build_digest_signals_and_evidence_present(run_dir):
@@ -148,4 +148,4 @@ def test_build_digest_enforces_size_budget(tmp_path):
     build_digest(run, run_id="big")
     out = run / "06_expansion" / "gap_candidates_digest.json"
     size = out.stat().st_size
-    assert size <= 100_000, f"digest file is {size} bytes — exceeds 100 KB budget"
+    assert size <= 200_000, f"digest file is {size} bytes — exceeds 200 KB budget"

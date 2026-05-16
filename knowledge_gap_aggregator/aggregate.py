@@ -29,7 +29,7 @@ from knowledge_gap_aggregator.signals import (
 # Hard caps applied at write time so a noisy run cannot inflate the digest.
 _SNIPPET_MAX_CHARS = 120
 _NEIGHBOR_NAME_MAX_CHARS = 80
-_DIGEST_SIZE_HARD_LIMIT_BYTES = 100_000  # 100 KB; tests pin this.
+_DIGEST_SIZE_HARD_LIMIT_BYTES = 200_000  # 200 KB ≈ 50K tokens; well under LLM context.
 
 
 def _load_json(path: Path) -> Any:
@@ -105,8 +105,8 @@ def build_digest(
     run_dir: Path,
     *,
     run_id: str | None = None,
-    top_n: int = 100,
-    hard_cap: int = 120,
+    top_n: int = 150,
+    hard_cap: int = 180,
     min_score: float = 0.30,
 ) -> Digest:
     run_dir = Path(run_dir)
@@ -145,7 +145,7 @@ def build_digest(
             continue
         p = paper_count_union.get(norm, 0)
         sl = slots.get(norm, [])
-        if p <= 1 and set(sl).issubset({"mention", "reader_needed"}) and not imoc_graph.get(norm, False):
+        if p <= 1 and set(sl).issubset({"mention"}) and not imoc_graph.get(norm, False):
             dropped.append({"concept": raw, "reason": "too_minor"})
             continue
         sigs = Signals(
