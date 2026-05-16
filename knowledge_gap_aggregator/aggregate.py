@@ -27,7 +27,7 @@ from knowledge_gap_aggregator.signals import (
 )
 
 # Hard caps applied at write time so a noisy run cannot inflate the digest.
-_SNIPPET_MAX_CHARS = 200
+_SNIPPET_MAX_CHARS = 120
 _NEIGHBOR_NAME_MAX_CHARS = 80
 _DIGEST_SIZE_HARD_LIMIT_BYTES = 100_000  # 100 KB; tests pin this.
 
@@ -77,7 +77,7 @@ def _evidence_refs_for(
     normalized: str,
     evidence: dict[str, dict[str, Any]],
     *,
-    max_refs: int = 2,
+    max_refs: int = 1,
     max_chars: int = _SNIPPET_MAX_CHARS,
 ) -> list[EvidenceRef]:
     refs: list[EvidenceRef] = []
@@ -98,7 +98,7 @@ def _evidence_refs_for(
 
 
 def _cap_neighbors(names: list[str]) -> list[str]:
-    return [n[:_NEIGHBOR_NAME_MAX_CHARS] for n in names[:5]]
+    return [n[:_NEIGHBOR_NAME_MAX_CHARS] for n in names[:3]]
 
 
 def build_digest(
