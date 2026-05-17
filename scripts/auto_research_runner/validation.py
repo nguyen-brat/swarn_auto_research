@@ -51,6 +51,11 @@ def primary_artifact_exists(run_dir: Path, stage: str) -> bool:
     return bool(artifacts) and all((run_dir / artifact).exists() for artifact in artifacts)
 
 
+def _require(condition: bool, message: str) -> None:
+    if not condition:
+        raise RuntimeError(message)
+
+
 def _float_score(row: dict[str, str], *, path_name: str) -> float:
     try:
         return float(row.get("final_score", ""))
@@ -563,27 +568,27 @@ def validate_stage_6_outputs(run_dir: Path) -> None:
     accepted_path = expansion_dir / "accepted_candidates.csv"
     rejected_path = expansion_dir / "rejected_candidates.csv"
     for path in (round_path, accepted_path, rejected_path):
-        if not path.exists():
-            raise RuntimeError(f"Stage 6 missing required output: {path.name}")
+        _require(path.exists(), f"Stage 6 missing required output: {path.name}")
     round_data = json.loads(round_path.read_text())
-    if not isinstance(round_data, dict):
-        raise RuntimeError("expansion_round_01.json must be an object")
-    if round_data.get("status") not in {"completed", "skipped"}:
-        raise RuntimeError("expansion_round_01.json status must be completed or skipped")
-    if not isinstance(round_data.get("items"), list):
-        raise RuntimeError("expansion_round_01.json items must be a list")
-    accepted_rows = _accepted_expansion_rows(run_dir)
+    _require(isinstance(round_data, dict), "expansion_round_01.json must be an object")
+    _require(
+        round_data.get("status") in {"completed", "skipped"},
+        "expansion_round_01.json status must be completed or skipped",
+    )
+    _require(isinstance(round_data.get("items"), list), "expansion_round_01.json items must be a list")
     pool_ids = set(load_paper_pool_arxiv_ids(run_dir))
-    for row in accepted_rows:
+    for row in _accepted_expansion_rows(run_dir):
         arxiv_id = str(row.get("arxiv_id") or "").strip()
-        if not arxiv_id:
-            raise RuntimeError("accepted_candidates.csv rows must include arxiv_id")
-        if arxiv_id not in pool_ids:
-            raise RuntimeError(f"accepted Stage 6 paper missing from paper_pool.json: {arxiv_id}")
-        if not str(row.get("unknown_concept") or row.get("gap_id") or "").strip():
-            raise RuntimeError(f"accepted_candidates.csv row missing gap for {arxiv_id}")
-        if not str(row.get("why_needed") or "").strip():
-            raise RuntimeError(f"accepted_candidates.csv row missing why_needed for {arxiv_id}")
+        _require(bool(arxiv_id), "accepted_candidates.csv rows must include arxiv_id")
+        _require(arxiv_id in pool_ids, f"accepted Stage 6 paper missing from paper_pool.json: {arxiv_id}")
+        _require(
+            bool(str(row.get("unknown_concept") or row.get("gap_id") or "").strip()),
+            f"accepted_candidates.csv row missing gap for {arxiv_id}",
+        )
+        _require(
+            bool(str(row.get("why_needed") or "").strip()),
+            f"accepted_candidates.csv row missing why_needed for {arxiv_id}",
+        )
 
 
 def _accepted_expansion_rows(run_dir: Path) -> list[dict[str, str]]:

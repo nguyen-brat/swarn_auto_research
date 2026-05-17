@@ -802,15 +802,15 @@ def run_stage_13(
             shard_id=f"pack-{idx:03d}",
             agent="chapter_pack_builder",
             model="gpt-5.4-mini",
-                    prompt=_generic_agent_prompt(
-                        ".codex/agents/chapter_pack_builder.toml",
-                        run_dir.name,
-                        "13",
-                        f"pack-{idx:03d}",
-                        {"pack_targets": [_typed_target_ref(target) for target in chunk]},
-                    ),
-                    expected_outputs=[_expected_chapter_pack(t) for t in chunk],
-                )
+            prompt=_generic_agent_prompt(
+                ".codex/agents/chapter_pack_builder.toml",
+                run_dir.name,
+                "13",
+                f"pack-{idx:03d}",
+                {"pack_targets": [_typed_target_ref(target) for target in chunk]},
+            ),
+            expected_outputs=[_expected_chapter_pack(t) for t in chunk],
+        )
         for idx, chunk in enumerate(chunked(targets, 2), start=1)
         if any(not (run_dir / _expected_chapter_pack(t)).exists() for t in chunk)
     ]
@@ -880,69 +880,6 @@ def run_stage_16(run_dir: Path, *, max_workers: int = 1) -> None:
     for shard_path in manifest_dir.glob("chapters_manifest_shard_*.json"):
         shard_path.unlink()
     append_run_log(run_dir, "16", "deterministic", f"{len(manifest['chapters'])} chapters")
-
-
-def run_stage_16_legacy_sharded(
-    run_dir: Path,
-    *,
-    max_workers: int = 1,
-    executor: str = DEFAULT_EXECUTOR,
-) -> None:
-    targets = build_chapter_targets(run_dir)
-    shard_paths: list[str] = []
-    specs = []
-    for idx, chunk in enumerate(chunked(targets, 2), start=1):
-        shard_id = f"manifest-{idx:03d}"
-        shard_path = f"16_book/chapters_manifest_shard_{shard_id}.json"
-        shard_paths.append(shard_path)
-        if (run_dir / shard_path).exists():
-            continue
-        specs.append(
-            ShardSpec(
-                stage="16",
-                shard_id=shard_id,
-                agent="chapter_manifest_builder",
-                model="gpt-5.4",
-                prompt=_generic_agent_prompt(
-                    ".codex/agents/chapter_manifest_builder.toml",
-                    run_dir.name,
-                    "16",
-                    shard_id,
-                    {"chapter_targets": [_typed_target_ref(target) for target in chunk]},
-                ),
-                expected_outputs=[shard_path],
-            )
-        )
-    if specs:
-        run_shards(run_dir, specs, max_workers=max_workers, executor=executor)
-    _merge_chapter_manifest_shards(run_dir, shard_paths)
-
-
-def _merge_chapter_manifest_shards(run_dir: Path, shard_paths: list[str]) -> None:
-    manifest_dir = run_dir / "16_book"
-    manifest_dir.mkdir(parents=True, exist_ok=True)
-    chapters: list[dict[str, Any]] = []
-    for rel_path in shard_paths:
-        path = run_dir / rel_path
-        if not path.exists():
-            raise RuntimeError(f"Stage 16 missing manifest shard: {path}")
-        shard_data = json.loads(path.read_text())
-        if not isinstance(shard_data, list):
-            raise RuntimeError(f"Stage 16 manifest shard is not a list: {path}")
-        chapters.extend(shard_data)
-    manifest_path = manifest_dir / "chapters_manifest.json"
-    tmp_path = manifest_dir / "chapters_manifest.json.tmp"
-    tmp_path.write_text(
-        json.dumps(
-            {"run_id": run_dir.name, "generated_at": now_iso(), "chapters": chapters},
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n"
-    )
-    tmp_path.replace(manifest_path)
-    for rel_path in shard_paths:
-        (run_dir / rel_path).unlink()
 
 
 def run_stage_17(run_dir: Path, *, executor: str = DEFAULT_EXECUTOR) -> None:
