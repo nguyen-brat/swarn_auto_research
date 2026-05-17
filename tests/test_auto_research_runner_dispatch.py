@@ -7,12 +7,12 @@ from unittest.mock import patch
 
 import pytest
 
-from scripts.run_auto_research import (
-    ShardSpec,
+from scripts.auto_research_runner.shards import (
     _codex_exec_command,
     expected_outputs_exist,
     run_shards,
 )
+from scripts.auto_research_runner.shared_types import ShardSpec
 
 
 def test_expected_outputs_exist_requires_every_file(tmp_path):
@@ -76,7 +76,7 @@ def test_run_shards_records_manifest_and_retries_missing_output(tmp_path):
             out.write_text(json.dumps({"nodes": [], "edges": []}))
         return subprocess.CompletedProcess(cmd, 0)
 
-    with patch("scripts.run_auto_research.subprocess.run", side_effect=fake_run):
+    with patch("scripts.auto_research_runner.shards.subprocess.run", side_effect=fake_run):
         run_shards(run, [spec], max_retries=1, executor="cli")
 
     manifest = run / "run_control" / "stages" / "11" / "shards" / "vgraph-01.json"
@@ -124,7 +124,7 @@ def test_run_shards_recovers_parallel_capacity_failure_serially(tmp_path):
             turn_id=f"turn-{shard.shard_id}-{calls[shard.shard_id]}",
         )
 
-    with patch("scripts.run_auto_research._run_sdk_shard_attempt", side_effect=fake_sdk):
+    with patch("scripts.auto_research_runner.shards._run_sdk_shard_attempt", side_effect=fake_sdk):
         run_shards(run, [good, flaky], max_retries=1, max_workers=2)
 
     assert (run / "14_chapters" / "methods" / "good.md").exists()
@@ -135,6 +135,48 @@ def test_run_shards_recovers_parallel_capacity_failure_serially(tmp_path):
     assert manifest["status"] == "completed"
     assert manifest["attempt"] == 3
     assert calls == {"write-good": 1, "write-flaky": 3}
+
+
+def test_run_shards_force_recovery_retries_only_missing_outputs(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    good = ShardSpec(
+        stage="10",
+        shard_id="verified-evidence-good",
+        agent="verified_evidence_extractor",
+        model="gpt-5.4-mini",
+        prompt="write good evidence",
+        expected_outputs=["10_verified_evidence/good.json"],
+    )
+    flaky = ShardSpec(
+        stage="10",
+        shard_id="verified-evidence-flaky",
+        agent="verified_evidence_extractor",
+        model="gpt-5.4-mini",
+        prompt="write flaky evidence",
+        expected_outputs=["10_verified_evidence/flaky.json"],
+    )
+    calls = {"verified-evidence-good": 0, "verified-evidence-flaky": 0}
+
+    def fake_single_shard(run_dir, shard, **_kwargs):
+        calls[shard.shard_id] += 1
+        if shard.shard_id == "verified-evidence-good":
+            out = run_dir / shard.expected_outputs[0]
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps({"claims": [{"source_node_id": "s.01", "source_lines": [1, 1]}]}))
+            return
+        if calls[shard.shard_id] == 1:
+            raise RuntimeError("temporary parallel failure")
+        out = run_dir / shard.expected_outputs[0]
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({"claims": [{"source_node_id": "s.01", "source_lines": [1, 1]}]}))
+
+    with patch("scripts.auto_research_runner.shards._run_single_shard", side_effect=fake_single_shard):
+        run_shards(run, [good, flaky], max_workers=2, force=True)
+
+    assert (run / "10_verified_evidence" / "good.json").exists()
+    assert (run / "10_verified_evidence" / "flaky.json").exists()
+    assert calls == {"verified-evidence-good": 1, "verified-evidence-flaky": 2}
 
 
 def test_run_shards_defaults_to_sdk_and_records_thread_ids(tmp_path):
@@ -163,8 +205,8 @@ def test_run_shards_defaults_to_sdk_and_records_thread_ids(tmp_path):
         )
 
     with (
-        patch("scripts.run_auto_research._run_sdk_shard_attempt", side_effect=fake_sdk),
-        patch("scripts.run_auto_research.subprocess.run") as subprocess_run,
+        patch("scripts.auto_research_runner.shards._run_sdk_shard_attempt", side_effect=fake_sdk),
+        patch("scripts.auto_research_runner.shards.subprocess.run") as subprocess_run,
     ):
         run_shards(run, [spec])
 
@@ -198,8 +240,8 @@ def test_run_shards_cli_executor_uses_subprocess(tmp_path):
         return subprocess.CompletedProcess(cmd, 0)
 
     with (
-        patch("scripts.run_auto_research.subprocess.run", side_effect=fake_run) as subprocess_run,
-        patch("scripts.run_auto_research._run_sdk_shard_attempt") as sdk_run,
+        patch("scripts.auto_research_runner.shards.subprocess.run", side_effect=fake_run) as subprocess_run,
+        patch("scripts.auto_research_runner.shards._run_sdk_shard_attempt") as sdk_run,
     ):
         run_shards(run, [spec], executor="cli")
 
@@ -224,7 +266,7 @@ def test_run_shards_records_manifest_and_log_on_launch_error(tmp_path):
     )
 
     with patch(
-        "scripts.run_auto_research.subprocess.run",
+        "scripts.auto_research_runner.shards.subprocess.run",
         side_effect=FileNotFoundError("codex"),
     ):
         with pytest.raises(RuntimeError):
@@ -255,7 +297,7 @@ def test_run_shards_records_manifest_on_timeout(tmp_path):
     )
 
     with patch(
-        "scripts.run_auto_research.subprocess.run",
+        "scripts.auto_research_runner.shards.subprocess.run",
         side_effect=subprocess.TimeoutExpired(["codex"], timeout=1),
     ):
         with pytest.raises(RuntimeError):
@@ -288,7 +330,7 @@ def test_run_shards_treats_timeout_as_failure_even_if_output_exists(tmp_path):
         out.write_text(json.dumps({"nodes": [], "edges": []}))
         raise subprocess.TimeoutExpired(cmd, timeout=timeout)
 
-    with patch("scripts.run_auto_research.subprocess.run", side_effect=fake_run):
+    with patch("scripts.auto_research_runner.shards.subprocess.run", side_effect=fake_run):
         with pytest.raises(RuntimeError):
             run_shards(run, [spec], max_retries=0, timeout_seconds=1, executor="cli")
 

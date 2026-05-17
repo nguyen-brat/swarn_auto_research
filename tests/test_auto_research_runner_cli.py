@@ -13,16 +13,21 @@ from unittest.mock import patch
 import pytest
 import requests
 
-import scripts.run_auto_research as runner
-from scripts.run_auto_research import (
-    ShardSpec,
-    Stage8MarkdownUnavailable,
+import scripts.auto_research_runner.chapters as chapters_mod
+import scripts.auto_research_runner.cli as cli_mod
+import scripts.auto_research_runner.packs as packs_mod
+import scripts.auto_research_runner.process_cleanup as process_cleanup_mod
+import scripts.auto_research_runner.shards as shards_mod
+import scripts.auto_research_runner.stage_1_search as stage_1_search_mod
+import scripts.auto_research_runner.stages as stages_mod
+import scripts.auto_research_runner.validation as validation_mod
+from scripts.auto_research_runner.cli import main
+from scripts.auto_research_runner.packs import build_deterministic_stage_13_packs
+from scripts.auto_research_runner.chapters import build_chapter_targets
+from scripts.auto_research_runner.shards import run_deterministic_command, run_shards
+from scripts.auto_research_runner.shared_types import ShardSpec, Stage8MarkdownUnavailable
+from scripts.auto_research_runner.stages import (
     bootstrap_new_run,
-    build_deterministic_stage_13_packs,
-    build_chapter_targets,
-    main,
-    run_deterministic_command,
-    run_shards,
     run_stage_1,
     run_stage_2,
     run_stage_3,
@@ -39,10 +44,17 @@ from scripts.run_auto_research import (
     run_stage_15,
     run_stage_16,
     run_stage_18,
-    save_run_state,
+)
+from scripts.auto_research_runner.state import save_run_state
+from scripts.auto_research_runner.validation import (
     validate_bootstrap_stage_0_10_contract,
     validate_stage_1_keep_all_contract,
 )
+
+# Tests refer to many helpers via `runner.X`. After the refactor those helpers
+# live in different modules; the alias below keeps the tests readable by
+# routing each name to the canonical module.
+runner = stages_mod
 
 
 class _FakeResponse:
@@ -60,13 +72,13 @@ class _FakeResponse:
 
 
 def test_default_shard_timeout_allows_long_verifier_turns():
-    assert runner.DEFAULT_SHARD_TIMEOUT_SECONDS == 3 * 3600
+    assert shards_mod.DEFAULT_SHARD_TIMEOUT_SECONDS == 3 * 3600
 
 
 def test_effective_max_workers_caps_default_burden(monkeypatch):
     monkeypatch.delenv("SWARN_MAX_EFFECTIVE_WORKERS", raising=False)
 
-    assert runner._effective_max_workers(20) == 20
+    assert shards_mod._effective_max_workers(20) == 20
 
 
 def test_effective_max_workers_uses_stage_default_caps(monkeypatch):
@@ -74,37 +86,37 @@ def test_effective_max_workers_uses_stage_default_caps(monkeypatch):
     for stage in ("2", "3", "6", "8", "9", "10", "11", "13", "14", "15", "16"):
         monkeypatch.delenv(f"SWARN_STAGE_{stage}_MAX_EFFECTIVE_WORKERS", raising=False)
 
-    assert runner._effective_max_workers(20, stage="2") == 20
-    assert runner._effective_max_workers(20, stage="3") == 20
-    assert runner._effective_max_workers(20, stage="6") == 10
-    assert runner._effective_max_workers(20, stage="8") == 20
-    assert runner._effective_max_workers(20, stage="9") == 20
-    assert runner._effective_max_workers(20, stage="10") == 5
-    assert runner._effective_max_workers(20, stage="11") == 10
-    assert runner._effective_max_workers(20, stage="13") == 5
-    assert runner._effective_max_workers(20, stage="14") == 10
-    assert runner._effective_max_workers(20, stage="15") == 5
-    assert runner._effective_max_workers(20, stage="16") == 20
+    assert shards_mod._effective_max_workers(20, stage="2") == 20
+    assert shards_mod._effective_max_workers(20, stage="3") == 20
+    assert shards_mod._effective_max_workers(20, stage="6") == 10
+    assert shards_mod._effective_max_workers(20, stage="8") == 20
+    assert shards_mod._effective_max_workers(20, stage="9") == 20
+    assert shards_mod._effective_max_workers(20, stage="10") == 20
+    assert shards_mod._effective_max_workers(20, stage="11") == 10
+    assert shards_mod._effective_max_workers(20, stage="13") == 5
+    assert shards_mod._effective_max_workers(20, stage="14") == 10
+    assert shards_mod._effective_max_workers(20, stage="15") == 5
+    assert shards_mod._effective_max_workers(20, stage="16") == 20
 
 
 def test_effective_max_workers_allows_env_override(monkeypatch):
     monkeypatch.setenv("SWARN_MAX_EFFECTIVE_WORKERS", "4")
 
-    assert runner._effective_max_workers(20) == 4
+    assert shards_mod._effective_max_workers(20) == 4
 
 
 def test_effective_max_workers_allows_stage_6_env_override(monkeypatch):
     monkeypatch.setenv("SWARN_MAX_EFFECTIVE_WORKERS", "10")
     monkeypatch.setenv("SWARN_STAGE_6_MAX_EFFECTIVE_WORKERS", "3")
 
-    assert runner._effective_max_workers(20, stage="6") == 3
+    assert shards_mod._effective_max_workers(20, stage="6") == 3
 
 
 def test_effective_max_workers_allows_stage_env_override(monkeypatch):
     monkeypatch.setenv("SWARN_MAX_EFFECTIVE_WORKERS", "20")
     monkeypatch.setenv("SWARN_STAGE_10_MAX_EFFECTIVE_WORKERS", "7")
 
-    assert runner._effective_max_workers(20, stage="10") == 7
+    assert shards_mod._effective_max_workers(20, stage="10") == 7
 
 
 def _write_fake_proc(proc_root, pid, cmdline, cwd):
@@ -135,7 +147,7 @@ def test_find_research_mcp_pids_selects_only_repo_mcp_processes(tmp_path):
     _write_fake_proc(proc_root, 103, ["uv", "run", "other-tool"], repo)
     _write_fake_proc(proc_root, 104, ["uv", "run", "swarn-auto-research-mcp"], other_repo)
 
-    assert runner._find_research_mcp_pids(
+    assert process_cleanup_mod._find_research_mcp_pids(
         proc_root=proc_root,
         repo_root=repo,
         current_pid=999,
@@ -151,7 +163,7 @@ def test_run_deterministic_command_logs_failure(tmp_path):
         {"returncode": 2, "stdout": "bad stdout", "stderr": "bad stderr"},
     )()
 
-    with patch("scripts.run_auto_research.subprocess.run", return_value=completed):
+    with patch("scripts.auto_research_runner.shards.subprocess.run", return_value=completed):
         try:
             run_deterministic_command(run, "18", ["python", "-m", "demo"])
         except RuntimeError as error:
@@ -170,7 +182,7 @@ def test_run_deterministic_command_logs_launch_error(tmp_path):
     run.mkdir(parents=True)
 
     with patch(
-        "scripts.run_auto_research.subprocess.run",
+        "scripts.auto_research_runner.shards.subprocess.run",
         side_effect=FileNotFoundError("missing command"),
     ):
         try:
@@ -220,7 +232,7 @@ def test_run_shards_honors_max_workers_20(tmp_path):
         for idx in range(20)
     ]
 
-    with patch("scripts.run_auto_research.subprocess.run", side_effect=fake_run):
+    with patch("scripts.auto_research_runner.shards.subprocess.run", side_effect=fake_run):
         run_shards(run, specs, max_workers=20, executor="cli")
 
     assert max_seen > 1
@@ -242,10 +254,10 @@ def test_run_single_shard_records_traceback_on_exception(tmp_path, monkeypatch):
     def fail_attempt(*args, **kwargs):
         raise ValueError("specific boom")
 
-    monkeypatch.setattr(runner, "_run_shard_attempt", fail_attempt)
+    monkeypatch.setattr(shards_mod, "_run_shard_attempt", fail_attempt)
 
     with pytest.raises(RuntimeError):
-        runner._run_single_shard(run_dir, spec, max_retries=0)
+        shards_mod._run_single_shard(run_dir, spec, max_retries=0)
 
     stderr = (
         run_dir
@@ -284,7 +296,7 @@ def test_run_stage_18_runs_generate_then_validate(tmp_path):
         "# References\n"
     )
 
-    with patch("scripts.run_auto_research.run_deterministic_command") as command:
+    with patch("scripts.auto_research_runner.stages.run_deterministic_command") as command:
         run_stage_18(Path(run))
 
     assert command.call_count == 2
@@ -337,7 +349,7 @@ def test_run_stage_1_dispatches_query_planner_for_search_plan_only(tmp_path, mon
             "output_path": str(bulk_path),
         }
 
-    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_shards", fake_run_shards)
     monkeypatch.setattr(
         "swarn_research_mcp.tools.paper_search.bulk_normal_start_search",
         fake_bulk_normal_start_search,
@@ -403,7 +415,7 @@ def test_run_stage_1_materializes_seed_pool_from_search_plan(tmp_path, monkeypat
             "output_path": str(bulk_path),
         }
 
-    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_shards", fake_run_shards)
     monkeypatch.setattr(
         "swarn_research_mcp.tools.paper_search.bulk_normal_start_search",
         fake_bulk_normal_start_search,
@@ -443,7 +455,7 @@ def test_build_stage_1_search_inputs_caps_bulk_queries_to_aspect_budget():
     }
 
     queries, survey_queries, positive_keywords, negative_keywords = (
-        runner._build_stage_1_search_inputs(search_plan)
+        stage_1_search_mod._build_stage_1_search_inputs(search_plan)
     )
 
     assert queries == [f"normal {idx} a" for idx in range(5)]
@@ -519,7 +531,7 @@ def test_run_stage_1_uses_bulk_search_config_by_default(tmp_path, monkeypatch):
             "output_path": str(bulk_path),
         }
 
-    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_shards", fake_run_shards)
     monkeypatch.setattr(
         "swarn_research_mcp.tools.paper_search.bulk_normal_start_search",
         fake_bulk_normal_start_search,
@@ -614,7 +626,7 @@ def test_run_stage_1_rejects_bulk_search_below_minimum_pool(tmp_path, monkeypatc
             "output_path": str(bulk_path),
         }
 
-    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_shards", fake_run_shards)
     monkeypatch.setattr(
         "swarn_research_mcp.tools.paper_search.bulk_normal_start_search",
         fake_bulk_normal_start_search,
@@ -634,7 +646,7 @@ def test_run_stage_1_validates_existing_primary_artifacts_before_skip(tmp_path, 
     def fail_run_shards(*args, **kwargs):
         raise AssertionError("run_shards should not be called for existing primary artifacts")
 
-    monkeypatch.setattr("scripts.run_auto_research.run_shards", fail_run_shards)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_shards", fail_run_shards)
 
     with pytest.raises(RuntimeError) as error:
         run_stage_1(run)
@@ -659,7 +671,7 @@ def test_run_stage_2_chunks_paper_pool_into_weak_evidence_specs(tmp_path, monkey
                 out.parent.mkdir(parents=True, exist_ok=True)
                 out.write_text(json.dumps({"reader_needed_concepts": ["concept"]}))
 
-    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_shards", fake_run_shards)
 
     run_stage_2(run, max_workers=20)
 
@@ -704,7 +716,7 @@ def test_run_stage_3_chunks_paper_pool_and_merges_weak_graph_fragments(tmp_path,
                     )
                 )
 
-    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_shards", fake_run_shards)
 
     run_stage_3(run, max_workers=20)
 
@@ -742,7 +754,7 @@ def test_run_stage_4_dispatches_knowledge_base_reader(tmp_path, monkeypatch):
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps({"known_concepts": []}))
 
-    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_shards", fake_run_shards)
 
     run_stage_4(run)
 
@@ -793,8 +805,8 @@ def test_run_stage_5_dispatches_classifier_and_logs_queue_count(tmp_path, monkey
             json.dumps({"concepts": [{"concept": concept} for concept in concepts]})
         )
 
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_5_aggregate", fake_aggregate)
-    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_stage_5_aggregate", fake_aggregate)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_shards", fake_run_shards)
 
     run_stage_5(run)
 
@@ -849,9 +861,9 @@ def test_run_stage_6_dispatches_one_expansion_shard_per_gap_and_merges(tmp_path,
                 "arxiv_id,gap_id,unknown_concept,title,candidate_role,score,why_rejected\n"
             )
 
-    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_2", lambda *args, **kwargs: None)
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_3", lambda *args, **kwargs: None)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_shards", fake_run_shards)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_stage_2", lambda *args, **kwargs: None)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_stage_3", lambda *args, **kwargs: None)
 
     run_stage_6(run, max_workers=20)
 
@@ -960,9 +972,9 @@ def test_run_stage_6_backfills_weak_artifacts_for_accepted_papers(tmp_path, monk
             json.dumps({"nodes": [{"id": "2401.00001"}, {"id": "2501.00001"}], "edges": []})
         )
 
-    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_2", fake_stage_2)
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_3", fake_stage_3)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_shards", fake_run_shards)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_stage_2", fake_stage_2)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_stage_3", fake_stage_3)
 
     run_stage_6(run)
 
@@ -992,7 +1004,7 @@ def test_run_stage_7_dispatches_paper_ranker_and_validates_scores(tmp_path, monk
             json.dumps({"promoted_papers": [{"arxiv_id": "1.1", "final_score": 0.9}]})
         )
 
-    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_shards", fake_run_shards)
 
     run_stage_7(run)
 
@@ -1032,7 +1044,7 @@ def test_run_stage_7_normalizes_reduced_promotion_candidates_csv(tmp_path, monke
             )
         )
 
-    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_shards", fake_run_shards)
 
     run_stage_7(run)
 
@@ -1068,7 +1080,7 @@ def test_run_stage_7_normalizes_top_level_promoted_papers_list(tmp_path, monkeyp
             ])
         )
 
-    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_shards", fake_run_shards)
 
     run_stage_7(run)
 
@@ -1136,9 +1148,9 @@ def test_run_stage_8_fetches_full_markdown_without_agent_shards(tmp_path, monkey
         fetched.append(arxiv_id)
         return f"# Paper {arxiv_id}\n"
 
-    monkeypatch.setattr("scripts.run_auto_research._fetch_arxiv_markdown_sync", fake_fetch)
+    monkeypatch.setattr("scripts.auto_research_runner.stages._fetch_arxiv_markdown_sync", fake_fetch)
     monkeypatch.setattr(
-        "scripts.run_auto_research.run_shards",
+        "scripts.auto_research_runner.stages.run_shards",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Stage 8 should not dispatch agents")),
     )
 
@@ -1169,7 +1181,7 @@ def test_stage_8_direct_fetch_uses_bounded_requests_without_arxiv_service_import
         return _FakeResponse(text="# Paper\n")
 
     monkeypatch.setattr(builtins, "__import__", guarded_import)
-    monkeypatch.setattr("scripts.run_auto_research.requests.get", fake_get)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.requests.get", fake_get)
 
     assert runner._fetch_arxiv_markdown_sync("1.1") == "# Paper\n"
     assert captured["url"] == runner.ARXIV2MD_MARKDOWN_URL
@@ -1179,7 +1191,7 @@ def test_stage_8_direct_fetch_uses_bounded_requests_without_arxiv_service_import
 
 def test_stage_8_direct_fetch_classifies_permanent_404_as_unavailable(monkeypatch):
     monkeypatch.setattr(
-        "scripts.run_auto_research.requests.get",
+        "scripts.auto_research_runner.stages.requests.get",
         lambda *args, **kwargs: _FakeResponse(status_code=404, text="not found"),
     )
 
@@ -1193,21 +1205,21 @@ def test_stage_8_direct_fetch_keeps_transient_errors_fatal(monkeypatch):
         requests.ConnectionError("dns failed"),
     ):
         monkeypatch.setattr(
-            "scripts.run_auto_research.requests.get",
+            "scripts.auto_research_runner.stages.requests.get",
             lambda *args, error=error, **kwargs: (_ for _ in ()).throw(error),
         )
         with pytest.raises(type(error)):
             runner._fetch_arxiv_markdown_sync("1.1")
 
     monkeypatch.setattr(
-        "scripts.run_auto_research.requests.get",
+        "scripts.auto_research_runner.stages.requests.get",
         lambda *args, **kwargs: _FakeResponse(status_code=429, text="rate limited"),
     )
     with pytest.raises(requests.HTTPError):
         runner._fetch_arxiv_markdown_sync("1.1")
 
     monkeypatch.setattr(
-        "scripts.run_auto_research.requests.get",
+        "scripts.auto_research_runner.stages.requests.get",
         lambda *args, **kwargs: _FakeResponse(status_code=500, text="server error"),
     )
     with pytest.raises(requests.HTTPError):
@@ -1231,7 +1243,7 @@ def test_run_stage_8_reads_legacy_promoted_papers_without_mutating(tmp_path, mon
         fetched.append(arxiv_id)
         return f"# Paper {arxiv_id}\n"
 
-    monkeypatch.setattr("scripts.run_auto_research._fetch_arxiv_markdown_sync", fake_fetch)
+    monkeypatch.setattr("scripts.auto_research_runner.stages._fetch_arxiv_markdown_sync", fake_fetch)
 
     run_stage_8(run)
 
@@ -1247,7 +1259,7 @@ def test_run_stage_8_records_failed_direct_fetch(tmp_path, monkeypatch):
     def fake_fetch(arxiv_id):
         raise RuntimeError(f"network failed for {arxiv_id}")
 
-    monkeypatch.setattr("scripts.run_auto_research._fetch_arxiv_markdown_sync", fake_fetch)
+    monkeypatch.setattr("scripts.auto_research_runner.stages._fetch_arxiv_markdown_sync", fake_fetch)
 
     with pytest.raises(RuntimeError, match="1 markdown fetch"):
         run_stage_8(run)
@@ -1277,7 +1289,7 @@ def test_run_stage_8_quarantines_empty_markdown_without_mutating_promoted(tmp_pa
             return ""
         return f"# Paper {arxiv_id}\n"
 
-    monkeypatch.setattr("scripts.run_auto_research._fetch_arxiv_markdown_sync", fake_fetch)
+    monkeypatch.setattr("scripts.auto_research_runner.stages._fetch_arxiv_markdown_sync", fake_fetch)
 
     run_stage_8(run, max_workers=2)
 
@@ -1306,7 +1318,7 @@ def test_run_stage_8_refetches_blank_existing_markdown(tmp_path, monkeypatch):
         fetched.append(arxiv_id)
         return "# Paper\n\nRecovered.\n"
 
-    monkeypatch.setattr("scripts.run_auto_research._fetch_arxiv_markdown_sync", fake_fetch)
+    monkeypatch.setattr("scripts.auto_research_runner.stages._fetch_arxiv_markdown_sync", fake_fetch)
 
     run_stage_8(run)
 
@@ -1324,7 +1336,7 @@ def test_run_stage_9_builds_pageindex_without_agent_shards(tmp_path, monkeypatch
     )
     (run / "08_full_markdown" / "1.2.md").write_text("# Only\n\nContent.\n")
     monkeypatch.setattr(
-        "scripts.run_auto_research.run_shards",
+        "scripts.auto_research_runner.stages.run_shards",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Stage 9 should not dispatch agents")),
     )
 
@@ -1357,7 +1369,7 @@ def test_run_stage_9_rebuilds_invalid_pageindex_and_skips_unavailable_markdown(t
     (run / "09_pageindex" / "trees" / "1.2.tree.json").write_text('{"root":{"children":[]}}')
     (run / "09_pageindex" / "nodes" / "1.2.nodes.json").write_text("{}")
     monkeypatch.setattr(
-        "scripts.run_auto_research.run_shards",
+        "scripts.auto_research_runner.stages.run_shards",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Stage 9 should not dispatch agents")),
     )
 
@@ -1367,6 +1379,28 @@ def test_run_stage_9_rebuilds_invalid_pageindex_and_skips_unavailable_markdown(t
     nodes = json.loads((run / "09_pageindex" / "nodes" / "1.2.nodes.json").read_text())
     assert list(nodes) == ["s.01"]
     assert nodes["s.01"]["summary"] == "Valid paper."
+
+
+def test_run_stage_9_uses_facade_pageindex_validator(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    _write_promoted_papers(run, ["1.1"])
+    (run / "08_full_markdown").mkdir(parents=True)
+    (run / "08_full_markdown" / "1.1.md").write_text("# Intro\n\nValid paper.\n")
+    calls = []
+
+    def fake_pageindex_valid(run_dir, arxiv_id):
+        calls.append((run_dir, arxiv_id))
+        return True
+
+    monkeypatch.setattr("scripts.auto_research_runner.stages._pageindex_artifacts_valid", fake_pageindex_valid)
+    monkeypatch.setattr(
+        "scripts.auto_research_runner.stages._build_pageindex_for_paper",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should be skipped")),
+    )
+
+    run_stage_9(run)
+
+    assert calls == [(run, "1.1")]
 
 
 def test_pageindex_validation_rejects_tree_flat_mismatch_and_bad_line_bounds(tmp_path):
@@ -1416,7 +1450,7 @@ def test_run_stage_9_records_direct_parse_failure(tmp_path, monkeypatch):
     (run / "08_full_markdown").mkdir(parents=True)
     (run / "08_full_markdown" / "1.1.md").write_text("# Paper\n")
     monkeypatch.setattr(
-        "scripts.run_auto_research._build_pageindex_for_paper",
+        "scripts.auto_research_runner.stages._build_pageindex_for_paper",
         lambda run_dir, arxiv_id: (_ for _ in ()).throw(RuntimeError("bad markdown")),
     )
 
@@ -1453,7 +1487,7 @@ def test_run_stage_10_uses_only_fulltext_available_promoted_papers(tmp_path, mon
         json.dumps({"claims": [{"source_node_id": "s.01", "source_lines": [1, 1]}]})
     )
     monkeypatch.setattr(
-        "scripts.run_auto_research.run_shards",
+        "scripts.auto_research_runner.stages.run_shards",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unavailable paper should not dispatch")),
     )
 
@@ -1480,13 +1514,84 @@ def test_run_stage_10_shards_one_paper_at_a_time_and_validates_grounding(tmp_pat
                     json.dumps({"claims": [{"source_node_id": "s.01", "source_lines": [1, 2]}]})
                 )
 
-    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_shards", fake_run_shards)
 
     run_stage_10(run, max_workers=20)
 
     assert [len(spec.expected_outputs) for spec in captured] == [1, 1, 1]
     assert all(spec.agent == "verified_evidence_extractor" for spec in captured)
     assert all("Run Stage 10 only" in spec.prompt for spec in captured)
+
+
+def test_stage_10_expected_output_repairs_malformed_json(tmp_path):
+    run = tmp_path / "run"
+    evidence_dir = run / "10_verified_evidence"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / "1.1.json").write_text(
+        '{"claims": [{"source_node_id": "s.01", "source_lines": [1], "latex": "\\!"}]}'
+    )
+    spec = ShardSpec(
+        stage="10",
+        shard_id="verified-evidence-001",
+        agent="verified_evidence_extractor",
+        model="gpt-5.4-mini",
+        prompt="p",
+        expected_outputs=["10_verified_evidence/1.1.json"],
+    )
+
+    assert shards_mod.expected_outputs_exist(run, spec) is True
+    repaired = json.loads((evidence_dir / "1.1.json").read_text())
+    assert repaired["claims"][0]["latex"] == "\\!"
+
+
+def test_run_stage_10_accepts_repairable_existing_evidence(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    _write_promoted_papers(run, ["1.1"])
+    (run / "08_full_markdown").mkdir(parents=True)
+    (run / "08_full_markdown" / "1.1.md").write_text("# Paper\n")
+    _write_valid_pageindex(run, "1.1")
+    evidence_dir = run / "10_verified_evidence"
+    evidence_dir.mkdir()
+    (evidence_dir / "1.1.json").write_text(
+        '{"claims": [{"source_node_id": "s.01", "source_lines": [1], "latex": "\\!"}]}'
+    )
+    captured = []
+
+    def fake_run_shards(run_dir, specs, **kwargs):
+        captured.extend(specs)
+
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_shards", fake_run_shards)
+
+    run_stage_10(run)
+
+    assert captured == []
+    assert runner.load_verified_promoted_arxiv_ids(run) == ["1.1"]
+
+
+def test_run_stage_10_retries_unrepairable_existing_evidence(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    _write_promoted_papers(run, ["1.1"])
+    (run / "08_full_markdown").mkdir(parents=True)
+    (run / "08_full_markdown" / "1.1.md").write_text("# Paper\n")
+    _write_valid_pageindex(run, "1.1")
+    evidence_dir = run / "10_verified_evidence"
+    evidence_dir.mkdir()
+    (evidence_dir / "1.1.json").write_text('{"claims": [{"source_node_id": "s.01"}]')
+    captured = []
+
+    def fake_run_shards(run_dir, specs, **kwargs):
+        captured.extend(specs)
+        assert kwargs.get("force") is True
+        (run_dir / "10_verified_evidence" / "1.1.json").write_text(
+            json.dumps({"claims": [{"source_node_id": "s.01", "source_lines": [1, 1]}]})
+        )
+
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_shards", fake_run_shards)
+
+    run_stage_10(run)
+
+    assert [spec.expected_outputs for spec in captured] == [["10_verified_evidence/1.1.json"]]
+    assert runner.load_verified_promoted_arxiv_ids(run) == ["1.1"]
 
 
 def test_run_stage_10_retries_then_quarantines_zero_claim_evidence(tmp_path, monkeypatch):
@@ -1509,7 +1614,7 @@ def test_run_stage_10_retries_then_quarantines_zero_claim_evidence(tmp_path, mon
         assert [spec.expected_outputs for spec in specs] == [["10_verified_evidence/1.1.json"]]
         (run_dir / "10_verified_evidence" / "1.1.json").write_text(json.dumps({"claims": []}))
 
-    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_shards", fake_run_shards)
 
     run_stage_10(run)
 
@@ -1534,7 +1639,7 @@ def test_run_stage_10_retries_first_pass_zero_claim_before_quarantine(tmp_path, 
         (run_dir / "10_verified_evidence").mkdir(exist_ok=True)
         (run_dir / "10_verified_evidence" / "1.1.json").write_text(json.dumps({"claims": []}))
 
-    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_shards", fake_run_shards)
 
     run_stage_10(run)
 
@@ -1593,7 +1698,7 @@ def test_run_stage_11_validates_existing_global_graph_before_skip(tmp_path):
     (run / "11_verified_graph" / "graph_report.md").write_text("# Report\n")
 
     with pytest.raises(RuntimeError, match="confidence must be verified"):
-        runner.validate_verified_global_graph(run)
+        validation_mod.validate_verified_global_graph(run)
 
 
 def test_build_chapter_targets_excludes_appendices_and_keeps_order(tmp_path):
@@ -1649,7 +1754,7 @@ def test_run_stage_12_validates_fresh_outline_after_agent_run(tmp_path, monkeypa
             json.dumps({"book_sections": [], "families": [], "methods": []})
         )
 
-    monkeypatch.setattr("scripts.run_auto_research.run_shards", fake_run_shards)
+    monkeypatch.setattr("scripts.auto_research_runner.stages.run_shards", fake_run_shards)
 
     with pytest.raises(RuntimeError, match="fixed 8-section order"):
         runner.run_stage_12(run)
@@ -1682,8 +1787,8 @@ def test_run_stage_13_uses_pack_suffixes_and_stable_shard_ids(tmp_path):
         captured.extend(specs)
 
     with (
-        patch("scripts.run_auto_research.build_deterministic_stage_13_packs"),
-        patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards),
+        patch("scripts.auto_research_runner.stages.build_deterministic_stage_13_packs"),
+        patch("scripts.auto_research_runner.stages.run_shards", side_effect=fake_run_shards),
     ):
         run_stage_13(run)
 
@@ -1703,8 +1808,8 @@ def test_run_stage_13_uses_pack_suffixes_and_stable_shard_ids(tmp_path):
     (run / "13_chapter_packs" / "book" / "preface_pack.json").write_text("{}")
     captured.clear()
     with (
-        patch("scripts.run_auto_research.build_deterministic_stage_13_packs"),
-        patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards),
+        patch("scripts.auto_research_runner.stages.build_deterministic_stage_13_packs"),
+        patch("scripts.auto_research_runner.stages.run_shards", side_effect=fake_run_shards),
     ):
         run_stage_13(run)
 
@@ -1842,7 +1947,7 @@ def test_build_method_pack_scopes_knowledge_gaps_to_method_evidence(tmp_path):
         ],
     }
 
-    pack = runner._build_method_pack(run_dir, outline, outline["methods"][0])
+    pack = packs_mod._build_method_pack(run_dir, outline, outline["methods"][0])
 
     assert pack["knowledge_gaps_to_explain"] == [
         "mel spectrogram",
@@ -1857,7 +1962,7 @@ def test_run_stage_13_uses_deterministic_builder_before_codex_shards(tmp_path):
     _write_outline(run)
     _write_stage_13_sources(run)
 
-    with patch("scripts.run_auto_research.run_shards") as run_shards:
+    with patch("scripts.auto_research_runner.stages.run_shards") as run_shards:
         run_stage_13(run)
 
     run_shards.assert_not_called()
@@ -1968,7 +2073,7 @@ def test_run_stage_14_groups_targets_by_type_and_uses_book_filenames(tmp_path):
     def fake_run_shards(run_dir, specs, max_retries=1, **kwargs):
         captured.extend(specs)
 
-    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+    with patch("scripts.auto_research_runner.stages.run_shards", side_effect=fake_run_shards):
         run_stage_14(run)
 
     assert [(spec.shard_id, spec.agent, spec.expected_outputs) for spec in captured] == [
@@ -2000,7 +2105,7 @@ def test_run_stage_14_shards_methods_one_at_a_time(tmp_path):
     def fake_run_shards(run_dir, specs, max_retries=1, **kwargs):
         captured.extend(specs)
 
-    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+    with patch("scripts.auto_research_runner.stages.run_shards", side_effect=fake_run_shards):
         run_stage_14(run)
 
     method_specs = [spec for spec in captured if spec.agent == "method_chapter_writer"]
@@ -2041,7 +2146,7 @@ def test_run_stage_15_writes_verification_summary_from_per_target_json(tmp_path)
             )
         )
 
-    with patch("scripts.run_auto_research.run_shards") as run_shards:
+    with patch("scripts.auto_research_runner.stages.run_shards") as run_shards:
         run_stage_15(run)
 
     run_shards.assert_not_called()
@@ -2082,7 +2187,7 @@ def test_run_stage_15_uses_typed_chapter_targets_in_prompt(tmp_path):
                     )
                 )
 
-    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+    with patch("scripts.auto_research_runner.stages.run_shards", side_effect=fake_run_shards):
         run_stage_15(run)
 
     assert len(captured) == 2
@@ -2144,7 +2249,7 @@ def test_run_stage_15_repairs_blocking_form_issues_once(tmp_path):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("# Preface\n\n" + "word " * 600)
 
-    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+    with patch("scripts.auto_research_runner.stages.run_shards", side_effect=fake_run_shards):
         run_stage_15(run)
 
     assert [call[0] for call in calls] == [
@@ -2190,7 +2295,7 @@ def test_run_stage_16_builds_manifest_deterministically_in_canonical_order(tmp_p
             )
         )
 
-    with patch("scripts.run_auto_research.run_shards") as run_shards:
+    with patch("scripts.auto_research_runner.stages.run_shards") as run_shards:
         run_stage_16(run)
 
     run_shards.assert_not_called()
@@ -2286,7 +2391,7 @@ def test_verification_status_accepts_summary_passed_for_backward_compat():
         }
     }
 
-    status, reason = runner._verification_status(
+    status, reason = chapters_mod._verification_status(
         target,
         verification,
         chapter_word_count=1400,
@@ -2310,7 +2415,7 @@ def test_verification_status_prefers_explicit_top_level_failed_flag():
         },
     }
 
-    status, reason = runner._verification_status(
+    status, reason = chapters_mod._verification_status(
         target,
         verification,
         chapter_word_count=1400,
@@ -2463,7 +2568,7 @@ def _write_stage_13_sources(run, *, wrap_nodes=False, omit_required_specific_sou
 
 def _skip_stage_1_start_preflight(monkeypatch):
     monkeypatch.setattr(
-        "scripts.run_auto_research._validate_stage_1_before_later_start",
+        "scripts.auto_research_runner.cli._validate_stage_1_before_later_start",
         lambda run_dir, start: None,
     )
 
@@ -2471,17 +2576,17 @@ def _skip_stage_1_start_preflight(monkeypatch):
 def test_main_resume_from_stage_11_calls_stage_11(tmp_path, monkeypatch):
     run = tmp_path / "research_runs" / "demo"
     run.mkdir(parents=True)
-    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    monkeypatch.setattr("scripts.auto_research_runner.cli.RUNS_ROOT", tmp_path / "research_runs")
     _skip_stage_1_start_preflight(monkeypatch)
     calls = []
 
     def fake_stage(run_dir):
         calls.append(run_dir.name)
 
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_11", fake_stage)
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_12", lambda run_dir: None)
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_12_5", lambda run_dir: None)
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_13", lambda run_dir: None)
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_11", fake_stage)
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_12", lambda run_dir: None)
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_12_5", lambda run_dir: None)
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_13", lambda run_dir: None)
 
     rc = main(["--run-id", "demo", "--phase", "draft", "--resume", "--from-stage", "11"])
 
@@ -2492,23 +2597,23 @@ def test_main_resume_from_stage_11_calls_stage_11(tmp_path, monkeypatch):
 def test_main_all_resume_from_stage_7_includes_bootstrap_handlers(tmp_path, monkeypatch):
     run = tmp_path / "research_runs" / "demo"
     run.mkdir(parents=True)
-    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    monkeypatch.setattr("scripts.auto_research_runner.cli.RUNS_ROOT", tmp_path / "research_runs")
     _skip_stage_1_start_preflight(monkeypatch)
     calls = []
 
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_7", lambda run_dir: calls.append("7"))
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_8", lambda run_dir: calls.append("8"))
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_9", lambda run_dir: calls.append("9"))
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_10", lambda run_dir: calls.append("10"))
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_11", lambda run_dir: calls.append("11"))
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_12", lambda run_dir: None)
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_12_5", lambda run_dir: None)
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_13", lambda run_dir: None)
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_14", lambda run_dir: None)
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_15", lambda run_dir: None)
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_16", lambda run_dir: None)
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_17", lambda run_dir: None)
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_18", lambda run_dir: None)
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_7", lambda run_dir: calls.append("7"))
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_8", lambda run_dir: calls.append("8"))
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_9", lambda run_dir: calls.append("9"))
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_10", lambda run_dir: calls.append("10"))
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_11", lambda run_dir: calls.append("11"))
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_12", lambda run_dir: None)
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_12_5", lambda run_dir: None)
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_13", lambda run_dir: None)
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_14", lambda run_dir: None)
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_15", lambda run_dir: None)
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_16", lambda run_dir: None)
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_17", lambda run_dir: None)
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_18", lambda run_dir: None)
 
     rc = main(["--run-id", "demo", "--phase", "all", "--resume", "--from-stage", "7"])
 
@@ -2526,9 +2631,9 @@ def test_main_resume_from_stage_7_validates_stage_1_keep_all_contract(tmp_path, 
             [{"arxiv_id": arxiv_id, "title": f"Paper {arxiv_id}"} for arxiv_id in selected_ids]
         )
     )
-    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    monkeypatch.setattr("scripts.auto_research_runner.cli.RUNS_ROOT", tmp_path / "research_runs")
     calls = []
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_7", lambda run_dir: calls.append("7"))
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_7", lambda run_dir: calls.append("7"))
 
     with pytest.raises(RuntimeError, match="paper_pool.json must contain every paper kept"):
         main(["--run-id", "demo", "--phase", "all", "--resume", "--from-stage", "7"])
@@ -2539,7 +2644,7 @@ def test_main_resume_from_stage_7_validates_stage_1_keep_all_contract(tmp_path, 
 def test_main_rejects_from_stage_outside_phase(tmp_path, monkeypatch):
     run = tmp_path / "research_runs" / "demo"
     run.mkdir(parents=True)
-    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    monkeypatch.setattr("scripts.auto_research_runner.cli.RUNS_ROOT", tmp_path / "research_runs")
 
     try:
         main(["--run-id", "demo", "--phase", "draft", "--resume", "--from-stage", "14"])
@@ -2552,13 +2657,13 @@ def test_main_rejects_from_stage_outside_phase(tmp_path, monkeypatch):
 def test_main_write_phase_defaults_to_stage_14(tmp_path, monkeypatch):
     run = tmp_path / "research_runs" / "demo"
     run.mkdir(parents=True)
-    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    monkeypatch.setattr("scripts.auto_research_runner.cli.RUNS_ROOT", tmp_path / "research_runs")
     _skip_stage_1_start_preflight(monkeypatch)
     calls = []
 
     for stage in ("14", "15", "16", "17", "18"):
         monkeypatch.setattr(
-            f"scripts.run_auto_research.run_stage_{stage}",
+            f"scripts.auto_research_runner.cli.run_stage_{stage}",
             lambda run_dir, stage=stage: calls.append(stage),
         )
 
@@ -2572,18 +2677,18 @@ def test_main_write_phase_uses_stage_worker_caps(tmp_path, monkeypatch):
     run = tmp_path / "research_runs" / "demo"
     run.mkdir(parents=True)
     monkeypatch.delenv("SWARN_MAX_EFFECTIVE_WORKERS", raising=False)
-    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    monkeypatch.setattr("scripts.auto_research_runner.cli.RUNS_ROOT", tmp_path / "research_runs")
     _skip_stage_1_start_preflight(monkeypatch)
     calls = []
 
     def fake_parallel_stage(run_dir, *, max_workers=1):
         calls.append(max_workers)
 
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_14", fake_parallel_stage)
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_15", fake_parallel_stage)
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_16", lambda run_dir: None)
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_17", lambda run_dir: None)
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_18", lambda run_dir: None)
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_14", fake_parallel_stage)
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_15", fake_parallel_stage)
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_16", lambda run_dir: None)
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_17", lambda run_dir: None)
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_18", lambda run_dir: None)
 
     rc = main(["--run-id", "demo", "--phase", "write", "--max-workers", "20"])
 
@@ -2596,7 +2701,7 @@ def test_main_uses_stage_6_specific_worker_cap(tmp_path, monkeypatch):
     run.mkdir(parents=True)
     monkeypatch.delenv("SWARN_MAX_EFFECTIVE_WORKERS", raising=False)
     monkeypatch.delenv("SWARN_STAGE_6_MAX_EFFECTIVE_WORKERS", raising=False)
-    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    monkeypatch.setattr("scripts.auto_research_runner.cli.RUNS_ROOT", tmp_path / "research_runs")
     _skip_stage_1_start_preflight(monkeypatch)
     calls = []
 
@@ -2628,20 +2733,20 @@ def test_main_uses_stage_6_specific_worker_cap(tmp_path, monkeypatch):
         "18",
     ):
         monkeypatch.setattr(
-            f"scripts.run_auto_research.run_stage_{stage.replace('.', '_')}",
+            f"scripts.auto_research_runner.cli.run_stage_{stage.replace('.', '_')}",
             fake_stage(stage),
         )
 
     rc = main(["--run-id", "demo", "--phase", "all", "--resume", "--from-stage", "6", "--max-workers", "20"])
 
     assert rc == 0
-    assert calls[0:5] == [("6", 10), ("7", 20), ("8", 20), ("9", 20), ("10", 5)]
+    assert calls[0:5] == [("6", 10), ("7", 20), ("8", 20), ("9", 20), ("10", 20)]
 
 
 def test_main_cleans_research_mcp_processes_after_stage_6(tmp_path, monkeypatch):
     run = tmp_path / "research_runs" / "demo"
     run.mkdir(parents=True)
-    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    monkeypatch.setattr("scripts.auto_research_runner.cli.RUNS_ROOT", tmp_path / "research_runs")
     _skip_stage_1_start_preflight(monkeypatch)
     cleanup_calls = []
 
@@ -2668,11 +2773,11 @@ def test_main_cleans_research_mcp_processes_after_stage_6(tmp_path, monkeypatch)
         "18",
     ):
         monkeypatch.setattr(
-            f"scripts.run_auto_research.run_stage_{stage.replace('.', '_')}",
+            f"scripts.auto_research_runner.cli.run_stage_{stage.replace('.', '_')}",
             fake_stage(stage),
         )
     monkeypatch.setattr(
-        "scripts.run_auto_research.cleanup_stage_6_research_mcp_processes",
+        "scripts.auto_research_runner.cli.cleanup_stage_6_research_mcp_processes",
         lambda run_dir: cleanup_calls.append(("cleanup", "mcp")),
     )
 
@@ -2690,7 +2795,7 @@ def test_main_cleans_research_mcp_processes_after_stage_6(tmp_path, monkeypatch)
 def test_main_write_phase_rejects_draft_from_stage(tmp_path, monkeypatch):
     run = tmp_path / "research_runs" / "demo"
     run.mkdir(parents=True)
-    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    monkeypatch.setattr("scripts.auto_research_runner.cli.RUNS_ROOT", tmp_path / "research_runs")
 
     try:
         main(["--run-id", "demo", "--phase", "write", "--from-stage", "11"])
@@ -2703,7 +2808,7 @@ def test_main_write_phase_rejects_draft_from_stage(tmp_path, monkeypatch):
 def test_main_write_phase_rejects_saved_draft_current_stage(tmp_path, monkeypatch):
     run = tmp_path / "research_runs" / "demo"
     run.mkdir(parents=True)
-    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    monkeypatch.setattr("scripts.auto_research_runner.cli.RUNS_ROOT", tmp_path / "research_runs")
     save_run_state(
         run,
         {
@@ -2724,7 +2829,7 @@ def test_main_write_phase_rejects_saved_draft_current_stage(tmp_path, monkeypatc
 
 
 def test_main_with_topic_starts_new_run_before_requested_stage(tmp_path, monkeypatch):
-    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    monkeypatch.setattr("scripts.auto_research_runner.cli.RUNS_ROOT", tmp_path / "research_runs")
     _skip_stage_1_start_preflight(monkeypatch)
 
     def fake_start_run(topic, phase):
@@ -2732,11 +2837,11 @@ def test_main_with_topic_starts_new_run_before_requested_stage(tmp_path, monkeyp
         run.mkdir(parents=True)
         return "demo-run"
 
-    monkeypatch.setattr("scripts.run_auto_research.start_new_run", fake_start_run)
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_11", lambda run_dir: None)
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_12", lambda run_dir: None)
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_12_5", lambda run_dir: None)
-    monkeypatch.setattr("scripts.run_auto_research.run_stage_13", lambda run_dir: None)
+    monkeypatch.setattr("scripts.auto_research_runner.cli.start_new_run", fake_start_run)
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_11", lambda run_dir: None)
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_12", lambda run_dir: None)
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_12_5", lambda run_dir: None)
+    monkeypatch.setattr("scripts.auto_research_runner.cli.run_stage_13", lambda run_dir: None)
 
     rc = main(["--topic", "Demo topic", "--phase", "draft", "--from-stage", "11"])
 
@@ -2745,7 +2850,7 @@ def test_main_with_topic_starts_new_run_before_requested_stage(tmp_path, monkeyp
 
 
 def test_main_topic_all_uses_stage_scoped_bootstrap_handlers(tmp_path, monkeypatch):
-    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    monkeypatch.setattr("scripts.auto_research_runner.cli.RUNS_ROOT", tmp_path / "research_runs")
     calls = []
 
     def fake_start_run(topic, phase):
@@ -2760,7 +2865,7 @@ def test_main_topic_all_uses_stage_scoped_bootstrap_handlers(tmp_path, monkeypat
 
         return run
 
-    monkeypatch.setattr("scripts.run_auto_research.start_new_run", fake_start_run)
+    monkeypatch.setattr("scripts.auto_research_runner.cli.start_new_run", fake_start_run)
     for stage in (
         "1",
         "2",
@@ -2783,7 +2888,7 @@ def test_main_topic_all_uses_stage_scoped_bootstrap_handlers(tmp_path, monkeypat
         "18",
     ):
         monkeypatch.setattr(
-            f"scripts.run_auto_research.run_stage_{stage.replace('.', '_')}",
+            f"scripts.auto_research_runner.cli.run_stage_{stage.replace('.', '_')}",
             fake_stage(stage),
         )
 
@@ -3199,7 +3304,7 @@ def test_main_status_reports_failed_sdk_thread(tmp_path, monkeypatch, capsys):
     run = tmp_path / "research_runs" / "demo"
     shard_dir = run / "run_control" / "stages" / "14" / "shards"
     shard_dir.mkdir(parents=True)
-    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    monkeypatch.setattr("scripts.auto_research_runner.cli.RUNS_ROOT", tmp_path / "research_runs")
     save_run_state(
         run,
         {
@@ -3265,7 +3370,7 @@ def test_status_reports_latest_shard_after_recovery(tmp_path):
     os.utime(failed_path, (100, 100))
     os.utime(completed_path, (200, 200))
 
-    out = runner.format_run_status(run)
+    out = cli_mod.format_run_status(run)
 
     assert "latest_shard=new-completed" in out
     assert "failed_shard=old-failed" not in out
@@ -3281,7 +3386,7 @@ def test_main_rejects_topic_write_phase():
 
 
 def test_main_rejects_unsafe_cli_run_id(tmp_path, monkeypatch):
-    monkeypatch.setattr("scripts.run_auto_research.RUNS_ROOT", tmp_path / "research_runs")
+    monkeypatch.setattr("scripts.auto_research_runner.cli.RUNS_ROOT", tmp_path / "research_runs")
 
     try:
         main(["--run-id", "../escape", "--phase", "draft"])

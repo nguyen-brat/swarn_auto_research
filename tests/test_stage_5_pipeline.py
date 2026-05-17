@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from scripts.run_auto_research import run_stage_5, run_stage_17
+from scripts.auto_research_runner.stages import run_stage_5, run_stage_17
 
 FIXTURE = Path(__file__).parent / "fixtures" / "weak_graph_mini"
 
@@ -54,7 +54,7 @@ def test_run_stage_5_dispatches_classifier(run_dir):
             json.dumps({"concepts": [{"concept": concept, "bucket": "knowledge_gap"}]})
         )
 
-    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+    with patch("scripts.auto_research_runner.stages.run_shards", side_effect=fake_run_shards):
         run_stage_5(run_dir)
 
     assert (run_dir / "06_expansion" / "gap_candidates_digest.json").exists()
@@ -95,7 +95,7 @@ def test_run_stage_5_reruns_old_detector_artifacts_without_metadata(run_dir):
             json.dumps({"concepts": [{"concept": concept, "bucket": "knowledge_gap"}]})
         )
 
-    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+    with patch("scripts.auto_research_runner.stages.run_shards", side_effect=fake_run_shards):
         run_stage_5(run_dir)
 
     assert len(captured) == 1
@@ -125,9 +125,9 @@ def test_run_stage_5_idempotent_when_metadata_matches(run_dir):
             json.dumps({"concepts": [{"concept": concept, "bucket": "knowledge_gap"}]})
         )
 
-    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+    with patch("scripts.auto_research_runner.stages.run_shards", side_effect=fake_run_shards):
         run_stage_5(run_dir)
-    with patch("scripts.run_auto_research.run_shards") as m:
+    with patch("scripts.auto_research_runner.stages.run_shards") as m:
         run_stage_5(run_dir)
         m.assert_not_called()
 
@@ -135,7 +135,7 @@ def test_run_stage_5_idempotent_when_metadata_matches(run_dir):
 def test_run_stage_5_raises_when_weak_graph_missing(run_dir):
     (run_dir / "05_weak_graph" / "weak_global_graph.json").unlink()
 
-    with patch("scripts.run_auto_research.run_shards") as m:
+    with patch("scripts.auto_research_runner.stages.run_shards") as m:
         with pytest.raises(RuntimeError, match="Stage 5 requires"):
             run_stage_5(run_dir)
         m.assert_not_called()
@@ -147,7 +147,7 @@ def test_run_stage_5_raises_when_weak_graph_missing_even_if_digest_exists(run_di
     )
     (run_dir / "05_weak_graph" / "weak_global_graph.json").unlink()
 
-    with patch("scripts.run_auto_research.run_shards") as m:
+    with patch("scripts.auto_research_runner.stages.run_shards") as m:
         with pytest.raises(RuntimeError, match="Stage 5 requires"):
             run_stage_5(run_dir)
         m.assert_not_called()
@@ -172,7 +172,7 @@ def test_run_stage_5_fails_when_classifier_omits_extracted_concepts(run_dir):
             }]})
         )
 
-    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+    with patch("scripts.auto_research_runner.stages.run_shards", side_effect=fake_run_shards):
         with pytest.raises(RuntimeError, match="extracted_concepts"):
             run_stage_5(run_dir)
 
@@ -202,7 +202,7 @@ def test_run_stage_17_writes_learning_suggestions_without_agent(tmp_path):
         }]
     }))
 
-    with patch("scripts.run_auto_research.run_shards") as m:
+    with patch("scripts.auto_research_runner.stages.run_shards") as m:
         run_stage_17(run)
         m.assert_not_called()
 

@@ -1,18 +1,29 @@
 from __future__ import annotations
 
 import csv
+import importlib
 import json
 from types import SimpleNamespace
 
-import scripts.run_auto_research as runner
-from scripts.run_auto_research import (
+import scripts.auto_research_runner.cli as cli_mod
+import scripts.auto_research_runner.shards as shards_mod
+from scripts.auto_research_runner.cli import main
+from scripts.auto_research_runner.config import BOOTSTRAP_TIMEOUT_SECONDS
+from scripts.auto_research_runner.shards import (
+    _run_sdk_prompt,
+    _run_shard_attempt,
+)
+from scripts.auto_research_runner.shared_types import (
+    ShardAttemptResult,
+    ShardSpec,
+)
+from scripts.auto_research_runner.state import (
     append_run_log,
     ensure_run_control,
     load_run_state,
-    main,
-    primary_artifact_exists,
     save_run_state,
 )
+from scripts.auto_research_runner.validation import primary_artifact_exists
 
 
 def test_save_and_load_run_state(tmp_path):
@@ -37,6 +48,20 @@ def test_save_and_load_run_state(tmp_path):
     assert state["current_stage"] == "11"
     assert state["last_completed_stage"] == "10"
     assert "updated_at" in state
+
+
+def test_internal_modules_expose_shared_types_and_state():
+    shared_types = importlib.import_module("scripts.auto_research_runner.shared_types")
+    state = importlib.import_module("scripts.auto_research_runner.state")
+    artifacts = importlib.import_module("scripts.auto_research_runner.artifacts")
+
+    assert hasattr(shared_types, "ShardSpec")
+    assert hasattr(shared_types, "ShardAttemptResult")
+    assert hasattr(shared_types, "Stage8MarkdownUnavailable")
+    assert hasattr(state, "load_run_state")
+    assert hasattr(state, "save_run_state")
+    assert hasattr(artifacts, "_build_pageindex_for_paper")
+    assert hasattr(artifacts, "run_stage_11_merge")
 
 
 def test_append_run_log_creates_header_and_rows(tmp_path):
@@ -72,7 +97,7 @@ def test_primary_artifact_exists_for_stage_11(tmp_path):
 def test_main_preserves_existing_resume_state(tmp_path, monkeypatch):
     runs_root = tmp_path / "research_runs"
     run = runs_root / "demo"
-    monkeypatch.setattr(runner, "RUNS_ROOT", runs_root)
+    monkeypatch.setattr(cli_mod, "RUNS_ROOT", runs_root)
     calls = []
     _patch_stage_handlers(monkeypatch, calls)
     save_run_state(
@@ -101,11 +126,11 @@ def test_main_preserves_existing_resume_state(tmp_path, monkeypatch):
 def test_main_resume_saved_later_stage_validates_stage_1_before_handlers(tmp_path, monkeypatch):
     runs_root = tmp_path / "research_runs"
     run = runs_root / "demo"
-    monkeypatch.setattr(runner, "RUNS_ROOT", runs_root)
+    monkeypatch.setattr(cli_mod, "RUNS_ROOT", runs_root)
     calls = []
-    monkeypatch.setattr(runner, "run_stage_11", lambda run_dir: calls.append("11"))
+    monkeypatch.setattr(cli_mod, "run_stage_11", lambda run_dir: calls.append("11"))
     monkeypatch.setattr(
-        runner,
+        cli_mod,
         "validate_stage_1_keep_all_contract",
         lambda run_dir: (_ for _ in ()).throw(RuntimeError("stage 1 invalid")),
     )
@@ -139,7 +164,7 @@ def test_main_resume_saved_later_stage_validates_stage_1_before_handlers(tmp_pat
 def test_main_marks_state_failed_when_stage_handler_raises(tmp_path, monkeypatch, capsys):
     runs_root = tmp_path / "research_runs"
     run = runs_root / "demo"
-    monkeypatch.setattr(runner, "RUNS_ROOT", runs_root)
+    monkeypatch.setattr(cli_mod, "RUNS_ROOT", runs_root)
     save_run_state(
         run,
         {
@@ -152,7 +177,7 @@ def test_main_marks_state_failed_when_stage_handler_raises(tmp_path, monkeypatch
         },
     )
     monkeypatch.setattr(
-        runner,
+        cli_mod,
         "_validate_stage_1_before_later_start",
         lambda run_dir, start: None,
     )
@@ -160,7 +185,7 @@ def test_main_marks_state_failed_when_stage_handler_raises(tmp_path, monkeypatch
     def fail_stage(_run_dir):
         raise RuntimeError("stage exploded")
 
-    monkeypatch.setattr(runner, "run_stage_11", fail_stage)
+    monkeypatch.setattr(cli_mod, "run_stage_11", fail_stage)
 
     try:
         main(["--run-id", "demo", "--phase", "all", "--resume"])
@@ -194,7 +219,7 @@ def test_main_marks_state_failed_when_stage_handler_raises(tmp_path, monkeypatch
 def test_main_records_keyboard_interrupt_as_interrupted(tmp_path, monkeypatch, capsys):
     runs_root = tmp_path / "research_runs"
     run = runs_root / "demo"
-    monkeypatch.setattr(runner, "RUNS_ROOT", runs_root)
+    monkeypatch.setattr(cli_mod, "RUNS_ROOT", runs_root)
     save_run_state(
         run,
         {
@@ -207,7 +232,7 @@ def test_main_records_keyboard_interrupt_as_interrupted(tmp_path, monkeypatch, c
         },
     )
     monkeypatch.setattr(
-        runner,
+        cli_mod,
         "_validate_stage_1_before_later_start",
         lambda run_dir, start: None,
     )
@@ -215,7 +240,7 @@ def test_main_records_keyboard_interrupt_as_interrupted(tmp_path, monkeypatch, c
     def interrupt_stage(_run_dir):
         raise KeyboardInterrupt()
 
-    monkeypatch.setattr(runner, "run_stage_11", interrupt_stage)
+    monkeypatch.setattr(cli_mod, "run_stage_11", interrupt_stage)
 
     try:
         main(["--run-id", "demo", "--phase", "all", "--resume"])
@@ -245,7 +270,7 @@ def test_main_records_keyboard_interrupt_as_interrupted(tmp_path, monkeypatch, c
 
 def test_sdk_cli_fallback_uses_cli_when_sdk_notifications_timeout(tmp_path, monkeypatch):
     run = tmp_path / "research_runs" / "demo"
-    spec = runner.ShardSpec(
+    spec = ShardSpec(
         stage="1",
         shard_id="query-planner",
         agent="query_planner",
@@ -261,17 +286,17 @@ def test_sdk_cli_fallback_uses_cli_when_sdk_notifications_timeout(tmp_path, monk
 
     def pass_cli(_spec, _timeout_seconds):
         calls.append("cli")
-        return runner.ShardAttemptResult(
+        return ShardAttemptResult(
             returncode=0,
             stdout="ok",
             stderr="",
             executor="cli",
         )
 
-    monkeypatch.setattr(runner, "_run_sdk_shard_attempt", fail_sdk)
-    monkeypatch.setattr(runner, "_run_cli_shard_attempt", pass_cli)
+    monkeypatch.setattr(shards_mod, "_run_sdk_shard_attempt", fail_sdk)
+    monkeypatch.setattr(shards_mod, "_run_cli_shard_attempt", pass_cli)
 
-    result = runner._run_shard_attempt(
+    result = _run_shard_attempt(
         run,
         spec,
         timeout_seconds=60,
@@ -288,7 +313,7 @@ def test_sdk_cli_fallback_accepts_existing_outputs_after_sdk_timeout(tmp_path, m
     run = tmp_path / "research_runs" / "demo"
     (run / "00_input").mkdir(parents=True)
     (run / "00_input" / "search_plan.json").write_text("{}", encoding="utf-8")
-    spec = runner.ShardSpec(
+    spec = ShardSpec(
         stage="1",
         shard_id="query-planner",
         agent="query_planner",
@@ -306,10 +331,10 @@ def test_sdk_cli_fallback_accepts_existing_outputs_after_sdk_timeout(tmp_path, m
         calls.append("cli")
         raise AssertionError("CLI fallback should not run when outputs already exist")
 
-    monkeypatch.setattr(runner, "_run_sdk_shard_attempt", fail_sdk)
-    monkeypatch.setattr(runner, "_run_cli_shard_attempt", fail_cli)
+    monkeypatch.setattr(shards_mod, "_run_sdk_shard_attempt", fail_sdk)
+    monkeypatch.setattr(shards_mod, "_run_cli_shard_attempt", fail_cli)
 
-    result = runner._run_shard_attempt(
+    result = _run_shard_attempt(
         run,
         spec,
         timeout_seconds=60,
@@ -334,21 +359,21 @@ def test_run_sdk_prompt_uses_bounded_notification_timeout(monkeypatch):
     monkeypatch.setattr(codex_module, "run_one_shot_sync", fake_run_one_shot_sync)
     monkeypatch.setenv("SWARN_SDK_NOTIFICATION_TIMEOUT_SECONDS", "123")
 
-    result = runner._run_sdk_prompt(
+    result = _run_sdk_prompt(
         "write search plan",
         model="gpt-5.4-mini",
-        timeout_seconds=runner.BOOTSTRAP_TIMEOUT_SECONDS,
+        timeout_seconds=BOOTSTRAP_TIMEOUT_SECONDS,
     )
 
     assert result.final_response == "ok"
-    assert observed["timeout"] == float(runner.BOOTSTRAP_TIMEOUT_SECONDS)
+    assert observed["timeout"] == float(BOOTSTRAP_TIMEOUT_SECONDS)
     assert observed["notification_timeout"] == 123.0
 
 
 def test_main_resets_progress_without_resume(tmp_path, monkeypatch):
     runs_root = tmp_path / "research_runs"
     run = runs_root / "demo"
-    monkeypatch.setattr(runner, "RUNS_ROOT", runs_root)
+    monkeypatch.setattr(cli_mod, "RUNS_ROOT", runs_root)
     calls = []
     _patch_stage_handlers(monkeypatch, calls)
     save_run_state(
@@ -376,7 +401,7 @@ def test_main_resets_progress_without_resume(tmp_path, monkeypatch):
 
 def _patch_stage_handlers(monkeypatch, calls):
     monkeypatch.setattr(
-        runner,
+        cli_mod,
         "_validate_stage_1_before_later_start",
         lambda run_dir, start: None,
     )
@@ -391,4 +416,4 @@ def _patch_stage_handlers(monkeypatch, calls):
         ("17", "run_stage_17"),
         ("18", "run_stage_18"),
     ):
-        monkeypatch.setattr(runner, name, lambda run_dir, stage=stage: calls.append(stage))
+        monkeypatch.setattr(cli_mod, name, lambda run_dir, stage=stage: calls.append(stage))

@@ -5,11 +5,11 @@ from unittest.mock import patch
 
 import pytest
 
-from scripts.run_auto_research import (
+from scripts.auto_research_runner.artifacts import (
     merge_verified_graph_fragments,
-    run_stage_11,
     run_stage_11_merge,
 )
+from scripts.auto_research_runner.stages import run_stage_11
 
 
 def _write_fragment(run, arxiv_id, nodes, edges):
@@ -346,7 +346,7 @@ def test_run_stage_11_merges_only_verified_eligible_fragments_and_ignores_stale(
             }],
         )
 
-    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards) as run_shards:
+    with patch("scripts.auto_research_runner.stages.run_shards", side_effect=fake_run_shards) as run_shards:
         run_stage_11(run)
 
     run_shards.assert_called_once()
@@ -406,7 +406,7 @@ def test_run_stage_11_rebuilds_stale_global_graph_when_eligibility_changes(tmp_p
             }],
         )
 
-    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards) as run_shards:
+    with patch("scripts.auto_research_runner.stages.run_shards", side_effect=fake_run_shards) as run_shards:
         run_stage_11(run)
 
     run_shards.assert_called_once()
@@ -451,7 +451,7 @@ def test_run_stage_11_rebuilds_fragment_when_verified_evidence_changes(tmp_path)
             }],
         )
 
-    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+    with patch("scripts.auto_research_runner.stages.run_shards", side_effect=fake_run_shards):
         run_stage_11(run)
 
     graph = json.loads((run / "11_verified_graph" / "global_graph.json").read_text())
@@ -480,7 +480,7 @@ def test_run_stage_11_force_removes_stale_fragment_before_dispatch(tmp_path):
         assert kwargs.get("force") is True
         assert not (run_dir / "11_verified_graph" / "fragments" / "1.1.json").exists()
 
-    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+    with patch("scripts.auto_research_runner.stages.run_shards", side_effect=fake_run_shards):
         with pytest.raises(RuntimeError, match="Stage 11 still missing fragments"):
             run_stage_11(run)
 
@@ -510,7 +510,7 @@ def test_run_stage_11_clears_stale_quarantine_for_valid_evidence_before_dispatch
             }],
         )
 
-    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+    with patch("scripts.auto_research_runner.stages.run_shards", side_effect=fake_run_shards):
         run_stage_11(run)
 
     assert (run / "11_verified_graph" / "global_graph.json").exists()
@@ -548,7 +548,7 @@ def test_run_stage_11_merges_when_all_fragments_already_exist(tmp_path):
             }],
         )
 
-    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards) as run_shards:
+    with patch("scripts.auto_research_runner.stages.run_shards", side_effect=fake_run_shards) as run_shards:
         run_stage_11(run)
 
     run_shards.assert_called_once()
@@ -611,10 +611,43 @@ def test_run_stage_11_refreshes_all_eligible_fragments(tmp_path):
             }],
         )
 
-    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+    with patch("scripts.auto_research_runner.stages.run_shards", side_effect=fake_run_shards):
         run_stage_11(run)
 
     assert (run / "11_verified_graph" / "global_graph.json").exists()
+
+
+def test_run_stage_11_uses_facade_merge_function(tmp_path):
+    run = tmp_path / "run"
+    _write_stage11_eligible(run, "1.1")
+    merged = []
+
+    def fake_run_shards(run_dir, specs, max_retries=1, **kwargs):
+        assert len(specs) == 1
+        _write_fragment(
+            run_dir,
+            "1.1",
+            [{"id": "1.1", "type": "Paper"}],
+            [{
+                "src": "1.1",
+                "dst": "1.1",
+                "type": "USES",
+                "confidence": "verified",
+                "source_node_id": "s.01",
+                "source_lines": [1, 1],
+            }],
+        )
+
+    def fake_merge(run_dir, arxiv_ids=None):
+        merged.append((run_dir, arxiv_ids))
+
+    with (
+        patch("scripts.auto_research_runner.stages.run_shards", side_effect=fake_run_shards),
+        patch("scripts.auto_research_runner.stages.run_stage_11_merge", side_effect=fake_merge),
+    ):
+        run_stage_11(run)
+
+    assert merged == [(run, ["1.1"])]
 
 
 def test_run_stage_11_uses_flat_fragment_paths_for_old_arxiv_ids(tmp_path):
@@ -702,7 +735,7 @@ def test_run_stage_11_uses_flat_fragment_paths_for_old_arxiv_ids(tmp_path):
             )
         )
 
-    with patch("scripts.run_auto_research.run_shards", side_effect=fake_run_shards):
+    with patch("scripts.auto_research_runner.stages.run_shards", side_effect=fake_run_shards):
         run_stage_11(run)
 
     assert (run / "11_verified_graph" / "global_graph.json").exists()
