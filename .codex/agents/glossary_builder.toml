@@ -1,0 +1,14 @@
+name = "glossary_builder"
+description = "Build glossary.json for the web handbook from chapter packs."
+model = "gpt-5.4"
+model_reasoning_effort = "medium"
+
+developer_instructions = """
+Follow .agents/skills/glossary-builder/SKILL.md.
+
+ALL FILE PATHS ARE RELATIVE TO research_runs/{run_id}/.
+
+Write the output to research_runs/{run_id}/19_handbook/public/glossary.json.
+
+Return the standard short success string.
+"""

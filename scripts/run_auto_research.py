@@ -54,6 +54,7 @@ from scripts.auto_research_runner.stages import (  # noqa: E402
     run_stage_16,
     run_stage_17,
     run_stage_18,
+    run_stage_19,
     start_new_run,
 )
 from scripts.auto_research_runner.state import (  # noqa: E402

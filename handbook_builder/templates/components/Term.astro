@@ -1,0 +1,34 @@
+---
+interface Props { name: string }
+const { name } = Astro.props as Props;
+---
+<span class="term" data-term={name} tabindex="0"><slot /></span>
+
+<script>
+  document.addEventListener('DOMContentLoaded', async () => {
+    const res = await fetch('/glossary.json');
+    if (!res.ok) return;
+    const entries = await res.json();
+    const byTerm = new Map(entries.filter(e => !e.kb_known).map(e => [e.term, e.definition]));
+    document.querySelectorAll('.term').forEach(el => {
+      const name = el.getAttribute('data-term');
+      const def = name ? byTerm.get(name) : null;
+      if (def) {
+        el.setAttribute('title', def);
+      } else {
+        el.classList.add('term-plain');
+      }
+    });
+  });
+</script>
+
+<style>
+  .term {
+    border-bottom: 1px dotted #7aa2f7;
+    cursor: help;
+  }
+  .term-plain {
+    border-bottom: none;
+    cursor: text;
+  }
+</style>

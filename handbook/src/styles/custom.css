@@ -1,0 +1,12 @@
+:root {
+  --sl-color-accent: #7aa2f7;
+  --sl-color-bg: #1a1b26;
+  --sl-color-text: #c0caf5;
+}
+
+.run-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0;
+}

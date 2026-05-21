@@ -60,3 +60,21 @@ Key files:
 - `.codex/agents/*.toml` for custom subagent roles
 - `.agents/skills/auto-research-orchestrator/SKILL.md` for the orchestration workflow
 - `.agents/knowledge_base.md` for the user's known-concepts list
+
+## Web Handbook
+
+Stage 19 builds a per-run Astro Starlight handbook from the completed Markdown book artifacts.
+The default Stage 19 milestone is `M0`, which creates the base site and copies grounded chapters:
+
+```bash
+HANDBOOK_SKIP_PNPM=1 env PYTHONPATH=. python scripts/run_auto_research.py \
+  --run-id <run_id> --phase write --resume --from-stage 19
+```
+
+For the full augmented handbook with glossary, diagrams, method TLDRs, and rewritten book-level pages, run:
+
+```bash
+HANDBOOK_MILESTONE=M3 env PYTHONPATH=. python scripts/build_handbook.py research_runs/<run_id>/ --skip-pnpm
+```
+
+This produces the source site under `research_runs/<run_id>/19_handbook/`. Omit `--skip-pnpm` when Node and pnpm are available and you want the static build in `19_handbook/dist/`.

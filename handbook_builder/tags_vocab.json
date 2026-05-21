@@ -1,0 +1,10 @@
+[
+  "TTS", "ASR", "S2ST", "S2T", "Streaming", "Full-Duplex",
+  "Non-AR", "Autoregressive", "Diffusion", "Masked-Generative",
+  "Codec", "Continuous", "Discrete-Token",
+  "Zero-Shot", "Few-Shot", "Multilingual",
+  "Speaker-Cloning", "Editing",
+  "Tokenizer", "Encoder-Decoder", "Decoder-Only",
+  "Low-Latency", "High-Quality",
+  "Interaction", "Generation"
+]

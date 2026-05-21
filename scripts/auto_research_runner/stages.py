@@ -27,7 +27,13 @@ from scripts.auto_research_runner.artifacts import (
     _stage_10_quarantined_ids,
     _verified_evidence_claims,
     _verified_evidence_is_valid,
+    build_verified_graph_frame,
+    compile_verified_graph_fragment_from_frame,
     run_stage_11_merge,
+    sanitize_verified_evidence,
+    sanitize_verified_graph_fragment,
+    verified_graph_fragment_is_valid,
+    verified_graph_fragment_retry_feedback,
     verified_graph_fragment_relpath,
 )
 from scripts.auto_research_runner.chapters import (
@@ -52,8 +58,16 @@ from scripts.auto_research_runner.config import (
     RUNS_ROOT,
     STAGE_8_MARKDOWN_FETCH_TIMEOUT_SECONDS,
 )
+from scripts.auto_research_runner.contract_repair import (
+    RawArtifact,
+    RepairIssue,
+    append_repair_event,
+)
 from scripts.auto_research_runner.io_utils import _load_json, _write_json, chunked
-from scripts.auto_research_runner.packs import build_deterministic_stage_13_packs
+from scripts.auto_research_runner.packs import (
+    build_deterministic_stage_13_packs,
+    enrich_stage_13_visual_assets,
+)
 from scripts.auto_research_runner.paper_pool import (
     load_fulltext_available_promoted_arxiv_ids,
     load_pageindexed_promoted_arxiv_ids,
@@ -91,6 +105,7 @@ from scripts.auto_research_runner.validation import (
     _float_score,
     _promoted_ids,
     load_promoted_arxiv_ids,
+    normalize_outline_to_verified_papers,
     normalize_stage_7_candidate_csv,
     normalize_stage_7_promoted_json,
     primary_artifact_exists,
@@ -711,6 +726,7 @@ def run_stage_10(run_dir: Path, *, max_workers: int = 1, executor: str = DEFAULT
         load_verified_promoted_arxiv_ids=load_verified_promoted_arxiv_ids,
         verified_evidence_is_valid=_verified_evidence_is_valid,
         verified_evidence_claims=_verified_evidence_claims,
+        sanitize_verified_evidence=sanitize_verified_evidence,
         clear_stage_10_quarantine=_clear_stage_10_quarantine,
         stage_10_quarantined_ids=_stage_10_quarantined_ids,
         record_stage_10_quarantine=_record_stage_10_quarantine,
@@ -733,11 +749,42 @@ def run_stage_11(
         append_run_log=append_run_log,
         load_verified_promoted_arxiv_ids=load_verified_promoted_arxiv_ids,
         clear_stage_10_quarantine=_clear_stage_10_quarantine,
+        build_verified_graph_frame=build_verified_graph_frame,
+        compile_verified_graph_fragment_from_frame=compile_verified_graph_fragment_from_frame,
         run_shards=run_shards,
         stage_11_prompt=_stage_11_prompt,
         stable_stage_11_shard_id=_stable_stage_11_shard_id,
         verified_graph_fragment_relpath=verified_graph_fragment_relpath,
+        verified_graph_fragment_is_valid=verified_graph_fragment_is_valid,
+        verified_graph_fragment_retry_feedback=verified_graph_fragment_retry_feedback,
+        sanitize_verified_graph_fragment=sanitize_verified_graph_fragment,
         run_stage_11_merge=run_stage_11_merge,
+    )
+
+
+def _record_stage_12_repair_outcome(run_dir: Path, stats: dict[str, Any], *, outcome: str) -> None:
+    raw_artifact = str(stats.get("repair_raw_artifact") or "")
+    raw_sha256 = str(stats.get("repair_raw_sha256") or "")
+    raw_issues = stats.get("repair_issues")
+    if not raw_artifact or not raw_sha256 or not isinstance(raw_issues, list):
+        return
+    issues = [
+        RepairIssue(
+            kind=str(issue.get("kind") or "outline_normalization"),
+            detail=str(issue.get("detail") or ""),
+            before=issue.get("before"),
+            after=issue.get("after"),
+        )
+        for issue in raw_issues
+        if isinstance(issue, dict)
+    ]
+    append_repair_event(
+        run_dir,
+        stage="12",
+        artifact_path=run_dir / "12_taxonomy" / "outline.json",
+        raw=RawArtifact(raw_artifact=raw_artifact, raw_sha256=raw_sha256),
+        outcome=outcome,  # type: ignore[arg-type]
+        issues=issues,
     )
 
 
@@ -747,15 +794,12 @@ def run_stage_12(
     max_workers: int = 1,
     executor: str = DEFAULT_EXECUTOR,
 ) -> None:
-    if primary_artifact_exists(run_dir, "12"):
-        validate_outline_contract(run_dir)
-        append_run_log(run_dir, "12", "skipped", "outline already present")
-        return
     expected_outputs = [
         "12_taxonomy/communities.json",
         "12_taxonomy/taxonomy.json",
         "12_taxonomy/outline.json",
     ]
+    verified_arxiv_ids = load_verified_promoted_arxiv_ids(run_dir)
     spec = ShardSpec(
         stage="12",
         shard_id="outline",
@@ -766,12 +810,63 @@ def run_stage_12(
             run_dir.name,
             "12",
             "outline",
-            {"expected_outputs": expected_outputs},
+            {
+                "expected_outputs": expected_outputs,
+                "verified_full_text_arxiv_ids": verified_arxiv_ids,
+                "verified_full_text_count": len(verified_arxiv_ids),
+                "contract": "outline.methods must contain exactly one method for each verified_full_text_arxiv_ids entry and no other arxiv_id.",
+            },
         ),
         expected_outputs=expected_outputs,
     )
+
+    def clear_outputs() -> None:
+        for relpath in expected_outputs:
+            (run_dir / relpath).unlink(missing_ok=True)
+
+    def run_outline_shard() -> None:
+        run_shards(run_dir, [spec], max_workers=max_workers, executor=executor)
+
+    def normalize_then_validate() -> None:
+        stats = normalize_outline_to_verified_papers(run_dir)
+        if stats["dropped_extra_methods"] or stats["dropped_duplicate_methods"]:
+            append_run_log(
+                run_dir,
+                "12",
+                "normalized",
+                (
+                    f"dropped {stats['dropped_extra_methods']} extra outline method(s), "
+                    f"{stats['dropped_duplicate_methods']} duplicate method(s), "
+                    f"and {stats['dropped_empty_families']} empty family/families"
+                ),
+            )
+        try:
+            validate_outline_contract(run_dir)
+        except (RuntimeError, ValueError, json.JSONDecodeError, OSError):
+            _record_stage_12_repair_outcome(run_dir, stats, outcome="rejected")
+            raise
+        _record_stage_12_repair_outcome(run_dir, stats, outcome="accepted")
+
+    if primary_artifact_exists(run_dir, "12"):
+        try:
+            normalize_then_validate()
+        except (RuntimeError, ValueError, json.JSONDecodeError, OSError):
+            append_run_log(run_dir, "12", "recovery", "existing outline invalid; regenerating once")
+            clear_outputs()
+            run_outline_shard()
+            normalize_then_validate()
+        else:
+            append_run_log(run_dir, "12", "skipped", "outline already present")
+        return
+
     run_shards(run_dir, [spec], max_workers=max_workers, executor=executor)
-    validate_outline_contract(run_dir)
+    try:
+        normalize_then_validate()
+    except (RuntimeError, ValueError, json.JSONDecodeError, OSError):
+        append_run_log(run_dir, "12", "recovery", "fresh outline invalid; regenerating once")
+        clear_outputs()
+        run_outline_shard()
+        normalize_then_validate()
 
 
 def run_stage_12_5(run_dir: Path) -> None:
@@ -816,6 +911,7 @@ def run_stage_13(
     ]
     if specs:
         run_shards(run_dir, specs, max_workers=max_workers, executor=executor)
+    enrich_stage_13_visual_assets(run_dir)
 
 
 def run_stage_14(
@@ -827,7 +923,16 @@ def run_stage_14(
     targets = build_chapter_targets(run_dir)
     specs = _chapter_writer_specs(run_dir, targets)
     if specs:
-        run_shards(run_dir, specs, max_workers=max_workers, executor=executor)
+        verification_by_chapter = {
+            _expected_chapter_file(target): _expected_verification_file(target)
+            for target in targets
+        }
+        run_shards(run_dir, specs, max_workers=max_workers, executor=executor, force=True)
+        for spec in specs:
+            for output in spec.expected_outputs:
+                verification_rel = verification_by_chapter.get(output)
+                if verification_rel:
+                    (run_dir / verification_rel).unlink(missing_ok=True)
 
 
 def run_stage_15(
@@ -919,3 +1024,42 @@ def run_stage_18(run_dir: Path) -> None:
     )
     if not primary_artifact_exists(run_dir, "18"):
         raise RuntimeError("Stage 18 did not produce book artifacts")
+
+
+def run_stage_19(
+    run_dir: Path,
+    *,
+    max_workers: int = 12,
+    executor: str = DEFAULT_EXECUTOR,
+) -> None:
+    """Build the web handbook site from the completed book artifacts."""
+    from handbook_builder import pipeline
+
+    milestone = os.environ.get("HANDBOOK_MILESTONE", "M0")
+    if milestone not in pipeline.IMPLEMENTED_MILESTONES:
+        raise RuntimeError(
+            f"unsupported HANDBOOK_MILESTONE={milestone!r}; "
+            f"expected one of {sorted(pipeline.IMPLEMENTED_MILESTONES)}"
+        )
+    run_pnpm_build = os.environ.get("HANDBOOK_SKIP_PNPM") != "1"
+
+    pipeline.build(
+        run_dir,
+        milestone=milestone,
+        max_workers=max_workers,
+        executor=executor,
+        run_pnpm_build=run_pnpm_build,
+    )
+    if run_pnpm_build:
+        if not primary_artifact_exists(run_dir, "19"):
+            raise RuntimeError("Stage 19 did not produce validated handbook build")
+        append_run_log(run_dir, "19", "completed", f"web handbook milestone {milestone}")
+    else:
+        source_files = (
+            run_dir / "19_handbook" / "astro.config.mjs",
+            run_dir / "19_handbook" / "package.json",
+            run_dir / "19_handbook" / "src" / "content" / "docs" / "methods" / "index.md",
+        )
+        if not all(path.exists() for path in source_files):
+            raise RuntimeError("Stage 19 did not produce handbook source artifacts")
+        append_run_log(run_dir, "19", "source_generated", f"web handbook milestone {milestone}; build skipped")

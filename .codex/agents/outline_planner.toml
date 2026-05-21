@@ -11,7 +11,7 @@ Inputs: run_id.
 Steps:
 1. Load 11_verified_graph/global_graph.json (fall back to 05_weak_graph/weak_global_graph.json).
 2. Greedy-cluster on high-degree non-paper nodes. Drop communities with no verified full-text paper. NO upper cap on families.
-3. One method per promoted paper with usable markdown, valid PageIndex, and non-empty verified evidence claims. method_id = slug of verified_evidence.methods[0].name (fall back to arxiv_id). family_id = community containing the arxiv_id (largest by #verified_full_text × #verified_edges if multiple).
+3. One method per payload.verified_full_text_arxiv_ids entry, and no methods for papers outside that exact list. method_id = slug of verified_evidence.methods[0].name; if no method is verified, slug the paper title. Never use a raw arXiv ID as method_id. family_id = community containing the arxiv_id (largest by #verified_full_text × #verified_edges if multiple).
 4. Per method: neighbor_method_ids = up to 5 closest by shared verified-graph edges (across all families).
 5. Per family: neighbor_family_ids = up to 3 by shared edges.
 6. Both levels: knowledge_gaps_to_explain ⊆ knowledge_gap_report concepts; known_concepts_assumed ⊆ known_concepts_snapshot concepts (intersect with community/paper nodes).
@@ -19,18 +19,19 @@ Steps:
    - family titles are short method-family labels, never paper titles, result sentences, benchmark claims, implementation-environment details, model-size/configuration details, or strings containing sentence punctuation;
    - merge duplicate normalized family titles;
    - fallback singleton families must use a clean bucket from graph concepts. Prefer domain-neutral buckets such as algorithmic method, model architecture, training/adaptation, inference/runtime optimization, memory/compression, retrieval/tooling, evaluation/benchmarking, data/task/application, or theory/analysis unless the topic has a clearer domain-specific family name;
-   - method IDs must not start with section numbers or contain section-heading strings such as problem-formulation, prefilling-stage, observation-window, or pre-filling.
+   - method IDs must not be raw arXiv IDs, start with section numbers, or contain section-heading strings such as problem-formulation, prefilling-stage, observation-window, or pre-filling.
 8. Self-validate in memory before writing outline.json:
-   - every verified full-text promoted paper maps to exactly one method;
+   - every payload.verified_full_text_arxiv_ids entry maps to exactly one method;
+   - no method has an arxiv_id outside payload.verified_full_text_arxiv_ids;
    - every method family_id resolves and appears in exactly one family method_ids list;
    - every family has at least one method;
    - no duplicate normalized family titles;
    - no noisy family titles;
-   - no section-heading method IDs.
+   - no raw arXiv ID or section-heading method IDs.
 9. Emit fixed 8-element book_sections list (skill specifies the IDs).
 10. Write 12_taxonomy/communities.json, taxonomy.json, outline.json.
 
-Hard rules: every verified full-text promoted paper has exactly one method; every method belongs to exactly one family; every family has ≥1 method; book_sections is the fixed 8; no duplicate normalized family titles; no noisy sentence-like family titles; no section-heading method IDs.
+Hard rules: every payload.verified_full_text_arxiv_ids entry has exactly one method; no method has an arxiv_id outside payload.verified_full_text_arxiv_ids; every method belongs to exactly one family; every family has ≥1 method; book_sections is the fixed 8; no duplicate normalized family titles; no noisy sentence-like family titles; no raw arXiv ID or section-heading method IDs.
 
 Return: 'ok: F families, M methods, 8 book sections'.
 """

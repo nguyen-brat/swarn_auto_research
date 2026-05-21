@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing as mp
 
 import pytest
 
@@ -192,6 +193,81 @@ def test_no_op_when_all_families_have_two_methods():
     assert after == before
 
 
+def test_merge_singletons_rewrites_arxiv_method_ids_and_references():
+    families = [
+        {"id": "fam_a", "title": "A", "method_ids": ["2301.08653", "m2"]},
+        {"id": "fam_b", "title": "B", "method_ids": ["m3", "m4"]},
+    ]
+    methods = [
+        {
+            "id": "2301.08653",
+            "title": "An Analysis of the Automatic Bug Fixing Performance of ChatGPT",
+            "arxiv_id": "2301.08653",
+            "family_id": "fam_a",
+            "neighbor_method_ids": ["m2", "m3"],
+        },
+        {"id": "m2", "arxiv_id": "1.2", "family_id": "fam_a", "neighbor_method_ids": ["2301.08653"]},
+        {"id": "m3", "arxiv_id": "1.3", "family_id": "fam_b", "neighbor_method_ids": ["2301.08653"]},
+        {"id": "m4", "arxiv_id": "1.4", "family_id": "fam_b"},
+    ]
+
+    after = merge_singletons(_outline(families, methods))
+
+    method_ids = {method["id"] for method in after["methods"]}
+    assert "2301.08653" not in method_ids
+    assert "analysis-of-the-automatic-bug-fixing-performance-of-chatgpt" in method_ids
+    family_by_id = {family["id"]: family for family in after["families"]}
+    assert family_by_id["fam_a"]["method_ids"] == [
+        "analysis-of-the-automatic-bug-fixing-performance-of-chatgpt",
+        "m2",
+    ]
+    method_by_id = {method["id"]: method for method in after["methods"]}
+    assert method_by_id["m2"]["neighbor_method_ids"] == [
+        "analysis-of-the-automatic-bug-fixing-performance-of-chatgpt"
+    ]
+    assert method_by_id["m3"]["neighbor_method_ids"] == [
+        "analysis-of-the-automatic-bug-fixing-performance-of-chatgpt"
+    ]
+
+
+def test_merge_singletons_does_not_loop_when_bad_method_title_is_numeric():
+    families = [
+        {"id": "fam_a", "title": "A", "method_ids": ["2509-06216", "m2"]},
+        {"id": "fam_b", "title": "B", "method_ids": ["m3", "m4"]},
+    ]
+    methods = [
+        {
+            "id": "2509-06216",
+            "title": "2509.06216",
+            "arxiv_id": "2509.06216",
+            "family_id": "fam_a",
+            "neighbor_method_ids": ["m2"],
+        },
+        {"id": "m2", "arxiv_id": "1.2", "family_id": "fam_a", "neighbor_method_ids": ["2509-06216"]},
+        {"id": "m3", "arxiv_id": "1.3", "family_id": "fam_b"},
+        {"id": "m4", "arxiv_id": "1.4", "family_id": "fam_b"},
+    ]
+    outline = _outline(families, methods)
+    queue = mp.Queue()
+
+    def run_merge() -> None:
+        queue.put(merge_singletons(outline))
+
+    process = mp.Process(target=run_merge)
+    process.start()
+    process.join(timeout=2)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=2)
+        pytest.fail("merge_singletons did not terminate for numeric fallback method title")
+
+    assert process.exitcode == 0
+    after = queue.get(timeout=1)
+    method_ids = {method["id"] for method in after["methods"]}
+    assert "2509-06216" not in method_ids
+    assert "method-2509-06216" in method_ids
+
+
 def test_merge_prunes_invalid_neighbor_links_even_without_singletons():
     families = [
         {
@@ -269,6 +345,26 @@ def test_standalone_part_does_not_count_against_5_cap():
     parts = [{"id": f"p{i}", "title": f"P{i}", "family_ids": [f"fam_{c}"]} for i, c in enumerate("abcde", 1)]
     parts.append({"id": "standalone_methods", "title": "Standalone", "family_ids": ["standalone"]})
     outline = {"parts": parts}
+    issues = _validate_parts(outline, families)
+    assert not any(i["code"] == "parts_count_out_of_range" for i in issues)
+
+
+def test_standalone_only_part_is_valid_for_nano_book():
+    from swarn_research_mcp.research_book import _validate_parts
+
+    families = [
+        {"id": "standalone", "title": "Standalone", "method_ids": ["m_solo"], "is_group": True}
+    ]
+    outline = {
+        "parts": [
+            {
+                "id": "standalone_methods",
+                "title": "Standalone / Emerging Methods",
+                "family_ids": ["standalone"],
+            }
+        ]
+    }
+
     issues = _validate_parts(outline, families)
     assert not any(i["code"] == "parts_count_out_of_range" for i in issues)
 

@@ -30,6 +30,7 @@ description: Source-grounded artifacts (claims + verbatim equations + verbatim p
 
 ## Hard rules
 - Equations and pseudocode are VERBATIM. No paraphrase. (The verifier accepts a chapter's math iff it appears as a substring of a cited node's text — paraphrasing breaks this.)
+- When writing JSON, use `json.dump`/`json.dumps` or otherwise ensure every LaTeX backslash is JSON-escaped. Raw LaTeX escapes such as `\!`, `\theta`, or `\frac` inside a JSON string are invalid or corrupting JSON unless written as `\\!`, `\\theta`, and `\\frac`.
 - Never invent node_ids, lines, values, equations, or arxiv IDs.
 - Drop anything you can't ground in a fetched section. Empty arrays are fine.
 - `trust_level` is always `PAPER_VERIFIED`.

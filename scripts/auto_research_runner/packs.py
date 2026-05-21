@@ -8,6 +8,7 @@ from scripts.auto_research_runner.config import (
     METHOD_PACK_REQUIRED_SOURCE_SECTIONS,
     METHOD_PACK_SECTION_TITLES,
 )
+from scripts.auto_research_runner.figures import select_visual_assets_for_arxiv_ids
 from scripts.auto_research_runner.io_utils import _write_json
 from scripts.auto_research_runner.pack_sources import (
     _first_available_nodes,
@@ -103,6 +104,7 @@ def _build_method_pack(
         "structured": structured,
         "section_plan": section_plan,
         "neighbors": neighbors,
+        "visual_assets": select_visual_assets_for_arxiv_ids(run_dir, [arxiv_id], limit=1),
     }
 
 
@@ -154,6 +156,7 @@ def _build_family_pack(
         "known_concepts_assumed": family.get("known_concepts_assumed") or [],
         "comparison_rows": comparison_rows,
     }
+    arxiv_ids = [entry["arxiv_id"] for entry in method_entries if entry.get("arxiv_id")]
     return {
         "pack_type": "family",
         "family_id": family["id"],
@@ -165,6 +168,7 @@ def _build_family_pack(
         "knowledge_gaps_to_explain": data["knowledge_gaps_to_explain"],
         "known_concepts_assumed": data["known_concepts_assumed"],
         "comparison_rows": comparison_rows,
+        "visual_assets": select_visual_assets_for_arxiv_ids(run_dir, arxiv_ids, limit=1),
         "data": data,
     }
 
@@ -238,7 +242,11 @@ def build_deterministic_stage_13_packs(run_dir: Path) -> dict[str, int]:
     for target in build_chapter_targets(run_dir):
         expected_path = run_dir / _expected_chapter_pack(target)
         if expected_path.exists():
-            if target["type"] != "methods" or _method_pack_has_required_source_text(expected_path):
+            if target["type"] == "methods":
+                pack_current = _method_pack_has_required_source_text(expected_path)
+            else:
+                pack_current = True
+            if pack_current:
                 counts["skipped"] += 1
                 continue
         if target["type"] == "methods":
@@ -254,6 +262,7 @@ def build_deterministic_stage_13_packs(run_dir: Path) -> dict[str, int]:
             payload = _build_book_pack(run_dir, outline, section)
         _write_json(expected_path, payload)
         counts[target["type"]] += 1
+    enrich_stage_13_visual_assets(run_dir)
     append_run_log(
         run_dir,
         "13",
@@ -264,3 +273,40 @@ def build_deterministic_stage_13_packs(run_dir: Path) -> dict[str, int]:
         ),
     )
     return counts
+
+
+def enrich_stage_13_visual_assets(run_dir: Path) -> None:
+    """Normalize agent-created Stage 13 packs to the visual_assets contract."""
+    method_dir = run_dir / "13_chapter_packs" / "methods"
+    if method_dir.exists():
+        for path in sorted(method_dir.glob("*_pack.json")):
+            pack = _read_json_or_empty(path)
+            if not isinstance(pack, dict):
+                continue
+            if isinstance(pack.get("visual_assets"), list) and pack["visual_assets"]:
+                continue
+            arxiv_id = str(pack.get("arxiv_id") or "")
+            pack["visual_assets"] = (
+                select_visual_assets_for_arxiv_ids(run_dir, [arxiv_id], limit=1)
+                if arxiv_id
+                else []
+            )
+            _write_json(path, pack)
+
+    family_dir = run_dir / "13_chapter_packs" / "families"
+    if family_dir.exists():
+        for path in sorted(family_dir.glob("*_pack.json")):
+            pack = _read_json_or_empty(path)
+            if not isinstance(pack, dict):
+                continue
+            if isinstance(pack.get("visual_assets"), list) and pack["visual_assets"]:
+                continue
+            arxiv_ids = [
+                str(entry.get("arxiv_id") or "")
+                for entry in pack.get("method_ids") or []
+                if isinstance(entry, dict) and entry.get("arxiv_id")
+            ]
+            pack["visual_assets"] = select_visual_assets_for_arxiv_ids(
+                run_dir, arxiv_ids, limit=1
+            )
+            _write_json(path, pack)

@@ -3101,6 +3101,7 @@ class ServerRequestResolvedNotification(BaseModel):
 class ServiceTier(Enum):
     fast = "fast"
     flex = "flex"
+    priority = "priority"
 
 
 class SessionSourceValue(Enum):

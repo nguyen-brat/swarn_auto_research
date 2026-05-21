@@ -7,7 +7,7 @@ description: One method chapter using Book_style's 10-section template. Reproduc
 
 ## Inputs
 - `method_ids` (sharded slice)
-- `13_chapter_packs/methods/{method_id}_pack.json` — self-contained
+- `13_chapter_packs/methods/{method_id}_pack.json` — self-contained, including optional `visual_assets`
 - `Book_style.md`
 - `06_expansion/known_concepts_snapshot.json` (never re-explain these)
 
@@ -18,7 +18,13 @@ description: One method chapter using Book_style's 10-section template. Reproduc
 1. `## Summary` — 2–5 sentences.
 2. `## Motivation` — why this method, citing the pack's problem framing.
 3. `## Intuition` — mental model. No equations.
-4. `## Theory` — every `pack.structured.equations[]` reproduced VERBATIM as `$$ ... $$`. Below each: 1-line plain caption + `[arxiv:ID, node_id]` cite.
+4. `## Theory` — every `pack.structured.equations[]` reproduced VERBATIM as display math. Use plain display delimiters only:
+   ```markdown
+   $$
+   equation
+   $$
+   ```
+   Do not wrap inline `$...$` inside `$$...$$`. Below each equation: 1-line plain caption + `[arxiv:ID, node_id]` cite.
 5. `## Algorithm` — `pack.structured.algorithms[].pseudocode` reproduced VERBATIM in a fenced ```text block. Then numbered `steps`. Cite source.
 6. `## Worked Example` — concrete numbers from `pack.structured.hyperparameters` and the pack's `example` section.
 7. `## Interpretation` — how to read outputs/plots/scores.
@@ -29,6 +35,7 @@ description: One method chapter using Book_style's 10-section template. Reproduc
 
 ## Writing contract
 - This is a method-design chapter, not a paper abstract and not a source excerpt dump.
+- If `pack.visual_assets` is non-empty, include exactly one image using exactly `pack.visual_assets[0].markdown_image` near `## Intuition` or `## Algorithm`, followed by a one-line caption and citation/audit reference from the same asset. Do not paste the raw `source_url`.
 - Use `section_text` as evidence, then synthesize: explain the model components, data flow, training/inference procedure, objective, design tradeoffs, and evaluation interpretation in your own technical prose.
 - Do NOT paste raw section headings, bullet lists of paper sections, table captions, "Baselines." labels, or copied evaluation lists as chapter content. If a source section lists baselines, explain what each baseline is testing and why it matters for this method's design.
 - Do NOT create empty sections containing only a citation such as `[arxiv:ID, s.01]`.
@@ -37,12 +44,13 @@ description: One method chapter using Book_style's 10-section template. Reproduc
 - Every required section except Practical Guidance and Related Methods should contain at least one explanatory paragraph of 3+ sentences before citations.
 
 ## Hard rules
-- Equations VERBATIM as display math. Do not paraphrase LaTeX. The 1-line caption goes BELOW the equation, not in place.
+- Equations VERBATIM as display math. Do not paraphrase LaTeX. Do not emit nested delimiters such as `$$ $...$ $$`. The 1-line caption goes BELOW the equation, not in place.
 - Pseudocode VERBATIM in fenced blocks.
 - Theory has ≥ 1 `$$` when pack has equations. Algorithm has ≥ 1 fenced block OR a numbered list of length ≥ 3 when pack has algorithms.
 - Artifact grounding: every named library/codebase/model/comparison must appear in `pack.structured` or in a `pack.section_plan[*].source_nodes[*].section_text`.
 - Cite every non-trivial claim inline as `[arxiv:ID, node_id]`.
 - KB-known concepts: brief mention only, no re-explanation.
+- Visual assets: use at most one image. If present, copy the `markdown_image` string verbatim so the handbook can render the cached local figure.
 
 ## Length
 - 1500–3000 words. Start with `# {method_title}`.
@@ -55,3 +63,4 @@ description: One method chapter using Book_style's 10-section template. Reproduc
 - Strengths and Limitations: ≥ 3 bullets each.
 - Related Methods: ≥ 2 paragraphs when pack has ≥ 2 neighbors.
 - Word count 1500–3000. Every named artifact appears in pack.
+- If `pack.visual_assets` is non-empty, chapter contains `pack.visual_assets[0].markdown_image` exactly once.

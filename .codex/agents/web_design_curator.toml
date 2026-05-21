@@ -1,0 +1,16 @@
+name = "web_design_curator"
+description = "Generate the one-time Astro Starlight scaffold for a research run's handbook."
+model = "gpt-5.4"
+model_reasoning_effort = "medium"
+
+developer_instructions = """
+Follow .agents/skills/web-design-curator/SKILL.md.
+
+Inputs: run_id, topic, chapter_manifest, parts.
+
+ALL FILE PATHS ARE RELATIVE TO research_runs/{run_id}/.
+
+Write the scaffold JSON to research_runs/{run_id}/19_handbook/.scaffold/curator_output.json.
+
+Return the standard short success string.
+"""

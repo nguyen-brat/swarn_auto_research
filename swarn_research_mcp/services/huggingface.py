@@ -11,6 +11,8 @@ load_dotenv()
 HF_PAPERS_SEARCH_URL = "https://huggingface.co/api/papers/search"
 HF_DAILY_PAPERS_URL = "https://huggingface.co/api/daily_papers"
 HF_TOKEN = os.getenv("HF_TOKEN", "")
+HF_PAPERS_SEARCH_MAX_LIMIT = 100
+HF_DAILY_PAPERS_MAX_LIMIT = 100
 
 
 def _huggingface_auth_headers():
@@ -53,10 +55,24 @@ def _normalize_month_filter(month: str, year: str | int | None = None) -> str:
     return f"{year}-{int(month):02d}"
 
 
+def _cap_papers_search_limit(limit: int) -> int:
+    limit = int(limit)
+    if limit < 1:
+        raise ValueError("limit must be >= 1")
+    return min(limit, HF_PAPERS_SEARCH_MAX_LIMIT)
+
+
+def _cap_daily_papers_limit(limit: int) -> int:
+    limit = int(limit)
+    if limit < 1:
+        raise ValueError("limit must be >= 1")
+    return min(limit, HF_DAILY_PAPERS_MAX_LIMIT)
+
+
 def _search_huggingface_papers_sync(query: str, limit: int = 120) -> dict:
     params = {
         "q": query,
-        "limit": limit,
+        "limit": _cap_papers_search_limit(limit),
     }
     result = http_get(HF_PAPERS_SEARCH_URL, params=params, headers=_huggingface_auth_headers())
     sorted_result = sorted(
@@ -79,7 +95,7 @@ def _collect_huggingface_trending_papers_sync(
 ) -> dict:
     params = {
         "p": page,
-        "limit": limit,
+        "limit": _cap_daily_papers_limit(limit),
         "month": _normalize_month_filter(month, year),
         "sort": "publishedAt",
     }

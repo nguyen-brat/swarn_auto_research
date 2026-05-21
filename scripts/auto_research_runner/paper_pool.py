@@ -10,6 +10,7 @@ from scripts.auto_research_runner.artifacts import (
     _verified_evidence_is_valid,
 )
 from scripts.auto_research_runner.io_utils import _load_json, _write_json
+from scripts.auto_research_runner.paper_roles import is_context_only_paper
 
 
 def _paper_pool_ids(paper_pool: Any) -> list[str]:
@@ -170,6 +171,14 @@ def load_verified_promoted_arxiv_ids(run_dir: Path) -> list[str]:
         if _verified_evidence_is_valid(run_dir, arxiv_id):
             verified.append(arxiv_id)
     return verified
+
+
+def load_final_candidate_promoted_arxiv_ids(run_dir: Path) -> list[str]:
+    return [
+        arxiv_id
+        for arxiv_id in load_verified_promoted_arxiv_ids(run_dir)
+        if not is_context_only_paper(run_dir, arxiv_id)
+    ]
 
 
 def _paper_pool_records(seed_papers: Any) -> list[dict[str, Any]]:

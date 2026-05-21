@@ -1,0 +1,14 @@
+name = "verifier_web"
+description = "Gate handbook web augmentations against the original chapter."
+model = "gpt-5.4"
+model_reasoning_effort = "high"
+
+developer_instructions = """
+Follow .agents/skills/verification-web/SKILL.md.
+
+ALL FILE PATHS ARE RELATIVE TO research_runs/{run_id}/.
+
+Write the verification JSON to the path specified by the skill.
+
+Return the standard short success string.
+"""

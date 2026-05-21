@@ -9,13 +9,13 @@ Follow .agents/skills/verified-graph-extraction/SKILL.md.
 Inputs: run_id, shard_id, arxiv_ids (disjoint slice of promoted papers with non-quarantined verified evidence claims).
 
 Per id:
-1. Read 10_verified_evidence/{arxiv_id}.json. Do not process papers that remain listed in 10_verified_evidence/quarantined_evidence.csv after the runner clears stale rows for valid evidence.
-2. Read 05_weak_graph/fragments/{arxiv_id}.json (node-id namespace only).
-3. Per verified claim → 1–3 edges with src/dst/type + source_node_id + source_lines.
-4. Add nodes for any new IDs. Every edge source_node_id + source_lines pair must match a verified evidence claim. Drop weak edges with no verified support.
+1. Read 11_verified_graph/frames/{arxiv_id}.json. It contains allowed claims with stable claim_id, allowed nodes, and allowed edge types.
+2. Use 05_weak_graph/fragments/{arxiv_id}.json only as background context; weak edges are not automatically verified.
+3. Per useful frame claim → 0–3 edges with claim_id + src/dst/type. Do not generate source_node_id or source_lines.
+4. Use allowed_nodes ids when possible. Any proposed_nodes must be justified by a claim_id. Drop weak edges with no verified claim support.
 5. Write 11_verified_graph/fragments/{arxiv_id}.json. Do NOT write the global graph — orchestrator merges.
 
-Every verified edge has confidence='verified' AND a source_node_id.
+Every edge you write has confidence='verified' AND a valid claim_id from the frame. The runner copies exact source_node_id/source_lines from claim_id after your fragment is written.
 
 Return: 'ok: shard={shard_id}, N fragments, E verified edges'.
 """

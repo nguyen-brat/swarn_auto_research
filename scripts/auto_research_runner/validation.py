@@ -19,6 +19,7 @@ from scripts.auto_research_runner.config import (
     STAGE_1_MAX_SURVEY_QUERIES,
     STAGE_1_MIN_ASPECTS,
 )
+from scripts.auto_research_runner.contract_repair import RepairIssue, preserve_raw_artifact
 from scripts.auto_research_runner.io_utils import _load_csv_rows, _load_json
 from scripts.auto_research_runner.paper_pool import (
     _duplicate_ids,
@@ -27,8 +28,16 @@ from scripts.auto_research_runner.paper_pool import (
     _promoted_ids,
     _seed_pool_ids,
     _seed_pool_kept_count,
+    load_final_candidate_promoted_arxiv_ids,
     load_paper_pool_arxiv_ids,
     read_promoted_arxiv_ids,
+)
+from scripts.auto_research_runner.paper_roles import (
+    canonical_method_id_from_title,
+    is_context_only_paper,
+    is_placeholder_method_id,
+    is_placeholder_method_title,
+    resolve_paper_metadata,
 )
 from scripts.auto_research_runner.state import append_run_log
 
@@ -420,7 +429,6 @@ def validate_verified_global_graph(run_dir: Path) -> None:
 def validate_outline_contract(run_dir: Path) -> None:
     # Imported here to avoid module-load cycle: chapters imports validation transitively.
     from scripts.auto_research_runner.chapters import load_outline
-    from scripts.auto_research_runner.paper_pool import load_verified_promoted_arxiv_ids
     from swarn_research_mcp.research_book import BOOK_FILE_BY_ID
 
     outline = load_outline(run_dir)
@@ -454,9 +462,289 @@ def validate_outline_contract(run_dir: Path) -> None:
         if family_id not in family_ids:
             raise RuntimeError(f"outline.json method {method_id} references missing family {family_id}")
         method_arxiv_ids.append(arxiv_id)
-    verified_ids = load_verified_promoted_arxiv_ids(run_dir)
+    verified_ids = load_final_candidate_promoted_arxiv_ids(run_dir)
     if sorted(method_arxiv_ids) != sorted(verified_ids):
-        raise RuntimeError("outline.json must contain exactly one method per verified full-text paper")
+        raise RuntimeError("outline.json must contain exactly one method per final candidate paper")
+
+
+def normalize_outline_to_verified_papers(run_dir: Path) -> dict[str, Any]:
+    # Imported here to avoid module-load cycle: chapters imports validation transitively.
+    from scripts.auto_research_runner.chapters import load_outline
+
+    outline_path = run_dir / "12_taxonomy" / "outline.json"
+    outline = load_outline(run_dir)
+    if not isinstance(outline, dict):
+        return {
+            "dropped_extra_methods": 0,
+            "dropped_duplicate_methods": 0,
+            "dropped_context_only_methods": 0,
+            "dropped_empty_families": 0,
+            "renamed_method_ids": 0,
+            "hydrated_method_titles": 0,
+            "missing_verified_methods": 0,
+        }
+    methods = outline.get("methods")
+    families = outline.get("families")
+    if not isinstance(methods, list) or not isinstance(families, list):
+        return {
+            "dropped_extra_methods": 0,
+            "dropped_duplicate_methods": 0,
+            "dropped_context_only_methods": 0,
+            "dropped_empty_families": 0,
+            "renamed_method_ids": 0,
+            "hydrated_method_titles": 0,
+            "missing_verified_methods": 0,
+        }
+
+    verified_ids = load_final_candidate_promoted_arxiv_ids(run_dir)
+    verified_set = set(verified_ids)
+    seen_arxiv_ids: set[str] = set()
+    methods_by_family: dict[str, list[str]] = {}
+    kept_methods: list[dict[str, Any]] = []
+    dropped_extra_methods = 0
+    dropped_duplicate_methods = 0
+    dropped_context_only_methods = 0
+    renamed_method_ids = 0
+    hydrated_method_titles = 0
+    method_id_renames: dict[str, str] = {}
+    used_method_ids = {
+        str(method.get("id") or "").strip()
+        for method in methods
+        if isinstance(method, dict) and str(method.get("id") or "").strip()
+    }
+
+    for method in methods:
+        if not isinstance(method, dict):
+            kept_methods.append(method)
+            continue
+        arxiv_id = str(method.get("arxiv_id") or "").strip()
+        if arxiv_id not in verified_set:
+            if arxiv_id and is_context_only_paper(run_dir, arxiv_id):
+                dropped_context_only_methods += 1
+            else:
+                dropped_extra_methods += 1
+            continue
+        if arxiv_id in seen_arxiv_ids:
+            dropped_duplicate_methods += 1
+            continue
+        seen_arxiv_ids.add(arxiv_id)
+        method = _canonicalized_outline_method(
+            run_dir,
+            method,
+            used_method_ids=used_method_ids,
+            method_id_renames=method_id_renames,
+        )
+        if method.pop("_hydrated_method_title", False):
+            hydrated_method_titles += 1
+        if method.pop("_renamed_method_id", False):
+            renamed_method_ids += 1
+        kept_methods.append(method)
+        method_id = str(method.get("id") or "").strip()
+        family_id = str(method.get("family_id") or "").strip()
+        if method_id and family_id:
+            methods_by_family.setdefault(family_id, []).append(method_id)
+
+    kept_method_ids = {
+        str(method.get("id") or "").strip()
+        for method in kept_methods
+        if isinstance(method, dict) and str(method.get("id") or "").strip()
+    }
+    for method in kept_methods:
+        if not isinstance(method, dict):
+            continue
+        neighbors = method.get("neighbor_method_ids")
+        if isinstance(neighbors, list):
+            method["neighbor_method_ids"] = [
+                renamed
+                for neighbor_id in neighbors
+                if (renamed := method_id_renames.get(str(neighbor_id), str(neighbor_id))) in kept_method_ids
+            ]
+
+    kept_families: list[dict[str, Any]] = []
+    dropped_empty_families = 0
+    rewritten_family_method_ids = 0
+    for family in families:
+        if not isinstance(family, dict):
+            kept_families.append(family)
+            continue
+        family_id = str(family.get("id") or "").strip()
+        kept_method_ids = methods_by_family.get(family_id, [])
+        if not kept_method_ids:
+            dropped_empty_families += 1
+            continue
+        updated_family = dict(family)
+        original_method_ids = family.get("method_ids")
+        if original_method_ids != kept_method_ids:
+            rewritten_family_method_ids += 1
+        updated_family["method_ids"] = kept_method_ids
+        kept_families.append(updated_family)
+
+    dropped_parts = 0
+    pruned_part_family_ids = 0
+    if isinstance(outline.get("parts"), list):
+        kept_family_ids = {
+            str(family.get("id") or "").strip()
+            for family in kept_families
+            if isinstance(family, dict)
+        }
+        kept_parts: list[dict[str, Any]] = []
+        for part in outline["parts"]:
+            if not isinstance(part, dict):
+                kept_parts.append(part)
+                continue
+            family_ids = part.get("family_ids")
+            if not isinstance(family_ids, list):
+                kept_parts.append(part)
+                continue
+            kept_part_family_ids = [
+                str(family_id).strip()
+                for family_id in family_ids
+                if str(family_id).strip() in kept_family_ids
+            ]
+            if not kept_part_family_ids:
+                dropped_parts += 1
+                continue
+            updated_part = dict(part)
+            if kept_part_family_ids != [str(family_id).strip() for family_id in family_ids]:
+                pruned_part_family_ids += 1
+            updated_part["family_ids"] = kept_part_family_ids
+            kept_parts.append(updated_part)
+        outline["parts"] = kept_parts
+
+    missing_verified_methods = len(verified_set - seen_arxiv_ids)
+    changed = (
+        dropped_extra_methods
+        or dropped_duplicate_methods
+        or dropped_context_only_methods
+        or renamed_method_ids
+        or hydrated_method_titles
+        or dropped_empty_families
+        or rewritten_family_method_ids
+        or dropped_parts
+        or pruned_part_family_ids
+    )
+    repair_raw: dict[str, str] = {}
+    repair_issues: list[dict[str, Any]] = []
+    if changed:
+        raw = preserve_raw_artifact(run_dir, outline_path)
+        repair_raw = {"raw_artifact": raw.raw_artifact, "raw_sha256": raw.raw_sha256}
+        if dropped_extra_methods:
+            repair_issues.append(
+                RepairIssue(
+                    kind="dropped_extra_method",
+                    detail=f"dropped {dropped_extra_methods} method(s) whose arxiv_id was not verified",
+                ).to_json()
+            )
+        if dropped_duplicate_methods:
+            repair_issues.append(
+                RepairIssue(
+                    kind="dropped_duplicate_method",
+                    detail=f"dropped {dropped_duplicate_methods} duplicate method(s)",
+                ).to_json()
+            )
+        if dropped_context_only_methods:
+            repair_issues.append(
+                RepairIssue(
+                    kind="dropped_context_only_method",
+                    detail=f"dropped {dropped_context_only_methods} survey/review context-only method(s)",
+                ).to_json()
+            )
+        if hydrated_method_titles:
+            repair_issues.append(
+                RepairIssue(
+                    kind="hydrated_method_title",
+                    detail=f"hydrated {hydrated_method_titles} placeholder method title(s)",
+                ).to_json()
+            )
+        if renamed_method_ids:
+            repair_issues.append(
+                RepairIssue(
+                    kind="renamed_placeholder_method_id",
+                    detail=f"renamed {renamed_method_ids} placeholder method id(s)",
+                ).to_json()
+            )
+        if dropped_empty_families:
+            repair_issues.append(
+                RepairIssue(
+                    kind="dropped_empty_family",
+                    detail=f"dropped {dropped_empty_families} family/families with no kept methods",
+                ).to_json()
+            )
+        if rewritten_family_method_ids:
+            repair_issues.append(
+                RepairIssue(
+                    kind="rewritten_family_method_ids",
+                    detail=f"rewrote method_ids for {rewritten_family_method_ids} family/families to match kept methods",
+                ).to_json()
+            )
+        if dropped_parts:
+            repair_issues.append(
+                RepairIssue(kind="dropped_empty_part", detail=f"dropped {dropped_parts} empty part(s)").to_json()
+            )
+        if pruned_part_family_ids:
+            repair_issues.append(
+                RepairIssue(
+                    kind="pruned_part_family_ids",
+                    detail=f"pruned invalid family_ids from {pruned_part_family_ids} part(s)",
+                ).to_json()
+            )
+        outline["methods"] = kept_methods
+        outline["families"] = kept_families
+        tmp_path = outline_path.with_suffix(outline_path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(outline, indent=2, sort_keys=True) + "\n")
+        tmp_path.replace(outline_path)
+
+    return {
+        "dropped_extra_methods": dropped_extra_methods,
+        "dropped_duplicate_methods": dropped_duplicate_methods,
+        "dropped_context_only_methods": dropped_context_only_methods,
+        "renamed_method_ids": renamed_method_ids,
+        "hydrated_method_titles": hydrated_method_titles,
+        "dropped_empty_families": dropped_empty_families,
+        "rewritten_family_method_ids": rewritten_family_method_ids,
+        "dropped_parts": dropped_parts,
+        "pruned_part_family_ids": pruned_part_family_ids,
+        "missing_verified_methods": missing_verified_methods,
+        "repair_raw_artifact": repair_raw.get("raw_artifact", ""),
+        "repair_raw_sha256": repair_raw.get("raw_sha256", ""),
+        "repair_issues": repair_issues,
+    }
+
+
+def _canonicalized_outline_method(
+    run_dir: Path,
+    method: dict[str, Any],
+    *,
+    used_method_ids: set[str],
+    method_id_renames: dict[str, str],
+) -> dict[str, Any]:
+    out = dict(method)
+    arxiv_id = str(out.get("arxiv_id") or "").strip()
+    metadata = resolve_paper_metadata(run_dir, arxiv_id) if arxiv_id else {}
+    title = str(out.get("title") or "").strip()
+    metadata_title = str(metadata.get("title") or "").strip()
+    if metadata_title and is_placeholder_method_title(title):
+        out["title"] = metadata_title
+        out["_hydrated_method_title"] = True
+        title = metadata_title
+    old_id = str(out.get("id") or "").strip()
+    if is_placeholder_method_id(old_id) or (arxiv_id and old_id == f"method-{arxiv_id.replace('.', '-')}"):
+        base = canonical_method_id_from_title(title or metadata_title or arxiv_id)
+        new_id = base
+        suffix = 2
+        used_method_ids.discard(old_id)
+        while new_id in used_method_ids:
+            new_id = f"{base}-{suffix}"
+            suffix += 1
+        if new_id != old_id:
+            out["id"] = new_id
+            out["_renamed_method_id"] = True
+            method_id_renames[old_id] = new_id
+            used_method_ids.add(new_id)
+    out.setdefault("known_concepts_assumed", [])
+    out.setdefault("knowledge_gaps_to_explain", [])
+    out.setdefault("neighbor_method_ids", [])
+    return out
 
 
 def validate_bootstrap_stage_0_10_contract(run_dir: Path) -> None:

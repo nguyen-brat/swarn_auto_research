@@ -17,7 +17,7 @@ env PYTHONPATH=. python scripts/run_auto_research.py --run-id <run_id> --phase w
 The Python runner owns durable stage state, shard manifests, artifact checks, retries, and deterministic merges. This skill remains the behavioral contract for every stage. The interactive parent Codex session should supervise the runner and repair failures, not manually execute the stage work in chat.
 
 The runner must execute Stages 0-10 as separate stage handlers. Do not ask one Codex SDK session to run multiple stages from 0 through 10.
-The runner caps effective shard fanout by stage: light/no-agent stages use up to 20 workers, normal sub-agent stages use up to 10, and memory-heavy sub-agent stages use up to 5. `SWARN_MAX_EFFECTIVE_WORKERS` applies a global cap, and `SWARN_STAGE_<N>_MAX_EFFECTIVE_WORKERS` overrides a specific stage cap for experiments, for example `SWARN_STAGE_10_MAX_EFFECTIVE_WORKERS=3`.
+The runner caps effective shard fanout by stage: most parallel stages use up to 20 workers, while Stage 6 expansion uses up to 10 workers. `SWARN_MAX_EFFECTIVE_WORKERS` applies a global cap, and `SWARN_STAGE_<N>_MAX_EFFECTIVE_WORKERS` overrides a specific stage cap for experiments, for example `SWARN_STAGE_10_MAX_EFFECTIVE_WORKERS=8`.
 
 ## Inputs
 - `topic` (required for `phase=draft|all`)
@@ -61,6 +61,7 @@ Before dispatching any stage, check whether its primary output exists. If yes, l
 | 16 | every chapter target except `book:appendices` has YAML front matter + `16_book/chapters_manifest.json` lists all dispatched targets |
 | 17 | `17_learning_suggestions/knowledge_to_add.md` |
 | 18 | `16_book/SUMMARY.md` + `16_book/sidebar.json` + `16_book/appendices/`; validation has no blocking contract issues |
+| 19 | `19_handbook/astro.config.mjs` + `19_handbook/package.json`; default `M0` base web handbook exists |
 
 ## Stage 18 verification quarantine
 At stage 18, `generate_book_artifacts` ALWAYS produces `SUMMARY.md`, `sidebar.json`, `04_method_taxonomy.md`, and `appendices/` (assuming Stage 12.5 normalized the outline). Chapters whose front-matter `status` starts with `excluded_` are **quarantined** - they remain on disk under `14_chapters/` but are NOT linked from main navigation. Missing citation metadata is written as a `citation/<arxiv_id>` NEEDS_REVIEW item while `references.md` keeps an unresolved marker; this is review debt, not a hard book-generation failure. The list of quarantined chapters and citation issues is written to `16_book/NEEDS_REVIEW.md`, which always exists (even if empty).
@@ -90,7 +91,7 @@ verified_sections_per_paper = 20
 5. Per-item outputs live at canonical filenames — shards never collide.
 6. Run any required sequential merge after all shards finish.
 
-Cap: use the runner's stage-specific effective worker cap. Default caps are Stage 2/3/8/9/16/17/18 = 20; Stage 6/11/14 = 10; Stage 10/13/15 = 5. If a stage has more shards than its cap, dispatch in waves at that cap and wait for one wave before launching the next.
+Cap: use the runner's stage-specific effective worker cap. Default caps are Stage 2/3/8/9/10/11/13/14/15/16/17/18 = 20; Stage 6 = 10. If a stage has more shards than its cap, dispatch in waves at that cap and wait for one wave before launching the next.
 
 ## Delegation hard rules
 - Do not replace Stages 12–17 with an inline parent-script generator. The parent orchestrator may create folders, merge shard outputs, and run deterministic validators, but taxonomy, packs, chapter prose, verification, and manifest/front-matter edits must come from the configured stage agents.
@@ -182,7 +183,7 @@ The runner parses non-empty `08_full_markdown/{arxiv_id}.md` files directly and 
 Shard promoted arxiv_ids that have usable markdown and a valid PageIndex → `verified_evidence_extractor`. Validation: every claim has non-empty `source_node_id` + `source_lines`. Zero-claim papers are re-dispatched once with `force=True`; if a first extraction creates `claims: []`, retry that paper once before quarantine. Still empty → record in `10_verified_evidence/quarantined_evidence.csv` and drop from verified graph/chapters (not fatal). If evidence later becomes valid, stale quarantine rows are cleared.
 
 ### 11 — Verified graph [PARALLEL fragments + merge]
-Shard only promoted arxiv_ids with usable markdown, valid PageIndex, and verified evidence claims. Before dispatch, the runner clears stale quarantine rows for papers whose evidence is now valid. Merge only those eligible fragments, ignoring stale fragments for now-ineligible papers:
+Shard only promoted arxiv_ids with usable markdown, valid PageIndex, and verified evidence claims → `verified_graph_extractor`. Before dispatch, the runner clears stale quarantine rows for papers whose evidence is now valid and writes `11_verified_graph/frames/{arxiv_id}.json` from Stage 10. The frame is the allowed Stage 11 contract: claims have stable `claim_id`, exact source grounding, allowed nodes, and allowed edge types. The graph extractor should output `claim_id` edges; the runner compiles those into exact `source_node_id` + `source_lines` before validation. Merge only eligible fragments, ignoring stale fragments for now-ineligible papers:
 - Dedupe nodes, union edges.
 - Compare against `weak_global_graph.json`; list weak edges with no verified counterpart.
 - Validate every edge endpoint exists in the fragment and every edge source grounding matches a claim in `10_verified_evidence/{arxiv_id}.json`.
@@ -273,8 +274,55 @@ Validation is blocking for structural contract issues:
 
 Non-passing chapter statuses are reported as warnings by the validator. They should still be reviewed, but they do not block navigation artifact generation unless a structural contract issue is also present. Excluded chapters are quarantined from main navigation and listed in `16_book/NEEDS_REVIEW.md`.
 
+### 19 — Web handbook artifacts
+Run through the parent runner:
+```bash
+HANDBOOK_SKIP_PNPM=1 env PYTHONPATH=. python scripts/run_auto_research.py \
+  --run-id {run_id} --phase write --resume --from-stage 19
+```
+
+Stage 19 consumes the completed Stage 18 artifacts and builds a per-run Astro Starlight site under `19_handbook/`.
+
+Default behavior is `HANDBOOK_MILESTONE=M0`, which creates the base web handbook scaffold and copies the grounded Markdown chapters into Starlight content pages. This is the default because it is deterministic and low-risk for normal end-to-end research runs.
+
+The default publish target is configured in `swarn_research_mcp/config/handbook_publish_config.json` for the GitHub Pages project site `https://nguyen-brat.github.io/automous_agent_research/`. Stage 19 resolves this once per build, writes project-base links consistently, and build validation fails before publish if the generated `dist/` is missing `.nojekyll` or project-base asset references. Set `HANDBOOK_PUBLISH_ENABLED=0` when you need a local-root build instead.
+
+Before build validation, Stage 19 sanitizes generated markdown for web rendering: nested math delimiters are normalized, duplicate body H1s matching frontmatter titles are removed, and the build fails if generated HTML contains KaTeX render errors.
+
+For the full augmented web handbook, run explicitly with:
+```bash
+HANDBOOK_MILESTONE=M3 env PYTHONPATH=. python scripts/build_handbook.py research_runs/{run_id}/ --skip-pnpm
+```
+
+Publish only the generated website with the safe dry-run-first helper:
+```bash
+env PYTHONPATH=. python scripts/publish_handbook_pages.py \
+  --run-id {run_id} \
+  --repo https://github.com/nguyen-brat/automous_agent_research.git \
+  --branch main \
+  --dry-run
+```
+
+After the dry run is clean, repeat the command with `--push` to copy only `19_handbook/dist/`, commit, and push the Pages repository.
+
+The full `M3` build uses web-specific agents:
+- `web_design_curator` creates the Astro/Starlight scaffold configuration.
+- `glossary_builder` writes `19_handbook/public/glossary.json`.
+- `diagram_author` writes Mermaid diagrams under `19_handbook/src/assets/diagrams/`.
+- `web_tldr_writer` writes grounded method-page TLDR JSON under `19_handbook/.augment/methods/`.
+- `web_book_rewriter` rewrites book-level chapters into web-scannable MDX.
+- `verifier_web` gates TLDR and book rewrites against the original chapter before promotion.
+
 ## Failure handling
 On any stage failure, append a row to `run_log.csv` and stop. Sub-agent return strings are logged verbatim.
+
+## Contract repair gate
+
+Stage outputs may be repaired only by deterministic, stage-scoped contract code. The repair gate may normalize schemas, remove invalid/dangling references, repair JSON syntax, or drop content that fails an explicit downstream contract. It must not invent scientific claims, evidence, citations, graph edges, methods, chapter text, or conclusions.
+
+Any repair that mutates an artifact must preserve the exact pre-mutation bytes under `run_control/repairs/raw/` using a content-addressed path and append an event to `run_control/repairs/stage_<N>/repair_events.jsonl`. Each event records the run-relative artifact path, raw artifact path, raw SHA-256, outcome (`attempted`, `accepted`, or `rejected`), and issue list. If validation still fails after repair, the stage follows the existing retry/quarantine/fail policy; the repair gate must not hide the failure.
+
+LLM-based repair agents are deferred. If added later, they must be stage-specific, receive the exact validation error and allowed IDs/sources, write through the same repair event log, and pass deterministic validation before their output becomes canonical.
 
 ## Success criteria
 1. `run_config.json` exists.
@@ -294,3 +342,4 @@ On any stage failure, append a row to `run_log.csv` and stop. Sub-agent return s
 15. Every dispatched chapter target has valid YAML front matter (`chapter_id, chapter_type, title, slug, status`) and ends with `## References`. `chapters_manifest.json` lists all three tiers in canonical order except `book:appendices`. No `handbook.md`.
 16. `17_learning_suggestions/knowledge_to_add.md` exists.
 17. `16_book/SUMMARY.md`, `16_book/sidebar.json`, and `16_book/appendices/{glossary.md,notation.md,datasets.md,software.md,references.md}` exist; `python -m swarn_research_mcp.research_book research_runs/{run_id} --validate` exits 0.
+18. `19_handbook/.validated/build-ok.json` and `19_handbook/.validated/publish-ready.json` exist after a build-enabled Stage 19 run. If `HANDBOOK_MILESTONE=M3` was requested, `19_handbook/.augment/` contains verifier-gated web augmentations and rejected augmentations are listed in `19_handbook/NEEDS_REVIEW.md`.

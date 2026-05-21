@@ -53,6 +53,20 @@ class HuggingFaceServiceTest(unittest.IsolatedAsyncioTestCase):
 
     @patch.object(huggingface, "HF_TOKEN", "test-token")
     @patch("swarn_research_mcp.services.huggingface.http_get")
+    async def test_search_huggingface_papers_caps_limit_at_api_max(self, mock_http_get):
+        mock_http_get.return_value = []
+
+        result = await huggingface.search_huggingface_papers("agentic rag", limit=150)
+
+        self.assertEqual(result, {})
+        mock_http_get.assert_called_once_with(
+            huggingface.HF_PAPERS_SEARCH_URL,
+            params={"q": "agentic rag", "limit": 100},
+            headers={"Authorization": "Bearer test-token"},
+        )
+
+    @patch.object(huggingface, "HF_TOKEN", "test-token")
+    @patch("swarn_research_mcp.services.huggingface.http_get")
     async def test_collect_huggingface_trending_papers_uses_daily_papers_month_filter(self, mock_http_get):
         mock_http_get.return_value = [
             {
@@ -84,6 +98,28 @@ class HuggingFaceServiceTest(unittest.IsolatedAsyncioTestCase):
             params={
                 "p": 0,
                 "limit": 50,
+                "month": "2026-01",
+                "sort": "publishedAt",
+            },
+            headers={"Authorization": "Bearer test-token"},
+        )
+
+    @patch.object(huggingface, "HF_TOKEN", "test-token")
+    @patch("swarn_research_mcp.services.huggingface.http_get")
+    async def test_collect_huggingface_trending_papers_caps_limit_at_api_max(self, mock_http_get):
+        mock_http_get.return_value = []
+
+        result = await huggingface.collect_huggingface_trending_papers(
+            month="2026-01",
+            limit=150,
+        )
+
+        self.assertEqual(result, {})
+        mock_http_get.assert_called_once_with(
+            huggingface.HF_DAILY_PAPERS_URL,
+            params={
+                "p": 0,
+                "limit": 100,
                 "month": "2026-01",
                 "sort": "publishedAt",
             },

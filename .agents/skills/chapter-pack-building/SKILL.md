@@ -12,6 +12,7 @@ description: Self-contained packs for the three chapter tiers. Method packs inli
 - `10_verified_evidence/{arxiv_id}.json`
 - `09_pageindex/trees/...` and `.nodes.json`
 - `08_full_markdown/{arxiv_id}.md` (via `get_paper_section` for inlining)
+- Cached figures under `13_chapter_packs/assets/paper_figures/` when safe images are selected
 - `06_expansion/known_concepts_snapshot.json`, `knowledge_gap_report.json`
 - `00_input/topic.md`
 
@@ -61,6 +62,11 @@ Per-section `source_node` shape:
   "neighbors": [
     {"method_id": "", "arxiv_id": "", "title": "", "family_id": "",
      "diff_summary": "", "source_node_id": ""}
+  ],
+  "visual_assets": [
+    {"arxiv_id": "", "caption": "", "cache_path": "13_chapter_packs/assets/paper_figures/...",
+     "public_path": "paper_figures/...", "markdown_image": "![caption](/paper_figures/...)",
+     "score": 0, "evidence_refs": []}
   ]
 }
 ```
@@ -71,6 +77,7 @@ Per-section `source_node` shape:
 - Title, `method_ids` (with title + arxiv_id each), `neighbor_family_ids` (with title).
 - `comparison_rows`: one row per method with `mechanism`, `when_helps`, `when_hurts`, `arxiv_id`, `source_node_id` — values from each method's verified-evidence summary.
 - Family-level `knowledge_gaps_to_explain`, `known_concepts_assumed`.
+- Top-level `visual_assets`: either `[]` or one cached method/workflow/algorithm image selected from an in-scope method paper.
 - No `section_text` inlining at this tier.
 
 ---
@@ -100,8 +107,10 @@ Schema:
 - Method pack sources only reference the method's own arxiv_id; family packs reference any of `method_ids`' arxiv_ids; book packs reference any promoted paper.
 - Never invent neighbor relations (pull from verified_evidence + verified graph).
 - `pack.structured` is a verbatim subset of `verified_evidence` — do not re-derive.
+- `visual_assets` must be top-level for method and family packs. Use cached local paths only (`13_chapter_packs/assets/paper_figures/...` and `/paper_figures/...` in `markdown_image`); never use absolute filesystem paths. If no safe image is available, write `visual_assets: []`.
 
 ## Success
 - One pack per ID, in the correct subdir.
 - Method packs: every theory/algorithm/example/limitations source has `section_text`.
 - Method packs: `family_id` resolves; family packs: `method_ids` resolve.
+- Method and family packs have a top-level `visual_assets` list.

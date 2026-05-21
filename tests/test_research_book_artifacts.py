@@ -563,6 +563,64 @@ def test_generate_book_artifacts_resolves_titles_from_semantic_scholar(tmp_path:
     assert "[arxiv:1111.11111] Semantic Scholar Title (2026)" in references
 
 
+def test_generate_book_artifacts_excludes_context_only_survey_methods(tmp_path: Path):
+    run_dir = minimal_run(tmp_path)
+    outline = json.loads((run_dir / "12_taxonomy" / "outline.json").read_text(encoding="utf-8"))
+    outline["families"][0]["method_ids"].append("survey-method")
+    outline["methods"].append(
+        {
+            "id": "survey-method",
+            "title": "A Survey of Coding Agents",
+            "arxiv_id": "5555.55555",
+            "family_id": "sparse-attention",
+            "neighbor_method_ids": [],
+        }
+    )
+    write_json(run_dir / "12_taxonomy" / "outline.json", outline)
+    write_json(
+        run_dir / "03_overviews" / "semantic_scholar" / "5555.55555.json",
+        {"arxiv_id": "5555.55555", "title": "A Survey of Coding Agents", "year": 2025},
+    )
+    (run_dir / "14_chapters" / "methods" / "survey-method.md").write_text(
+        "---\n"
+        "chapter_id: \"survey-method\"\n"
+        "chapter_type: \"method\"\n"
+        "title: \"A Survey of Coding Agents\"\n"
+        "status: \"passed\"\n"
+        "word_count: 2000\n"
+        "arxiv_id: \"5555.55555\"\n"
+        "---\n"
+        "# A Survey of Coding Agents\n\nBody.\n",
+        encoding="utf-8",
+    )
+
+    generate_book_artifacts(run_dir)
+
+    summary = (run_dir / "16_book" / "SUMMARY.md").read_text(encoding="utf-8")
+    sidebar = json.loads((run_dir / "16_book" / "sidebar.json").read_text(encoding="utf-8"))
+    needs_review = (run_dir / "16_book" / "NEEDS_REVIEW.md").read_text(encoding="utf-8")
+    assert "survey-method" not in summary
+    assert "survey-method" not in json.dumps(sidebar)
+    assert "excluded_context_only_survey_review" in needs_review
+    assert "methods/survey-method" in needs_review
+
+
+def test_generate_book_artifacts_rejects_placeholder_method_ids(tmp_path: Path):
+    run_dir = minimal_run(tmp_path)
+    outline = json.loads((run_dir / "12_taxonomy" / "outline.json").read_text(encoding="utf-8"))
+    outline["methods"][0]["id"] = "method-1111-11111"
+    outline["families"][0]["method_ids"][0] = "method-1111-11111"
+    write_json(run_dir / "12_taxonomy" / "outline.json", outline)
+
+    try:
+        generate_book_artifacts(run_dir)
+    except RuntimeError as error:
+        assert "placeholder method id" in str(error)
+        assert "Rerun from Stage 12 or Stage 13" in str(error)
+    else:
+        raise AssertionError("expected placeholder method id failure")
+
+
 def test_summary_groups_families_under_parts(voice_lm_minimal, monkeypatch):
     from swarn_research_mcp import research_book as rb
 

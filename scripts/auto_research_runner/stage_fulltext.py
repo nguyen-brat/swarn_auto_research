@@ -259,6 +259,7 @@ def run_stage_10_impl(
     load_verified_promoted_arxiv_ids: Callable[[Path], list[str]],
     verified_evidence_is_valid: Callable[[Path, str], bool],
     verified_evidence_claims: Callable[[Path, str], list[dict[str, Any]] | None],
+    sanitize_verified_evidence: Callable[[Path, str], dict[str, int]],
     clear_stage_10_quarantine: Callable[[Path, Iterable[str]], None],
     stage_10_quarantined_ids: Callable[[Path], set[str]],
     record_stage_10_quarantine: Callable[[Path, list[dict[str, str]]], None],
@@ -267,6 +268,16 @@ def run_stage_10_impl(
     run_shards: Callable[..., None],
 ) -> None:
     promoted_ids = load_pageindexed_promoted_arxiv_ids(run_dir)
+    initial_zero_claim_ids = {
+        arxiv_id
+        for arxiv_id in promoted_ids
+        if verified_evidence_claims(run_dir, arxiv_id) == []
+    }
+    sanitized_counts: dict[str, int] = {}
+    for arxiv_id in promoted_ids:
+        dropped = sanitize_verified_evidence(run_dir, arxiv_id)
+        for field, count in dropped.items():
+            sanitized_counts[field] = sanitized_counts.get(field, 0) + count
     valid_ids = [
         arxiv_id
         for arxiv_id in promoted_ids
@@ -274,11 +285,6 @@ def run_stage_10_impl(
     ]
     clear_stage_10_quarantine(run_dir, valid_ids)
     quarantined = stage_10_quarantined_ids(run_dir)
-    initial_zero_claim_ids = {
-        arxiv_id
-        for arxiv_id in promoted_ids
-        if verified_evidence_claims(run_dir, arxiv_id) == []
-    }
     missing = [
         arxiv_id
         for arxiv_id in promoted_ids
@@ -310,6 +316,12 @@ def run_stage_10_impl(
     specs = evidence_specs(missing, shard_prefix="verified-evidence")
     if specs:
         run_shards(run_dir, specs, max_workers=max_workers, executor=executor, force=True)
+    for arxiv_id in promoted_ids:
+        if arxiv_id in quarantined:
+            continue
+        dropped = sanitize_verified_evidence(run_dir, arxiv_id)
+        for field, count in dropped.items():
+            sanitized_counts[field] = sanitized_counts.get(field, 0) + count
     first_pass_zero_claim_ids = [
         arxiv_id
         for arxiv_id in promoted_ids
@@ -322,6 +334,13 @@ def run_stage_10_impl(
     retry_specs = evidence_specs(first_pass_zero_claim_ids, shard_prefix="verified-evidence-retry")
     if retry_specs:
         run_shards(run_dir, retry_specs, max_workers=max_workers, executor=executor, force=True)
+        for arxiv_id in first_pass_zero_claim_ids:
+            dropped = sanitize_verified_evidence(run_dir, arxiv_id)
+            for field, count in dropped.items():
+                sanitized_counts[field] = sanitized_counts.get(field, 0) + count
+    if sanitized_counts:
+        detail = ", ".join(f"{field}={sanitized_counts[field]}" for field in sorted(sanitized_counts))
+        append_run_log(run_dir, "10", "sanitized", f"dropped invalid grounded evidence items: {detail}")
     quarantines: list[dict[str, str]] = []
     for arxiv_id in promoted_ids:
         if arxiv_id in quarantined and not verified_evidence_is_valid(run_dir, arxiv_id):
@@ -352,10 +371,15 @@ def run_stage_11_impl(
     append_run_log: Callable[[Path, str, str, str], None],
     load_verified_promoted_arxiv_ids: Callable[[Path], list[str]],
     clear_stage_10_quarantine: Callable[[Path, Iterable[str]], None],
+    build_verified_graph_frame: Callable[[Path, str], Path],
+    compile_verified_graph_fragment_from_frame: Callable[[Path, str], int],
     run_shards: Callable[..., None],
-    stage_11_prompt: Callable[[str, str, list[str]], str],
+    stage_11_prompt: Callable[..., str],
     stable_stage_11_shard_id: Callable[[str], str],
     verified_graph_fragment_relpath: Callable[[str], str],
+    verified_graph_fragment_is_valid: Callable[[Path, str], bool],
+    verified_graph_fragment_retry_feedback: Callable[[Path, str], str],
+    sanitize_verified_graph_fragment: Callable[[Path, str], int],
     run_stage_11_merge: Callable[..., None],
 ) -> None:
     run_id = run_dir.name
@@ -363,8 +387,10 @@ def run_stage_11_impl(
     if not promoted:
         raise RuntimeError("Stage 11 has no verified full-text papers to merge")
     clear_stage_10_quarantine(run_dir, promoted)
-    specs = [
-        ShardSpec(
+    for aid in promoted:
+        build_verified_graph_frame(run_dir, aid)
+    specs_by_id = {
+        aid: ShardSpec(
             stage="11",
             shard_id=stable_stage_11_shard_id(aid),
             agent="verified_graph_extractor",
@@ -373,7 +399,8 @@ def run_stage_11_impl(
             expected_outputs=[verified_graph_fragment_relpath(aid)],
         )
         for aid in promoted
-    ]
+    }
+    specs = [specs_by_id[aid] for aid in promoted]
     if specs:
         append_run_log(run_dir, "11", "dispatching", f"{len(specs)} eligible fragments")
         for spec in specs:
@@ -388,4 +415,62 @@ def run_stage_11_impl(
     ]
     if still_missing:
         raise RuntimeError(f"Stage 11 still missing fragments: {still_missing}")
+    compiled_edges = sum(
+        compile_verified_graph_fragment_from_frame(run_dir, aid)
+        for aid in promoted
+    )
+    if compiled_edges:
+        append_run_log(run_dir, "11", "compiled", f"compiled {compiled_edges} claim-grounded edge(s)")
+    invalid = [
+        aid for aid in promoted
+        if not verified_graph_fragment_is_valid(run_dir, aid)
+    ]
+    if invalid:
+        append_run_log(run_dir, "11", "recovery", f"{len(invalid)} invalid verified graph fragment(s) retried")
+        retry_specs = [
+            ShardSpec(
+                stage=specs_by_id[aid].stage,
+                shard_id=specs_by_id[aid].shard_id,
+                agent=specs_by_id[aid].agent,
+                model=specs_by_id[aid].model,
+                prompt=stage_11_prompt(
+                    run_id,
+                    specs_by_id[aid].shard_id,
+                    [aid],
+                    retry_feedback=verified_graph_fragment_retry_feedback(run_dir, aid),
+                ),
+                expected_outputs=specs_by_id[aid].expected_outputs,
+            )
+            for aid in invalid
+        ]
+        for aid in invalid:
+            (run_dir / verified_graph_fragment_relpath(aid)).unlink(missing_ok=True)
+        run_shards(run_dir, retry_specs, max_workers=max_workers, executor=executor, force=True)
+        compiled_edges = sum(
+            compile_verified_graph_fragment_from_frame(run_dir, aid)
+            for aid in invalid
+        )
+        if compiled_edges:
+            append_run_log(run_dir, "11", "compiled", f"compiled {compiled_edges} retried claim-grounded edge(s)")
+        still_invalid = [
+            aid for aid in invalid
+            if not verified_graph_fragment_is_valid(run_dir, aid)
+        ]
+        if still_invalid:
+            dropped_edges = sum(
+                sanitize_verified_graph_fragment(run_dir, aid)
+                for aid in still_invalid
+            )
+            append_run_log(
+                run_dir,
+                "11",
+                "sanitized",
+                f"dropped {dropped_edges} invalid edge(s) from {len(still_invalid)} fragment(s)",
+            )
+            still_invalid = [
+                aid for aid in still_invalid
+                if not verified_graph_fragment_is_valid(run_dir, aid)
+            ]
+            if still_invalid:
+                raise RuntimeError(f"Stage 11 still has invalid fragments: {still_invalid}")
     run_stage_11_merge(run_dir, arxiv_ids=promoted)

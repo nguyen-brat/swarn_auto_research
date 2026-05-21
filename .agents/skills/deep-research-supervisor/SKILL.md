@@ -49,13 +49,13 @@ stage timeout remains much longer. If the SDK app-server is silent for that idle
 window, the same shard is retried through `codex exec` CLI transport instead of
 being failed by the supervising chat session. Override with
 `SWARN_SDK_NOTIFICATION_TIMEOUT_SECONDS` only when diagnosing transport issues.
-The runner caps effective shard fanout by stage. Light/no-agent stages use up
-to 20 workers, normal sub-agent stages use up to 10, and memory-heavy
-sub-agent stages use up to 5. Stage fanout is still bounded by the number of
-pending shards. `SWARN_MAX_EFFECTIVE_WORKERS` applies a global cap, and
+The runner caps effective shard fanout by stage. Most parallel stages use up to
+20 workers, while Stage 6 expansion uses up to 10 workers. Stage fanout is
+still bounded by the number of pending shards.
+`SWARN_MAX_EFFECTIVE_WORKERS` applies a global cap, and
 `SWARN_STAGE_<N>_MAX_EFFECTIVE_WORKERS` overrides one stage cap when
 diagnosing memory or throughput, for example
-`SWARN_STAGE_10_MAX_EFFECTIVE_WORKERS=3`.
+`SWARN_STAGE_10_MAX_EFFECTIVE_WORKERS=8`.
 Stages 8 and 9 are direct Python deterministic stages, not Codex sub-agent
 stages.
 Stage 8 never edits `07_scoring/promoted_papers.json`. If arxiv2md returns
@@ -85,6 +85,7 @@ Report only:
 - `run_id`
 - `16_book/SUMMARY.md`
 - `16_book/NEEDS_REVIEW.md`
+- `19_handbook/`
 - remaining quarantined count, if any
 
 The file system is the source of truth. The main session should not remember

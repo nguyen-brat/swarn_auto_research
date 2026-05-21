@@ -39,6 +39,20 @@ class PaperSearchToolTest(unittest.IsolatedAsyncioTestCase):
                 os.environ["SWARN_CODEX_RELEVANCE_SESSION_LIMIT"] = original
             importlib.reload(paper_search)
 
+    def test_codex_relevance_session_limit_defaults_to_four_in_script_runs(self):
+        original = os.environ.get("SWARN_CODEX_RELEVANCE_SESSION_LIMIT")
+        try:
+            os.environ.pop("SWARN_CODEX_RELEVANCE_SESSION_LIMIT", None)
+            with patch.object(sys, "argv", ["scripts/run_auto_research.py"]):
+                importlib.reload(paper_search)
+                self.assertEqual(paper_search.CODEX_RELEVANCE_SESSION_LIMIT, 4)
+        finally:
+            if original is None:
+                os.environ.pop("SWARN_CODEX_RELEVANCE_SESSION_LIMIT", None)
+            else:
+                os.environ["SWARN_CODEX_RELEVANCE_SESSION_LIMIT"] = original
+            importlib.reload(paper_search)
+
     @patch("swarn_research_mcp.tools.paper_search.build_config")
     @patch("swarn_research_mcp.tools.paper_search.AsyncCodex")
     async def test_codex_relevance_validation_uses_extended_sdk_timeout(
@@ -232,6 +246,10 @@ class PaperSearchToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             mock_validate_related_papers_with_codex.await_args.kwargs["query_topic"],
             "transformer",
+        )
+        self.assertEqual(
+            mock_validate_related_papers_with_codex.await_args.kwargs["audit_path"],
+            Path(temp_dir) / "codex_relevance_audit.json",
         )
         self.assertIn(
             "search-paper",
@@ -472,6 +490,71 @@ class PaperSearchToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("2401.00050", first_prompt)
         self.assertIn("2401.00050", second_prompt)
         self.assertIn("Return only a Python list string", first_prompt)
+
+    @patch("swarn_research_mcp.tools.paper_search._validate_related_paper_chunk_with_codex_unlocked", new_callable=AsyncMock)
+    async def test_validate_related_papers_with_codex_fail_opens_failed_chunks_and_writes_audit(
+        self,
+        mock_validate_chunk,
+    ):
+        async def fake_validate(_query_topic, paper_chunk, **_kwargs):
+            if "2401.00002" in paper_chunk:
+                raise TimeoutError("chunk timed out")
+            return list(paper_chunk)
+
+        mock_validate_chunk.side_effect = fake_validate
+        papers = {
+            "2401.00001": "relevant abstract",
+            "2401.00002": "chunk that times out",
+            "2401.00003": "same failed chunk",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audit_path = Path(temp_dir) / "codex_relevance_audit.json"
+            result = await paper_search.validate_related_papers_with_codex(
+                papers=papers,
+                query_topic="retrieval augmented generation",
+                chunk_size=1,
+                max_parallel_sessions=1,
+                timeout_seconds=0.01,
+                audit_path=audit_path,
+            )
+            audit = json.loads(audit_path.read_text())
+
+        self.assertEqual(result, ["2401.00001", "2401.00002", "2401.00003"])
+        self.assertEqual(audit["status"], "completed")
+        self.assertEqual(audit["total_chunks"], 3)
+        self.assertEqual(audit["completed_chunks"], 2)
+        self.assertEqual(audit["failed_chunks"], 1)
+        failed = [chunk for chunk in audit["chunks"] if chunk["status"] == "failed_fail_open"]
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["related_ids"], ["2401.00002"])
+        self.assertIn("TimeoutError", failed[0]["error"])
+
+    @patch("swarn_research_mcp.tools.paper_search._validate_related_paper_chunk_with_codex_unlocked", new_callable=AsyncMock)
+    async def test_validate_related_papers_with_codex_can_fail_closed(
+        self,
+        mock_validate_chunk,
+    ):
+        mock_validate_chunk.side_effect = TimeoutError("chunk timed out")
+
+        result = await paper_search.validate_related_papers_with_codex(
+            papers={"2401.00001": "failed chunk"},
+            query_topic="retrieval augmented generation",
+            chunk_size=1,
+            max_parallel_sessions=1,
+            timeout_seconds=0.01,
+            fail_open=False,
+        )
+
+        self.assertEqual(result, [])
+
+    async def test_validate_related_papers_with_codex_rejects_invalid_parallelism(self):
+        with self.assertRaisesRegex(ValueError, "max_parallel_sessions must be >= 1"):
+            await paper_search.validate_related_papers_with_codex(
+                papers={"2401.00001": "abstract"},
+                query_topic="retrieval augmented generation",
+                max_parallel_sessions=0,
+            )
 
     async def test_parse_codex_related_ids_ignores_invalid_or_unknown_ids(self):
         result = paper_search._parse_codex_related_ids(

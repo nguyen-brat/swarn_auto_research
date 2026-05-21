@@ -72,13 +72,26 @@ def _default_codex_relevance_session_limit():
         return int(configured)
     if Path(sys.argv[0]).name == "swarn-auto-research-mcp":
         return 1
-    return 20
+    return 4
+
+
+def _parse_bool_env(name, default):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value, got {value!r}")
 
 
 CODEX_RELEVANCE_SESSION_LIMIT = _default_codex_relevance_session_limit()
 CODEX_RELEVANCE_TIMEOUT_SECONDS = float(
-    os.environ.get("SWARN_CODEX_RELEVANCE_TIMEOUT_SECONDS", str(2 * 3600))
+    os.environ.get("SWARN_CODEX_RELEVANCE_TIMEOUT_SECONDS", "600")
 )
+CODEX_RELEVANCE_FAIL_OPEN = _parse_bool_env("SWARN_CODEX_RELEVANCE_FAIL_OPEN", True)
 
 
 def _codex_relevance_cwd():
@@ -159,17 +172,94 @@ def _parse_codex_related_ids(response, allowed_ids):
     return related_ids
 
 
+async def _validate_related_paper_chunk_with_codex_unlocked(
+    query_topic,
+    paper_chunk,
+    *,
+    notification_timeout_seconds=CODEX_RELEVANCE_TIMEOUT_SECONDS,
+):
+    prompt = _format_codex_relevance_prompt(query_topic, paper_chunk)
+    async with AsyncCodex(config=_codex_relevance_config()) as codex:
+        thread = await codex.thread_start(model="gpt-5.4-mini")
+        result = await thread.run(
+            prompt,
+            effort="low",
+            notification_timeout_s=notification_timeout_seconds,
+        )
+    return _parse_codex_related_ids(result.final_response, set(paper_chunk))
+
+
 async def _validate_related_paper_chunk_with_codex(query_topic, paper_chunk, semaphore):
     async with semaphore:
-        prompt = _format_codex_relevance_prompt(query_topic, paper_chunk)
-        async with AsyncCodex(config=_codex_relevance_config()) as codex:
-            thread = await codex.thread_start(model="gpt-5.4-mini")
-            result = await thread.run(
-                prompt,
-                effort="low",
-                notification_timeout_s=CODEX_RELEVANCE_TIMEOUT_SECONDS,
+        return await _validate_related_paper_chunk_with_codex_unlocked(
+            query_topic,
+            paper_chunk,
+        )
+
+
+def _write_codex_relevance_audit(audit_path, audit):
+    if audit_path is None:
+        return
+    audit_path = Path(audit_path)
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = audit_path.with_suffix(audit_path.suffix + ".tmp")
+    temp_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2) + "\n")
+    temp_path.replace(audit_path)
+
+
+def _codex_relevance_audit_snapshot(*, status, total_chunks, chunks):
+    completed_chunks = sum(1 for chunk in chunks if chunk.get("status") == "completed")
+    failed_chunks = sum(1 for chunk in chunks if str(chunk.get("status", "")).startswith("failed"))
+    return {
+        "status": status,
+        "total_chunks": total_chunks,
+        "completed_chunks": completed_chunks,
+        "failed_chunks": failed_chunks,
+        "chunks": sorted(chunks, key=lambda item: item["chunk_index"]),
+        "updated_at": datetime.datetime.now(datetime.UTC).isoformat(),
+    }
+
+
+async def _validate_related_paper_chunk_guarded(
+    *,
+    chunk_index,
+    query_topic,
+    paper_chunk,
+    semaphore,
+    timeout_seconds,
+    fail_open,
+):
+    started_at = time()
+    async with semaphore:
+        try:
+            related_ids = await asyncio.wait_for(
+                _validate_related_paper_chunk_with_codex_unlocked(
+                    query_topic,
+                    paper_chunk,
+                    notification_timeout_seconds=min(
+                        timeout_seconds,
+                        CODEX_RELEVANCE_TIMEOUT_SECONDS,
+                    ),
+                ),
+                timeout=timeout_seconds,
             )
-        return _parse_codex_related_ids(result.final_response, set(paper_chunk))
+            status = "completed"
+            error = None
+        except Exception as exc:
+            status = "failed_fail_open" if fail_open else "failed_closed"
+            related_ids = list(paper_chunk) if fail_open else []
+            error = f"{type(exc).__name__}: {exc}"
+
+    result = {
+        "chunk_index": chunk_index,
+        "status": status,
+        "input_count": len(paper_chunk),
+        "related_ids": related_ids,
+        "duration_seconds": round(time() - started_at, 3),
+    }
+    if error is not None:
+        result["error"] = error
+    return result
 
 
 async def validate_related_papers_with_codex(
@@ -177,25 +267,70 @@ async def validate_related_papers_with_codex(
     query_topic,
     chunk_size=50,
     max_parallel_sessions=CODEX_RELEVANCE_SESSION_LIMIT,
+    timeout_seconds=CODEX_RELEVANCE_TIMEOUT_SECONDS,
+    fail_open=CODEX_RELEVANCE_FAIL_OPEN,
+    audit_path=None,
 ):
     paper_map = papers.get("papers", papers) if isinstance(papers, dict) else {}
     if not paper_map:
         return []
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be >= 1")
+    if max_parallel_sessions < 1:
+        raise ValueError("max_parallel_sessions must be >= 1")
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be > 0")
 
     semaphore = asyncio.Semaphore(max_parallel_sessions)
+    chunks = list(_paper_chunks(paper_map, chunk_size))
     tasks = [
-        asyncio.create_task(_validate_related_paper_chunk_with_codex(query_topic, chunk, semaphore))
-        for chunk in _paper_chunks(paper_map, chunk_size)
+        asyncio.create_task(
+            _validate_related_paper_chunk_guarded(
+                chunk_index=chunk_index,
+                query_topic=query_topic,
+                paper_chunk=chunk,
+                semaphore=semaphore,
+                timeout_seconds=timeout_seconds,
+                fail_open=fail_open,
+            )
+        )
+        for chunk_index, chunk in enumerate(chunks)
     ]
-    chunk_results = await asyncio.gather(*tasks)
+    chunk_results = []
+    _write_codex_relevance_audit(
+        audit_path,
+        _codex_relevance_audit_snapshot(
+            status="running",
+            total_chunks=len(tasks),
+            chunks=chunk_results,
+        ),
+    )
+    for task in asyncio.as_completed(tasks):
+        chunk_results.append(await task)
+        _write_codex_relevance_audit(
+            audit_path,
+            _codex_relevance_audit_snapshot(
+                status="running",
+                total_chunks=len(tasks),
+                chunks=chunk_results,
+            ),
+        )
 
     related_ids = []
     seen = set()
-    for chunk_result in chunk_results:
-        for arxiv_id in chunk_result:
+    for chunk_result in sorted(chunk_results, key=lambda item: item["chunk_index"]):
+        for arxiv_id in chunk_result["related_ids"]:
             if arxiv_id not in seen:
                 seen.add(arxiv_id)
                 related_ids.append(arxiv_id)
+    _write_codex_relevance_audit(
+        audit_path,
+        _codex_relevance_audit_snapshot(
+            status="completed",
+            total_chunks=len(tasks),
+            chunks=chunk_results,
+        ),
+    )
     return related_ids
 
 
@@ -420,6 +555,11 @@ async def bulk_normal_start_search(
     related_ids = await validate_related_papers_with_codex(
         papers=keyword_filtered_papers,
         query_topic=query_topic,
+        audit_path=(
+            Path(output_dir) / "codex_relevance_audit.json"
+            if output_dir is not None
+            else None
+        ),
     )
     related_id_set = set(related_ids)
     selected_results["papers"] = {
@@ -434,6 +574,7 @@ async def bulk_normal_start_search(
     )
 
     if output_dir is not None:
+        output_dir = Path(output_dir)
         output_path = output_dir / f"bulk_search_results_{int(time())}.json"
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(selected_results["papers"], f, ensure_ascii=False, indent=2)

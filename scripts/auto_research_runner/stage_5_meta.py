@@ -82,7 +82,8 @@ def stage_5_outputs_valid(run_dir: Path) -> bool:
 
 def _stage_17_learning_suggestions(run_dir: Path) -> str:
     paths = _stage_5_paths(run_dir)
-    digest = _load_json(paths["digest"])
+    digest_missing = not paths["digest"].exists()
+    digest = {"candidates": []} if digest_missing else _load_json(paths["digest"])
     report = _load_json(paths["report"])
     queue = _load_json(paths["queue"])
 
@@ -100,7 +101,7 @@ def _stage_17_learning_suggestions(run_dir: Path) -> str:
     seen: set[str] = set()
     for item in report.get("knowledge_gaps", []):
         concept = _gap_concept_text(item)
-        if concept and concept not in seen and concept in candidate_by_concept:
+        if concept and concept not in seen and (digest_missing or concept in candidate_by_concept):
             seen.add(concept)
             report_gap_concepts.append(concept)
 
@@ -121,9 +122,13 @@ def _stage_17_learning_suggestions(run_dir: Path) -> str:
         "",
         f"Run: {run_dir.name}",
         "",
-        "## Queued Expansion Gaps",
-        "",
     ]
+    if digest_missing:
+        lines.extend([
+            "Note: No digest metadata was available; suggestions are based on legacy report and queue artifacts.",
+            "",
+        ])
+    lines.extend(["## Queued Expansion Gaps", ""])
     if queued_items:
         for item in queued_items:
             concept = _gap_concept_text(item)

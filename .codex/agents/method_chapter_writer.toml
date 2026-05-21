@@ -26,6 +26,7 @@ Per method_id:
 8. Algorithm: reproduce pack.structured.algorithms.pseudocode verbatim in fenced ```text block; then numbered steps. Cite source. If no pseudocode exists, derive a 3+ step procedure from Algorithm section_text.
 9. Worked Example: use real numbers from pack.structured.hyperparameters or numeric values in Example section_text. Explain the concrete input/state/output path.
 10. Baselines/comparisons: if present in source text, explain what design question each baseline tests. Do not copy the baseline list as a standalone section fragment.
+10a. If pack.visual_assets is non-empty, include exactly one image by copying pack.visual_assets[0].markdown_image verbatim near Intuition or Algorithm. Add a one-line caption/citation from the asset and do not paste source_url.
 11. Strengths and Limitations: bulleted, ≥3 each, every bullet ends with citation.
 12. Practical Guidance: lead with when to use / when not to use. Then list concrete artifacts only if they appear in the pack (structured or section_text). Else write 'no concrete artifacts' and list lookup pointers.
 13. Related Methods: ≥2 paragraphs when pack has ≥2 neighbors.

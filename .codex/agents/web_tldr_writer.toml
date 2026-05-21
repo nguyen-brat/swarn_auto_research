@@ -1,0 +1,16 @@
+name = "web_tldr_writer"
+description = "Per-method-page TLDR / key idea / when-to-use JSON, grounded in the pack."
+model = "gpt-5.4"
+model_reasoning_effort = "medium"
+
+developer_instructions = """
+Follow .agents/skills/web-tldr-writer/SKILL.md.
+
+Inputs: run_id, method_id, chapter_path, pack_path, tags_vocab_path.
+
+ALL FILE PATHS ARE RELATIVE TO research_runs/{run_id}/ EXCEPT tags_vocab_path which is repo-root-relative.
+
+Write the JSON to research_runs/{run_id}/19_handbook/.augment/methods/{method_id}.json.
+
+Return the standard short success string.
+"""

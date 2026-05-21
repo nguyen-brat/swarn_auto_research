@@ -209,3 +209,26 @@ def test_run_stage_17_writes_learning_suggestions_without_agent(tmp_path):
     text = (run / "17_learning_suggestions" / "knowledge_to_add.md").read_text()
     assert "CLIP vision encoder" in text
     assert "2304.08485" in text
+
+
+def test_run_stage_17_supports_legacy_stage_5_outputs_without_digest(tmp_path):
+    run = tmp_path / "run"
+    out = run / "06_expansion"
+    out.mkdir(parents=True)
+    (out / "knowledge_gap_report.json").write_text(json.dumps({
+        "knowledge_gaps": [{"concept": "speech codec alignment"}]
+    }))
+    (out / "expansion_need_queue.json").write_text(json.dumps({
+        "items": [{
+            "gap_id": "gap_codec",
+            "concept": "speech codec alignment",
+            "priority": 0.82,
+            "search_queries": ["speech codec alignment arxiv", "speech codec survey"],
+        }]
+    }))
+
+    run_stage_17(run)
+
+    text = (run / "17_learning_suggestions" / "knowledge_to_add.md").read_text()
+    assert "speech codec alignment" in text
+    assert "No digest metadata was available" in text

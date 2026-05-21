@@ -11,6 +11,10 @@ STAGE_8_MARKDOWN_FETCH_TIMEOUT_SECONDS = 45
 DEFAULT_SHARD_TIMEOUT_SECONDS = 3 * 3600
 BOOTSTRAP_TIMEOUT_SECONDS = 6 * 3600
 DEFAULT_SDK_NOTIFICATION_TIMEOUT_SECONDS = 15 * 60
+DEFAULT_STAGE_SDK_NOTIFICATION_TIMEOUT_SECONDS = {
+    "11": 5 * 60,
+    "19": 5 * 60,
+}
 DEFAULT_EXECUTOR = "sdk-cli-fallback"
 DEFAULT_MAX_EFFECTIVE_WORKERS = 20
 DEFAULT_STAGE_MAX_EFFECTIVE_WORKERS = {
@@ -20,13 +24,14 @@ DEFAULT_STAGE_MAX_EFFECTIVE_WORKERS = {
     "8": 20,
     "9": 20,
     "10": 20,
-    "11": 10,
-    "13": 5,
-    "14": 10,
-    "15": 5,
+    "11": 20,
+    "13": 20,
+    "14": 20,
+    "15": 20,
     "16": 20,
     "17": 20,
     "18": 20,
+    "19": 12,
 }
 DEFAULT_STAGE_6_CODEX_RELEVANCE_SESSION_LIMIT = 1
 MIN_BOOTSTRAP_PAPER_POOL = 40
@@ -77,6 +82,7 @@ PRIMARY_ARTIFACTS = {
         "16_book/sidebar.json",
         "14_chapters/book/appendices/references.md",
     ),
+    "19": ("19_handbook/.validated/build-ok.json",),
 }
 
 NON_BLOCKING_FORM_ISSUE_CHECKS = {

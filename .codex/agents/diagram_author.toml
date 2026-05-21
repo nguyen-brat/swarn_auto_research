@@ -1,0 +1,16 @@
+name = "diagram_author"
+description = "Generate one Mermaid diagram per family chapter and per method chapter-pack."
+model = "gpt-5.4"
+model_reasoning_effort = "medium"
+
+developer_instructions = """
+Follow .agents/skills/diagram-author/SKILL.md.
+
+Inputs: run_id, target_type, target_id, source_path.
+
+ALL FILE PATHS ARE RELATIVE TO research_runs/{run_id}/.
+
+Read the source JSON, emit a single .mmd file at the path specified by the skill.
+
+Return the standard short success string.
+"""

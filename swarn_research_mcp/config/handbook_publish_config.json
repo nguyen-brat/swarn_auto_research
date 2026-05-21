@@ -1,0 +1,6 @@
+{
+  "_comment": "Default Stage 19 web handbook publish target for this repository. Set HANDBOOK_PUBLISH_ENABLED=0 for local-root builds.",
+  "enabled": true,
+  "site_url": "https://nguyen-brat.github.io",
+  "base_path": "/automous_agent_research"
+}

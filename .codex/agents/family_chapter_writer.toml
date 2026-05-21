@@ -20,6 +20,7 @@ Per family_id:
    ## Representative Methods · ## Strengths · ## Limitations · ## When to Use · ## Related Families.
 3. Treat the family chapter as a taxonomy/sub-topic chapter. It must teach the shared design pattern, not just navigate.
 4. Methods list: bullets with relative links ../methods/{method_id}.md and specific one-line taglines from pack evidence.
+4a. If pack.visual_assets is non-empty, include exactly one image by copying pack.visual_assets[0].markdown_image verbatim near Common Pipeline. Add a one-line caption/citation from the asset and do not paste source_url.
 5. Main Variants comparison table: one row per pack.method_ids — Method | Core mechanism | When it helps | When it hurts | Cite. Values come from pack.comparison_rows and must be concrete enough to distinguish methods; Cite is [arxiv:ID, node_id].
 6. Related Families must explain overlap/contrast with neighbor families and cite evidence. Do not use generic statements like "navigation layer" or "engineering pressure" without pack evidence.
 7. Do not name any method, paper, library, system, model, benchmark, or dataset not present in the pack scope.

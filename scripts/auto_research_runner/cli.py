@@ -32,6 +32,7 @@ from scripts.auto_research_runner.stages import (
     run_stage_16,
     run_stage_17,
     run_stage_18,
+    run_stage_19,
     start_new_run,
 )
 from scripts.auto_research_runner.state import (
@@ -150,6 +151,13 @@ def _record_run_failure(
     append_run_log(run_dir, stage, status, f"{type(error).__name__}: {error_text}")
 
 
+def _clear_failure_fields(state: dict[str, object]) -> dict[str, object]:
+    state.pop("failed_stage", None)
+    state.pop("error_type", None)
+    state.pop("error", None)
+    return state
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.max_workers < 1:
@@ -202,6 +210,7 @@ def main(argv: list[str] | None = None) -> int:
         ("16", run_stage_16),
         ("17", run_stage_17),
         ("18", run_stage_18),
+        ("19", run_stage_19),
     ]
     requested_start = args.from_stage or (state.get("current_stage") if args.resume else None)
     requested_stage_num: float | None = None
@@ -239,6 +248,7 @@ def main(argv: list[str] | None = None) -> int:
                 "resume": args.resume,
             }
         )
+        _clear_failure_fields(state)
         save_run_state(run_dir, state)
 
         active = False
@@ -284,6 +294,9 @@ def main(argv: list[str] | None = None) -> int:
         _record_run_failure(run_dir, stage=current_stage if "current_stage" in locals() else start, error=error)
         raise
 
-    save_run_state(run_dir, {**load_run_state(run_dir), "status": "completed"})
+    save_run_state(
+        run_dir,
+        _clear_failure_fields({**load_run_state(run_dir), "status": "completed"}),
+    )
     print(f"{args.phase} phase complete. run_id={run_id}")
     return 0

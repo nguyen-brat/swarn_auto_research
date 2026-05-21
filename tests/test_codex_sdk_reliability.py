@@ -10,6 +10,7 @@ from sdk.codex_app_server import api as api_module
 from sdk.codex_app_server.api import AsyncCodex, Codex
 from sdk.codex_app_server.client import AppServerClient
 from sdk.codex_app_server.errors import ServerBusyError
+from sdk.codex_app_server.generated.v2_all import ServiceTier
 from sdk.codex_app_server.retry import retry_on_overload
 
 
@@ -82,6 +83,10 @@ def test_stream_notification_timeout_uses_bounded_poll_interval(
 
     with pytest.raises(TimeoutError, match="Timed out waiting for turn notification"):
         api_module._next_notification_timeout(99.0)
+
+
+def test_service_tier_accepts_priority_response_value() -> None:
+    assert ServiceTier("priority") is ServiceTier.priority
 
 
 @pytest.mark.asyncio

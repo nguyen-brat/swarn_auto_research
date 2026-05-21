@@ -58,6 +58,7 @@ def pytest_configure(config):
     os.environ["SWARN_S2_CACHE_DB"] = str(cache_db)
     os.environ["SWARN_S2_CACHE_PATH"] = str(tmp_dir / "s2_paper_details.json")
     os.environ["SWARN_S2_SEARCH_CACHE_PATH"] = str(tmp_dir / "s2_search_results.json")
+    os.environ.setdefault("HANDBOOK_PUBLISH_ENABLED", "0")
 
     _reload_persistent_cache()
 

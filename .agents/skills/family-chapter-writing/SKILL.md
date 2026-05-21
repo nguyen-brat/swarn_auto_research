@@ -7,7 +7,7 @@ description: One taxonomy/sub-topic chapter connecting a family of methods — m
 
 ## Inputs
 - `family_ids` (sharded slice)
-- `13_chapter_packs/families/{family_id}_pack.json`
+- `13_chapter_packs/families/{family_id}_pack.json` — includes optional `visual_assets`
 - `Book_style.md`
 
 ## Output
@@ -18,7 +18,7 @@ description: One taxonomy/sub-topic chapter connecting a family of methods — m
 2. `## Motivation` — why this family exists; cite pack's problem framing.
 3. `## Core Idea` — shared intuition.
 4. `## Common Pipeline` — shared workflow / architecture: inputs, representation, training/inference choice, system bottleneck.
-5. `## Main Variants` — compare important variants. **MUST include a Markdown table** with header `Method | Core mechanism | When it helps | When it hurts | Cite`, one row per `pack.method_ids`. Values verbatim from `pack.comparison_rows`. Cite is `[arxiv:ID, node_id]`.
+5. `## Main Variants` — compare important variants. **MUST include a Markdown table** with header `Method | Core mechanism | When it helps | When it hurts | Cite`, one row per `pack.method_ids`. Values come from `pack.comparison_rows`; keep each cell concise enough for web reading, but do not drop rows. Cite is `[arxiv:ID, node_id]`.
 6. `## Representative Methods` — bulleted list, each entry: `- [Method Title](../methods/{method_id}.md) — one-line tagline.`
 7. `## Strengths` — 3–6 bullets, each ending with citation.
 8. `## Limitations` — 3–6 bullets, each ending with citation.
@@ -29,8 +29,10 @@ A trailing `## References` is allowed but not required.
 
 ## Writing contract
 - This is the chapter for a taxonomy sub-topic of the user's main topic. It must teach the sub-topic, not merely list methods.
+- If `pack.visual_assets` is non-empty, include exactly one image using exactly `pack.visual_assets[0].markdown_image` near `## Common Pipeline`, followed by a one-line caption and citation/audit reference from the same asset. Do not paste the raw `source_url`.
 - Explain the shared design pattern across the family: inputs, representation, training/inference choice, system bottleneck, and why the family exists.
 - The comparison must be analytical. A row like "streaming inference, audio tokenization" is not enough; explain mechanism, when it helps, and failure mode from `pack.comparison_rows`.
+- Keep comparison-table cells compact. Prefer one precise clause per cell over multi-sentence paragraphs; the web handbook preserves every row and uses horizontal scrolling for wide tables.
 - If a family contains methods that are too broad or unrelated, explicitly mark boundary cases and explain the overlap rather than pretending the group is homogeneous.
 - Do not write generic filler such as "serves as a navigation layer" or "variations on the same engineering pressure" without evidence.
 
@@ -43,6 +45,7 @@ A trailing `## References` is allowed but not required.
 - `## Main Variants` table rows must equal `pack.method_ids` exactly.
 - Every `## Related Families` boundary claim cites a node.
 - Method links use relative path `../methods/{method_id}.md`.
+- Visual assets: use at most one image. If present, copy the `markdown_image` string verbatim so the handbook can render the cached local figure.
 
 ## Length
 - 1000–1800 words. Start with `# {family_title}`.
@@ -51,4 +54,5 @@ A trailing `## References` is allowed but not required.
 - File starts with `# `; all 10 `##` sections present in exact order.
 - `## Main Variants` contains a comparison table whose rows equal `pack.method_ids` exactly.
 - `## Strengths` and `## Limitations` each have ≥ 3 bullets.
+- If `pack.visual_assets` is non-empty, chapter contains `pack.visual_assets[0].markdown_image` exactly once.
 - Word count 1000–1800.

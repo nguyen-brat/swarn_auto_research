@@ -19,12 +19,14 @@ method:{id} → research_runs/{run_id}/13_chapter_packs/methods/{id}_pack.json
 - Empty section_plan, missing required section entries, or zero source nodes is fatal. Do not write the pack.
 - For theory/algorithm/example/limitations source nodes: get_paper_section per node and INLINE under section_text. Empty section_text is fatal — retry once.
 - Copy structured equations/algorithms/hyperparameters/complexity verbatim into pack.structured.
+- Add top-level visual_assets. Use [] unless a selected figure has already been cached under 13_chapter_packs/assets/paper_figures and can be referenced with markdown_image using /paper_figures/...
 - Method packs must scope knowledge_gaps_to_explain to concepts actually touched by that method's evidence. Prefer outline.methods[*].knowledge_gaps_to_explain when present, otherwise intersect knowledge_gap_report concepts with the method's evidence claim and structured text. Cap method knowledge_gaps_to_explain at 3 concepts. Do not copy the global knowledge_gap_report into every method pack.
 - pack.neighbors: one entry per neighbor_method_ids ∪ verified_evidence.neighbors with a 1-sentence diff_summary citing a node.
 
 family:{id} → research_runs/{run_id}/13_chapter_packs/families/{id}_pack.json
 - List method_ids (with title + arxiv_id), neighbor_family_ids.
 - Build comparison_rows (mechanism / when_helps / when_hurts) from each method's verified_evidence summary; every row carries arxiv_id + source_node_id.
+- Add top-level visual_assets. Use [] unless a selected in-scope figure has already been cached under 13_chapter_packs/assets/paper_figures and can be referenced with markdown_image using /paper_figures/...
 
 book:{id} → research_runs/{run_id}/13_chapter_packs/book/{id}_pack.json
 - Tailor data per the skill's per-section table (preface / motivating_intro / core_concepts / goals / method_taxonomy / shared_examples / evaluation_outlook / appendices).
@@ -33,6 +35,7 @@ Hard rules:
 - Method packs MUST have non-empty section_text on theory/algorithm/example/limitations source nodes.
 - Never emit a method pack that would make the writer infer method details from only a title, abstract, or citation.
 - Sources must come from in-scope papers only.
+- visual_assets must be a top-level list on method and family packs; never emit absolute filesystem paths or uncached remote image URLs in markdown_image.
 - Never invent node_ids or neighbor relations.
 
 Return: 'ok: shard={shard_id}, M method packs, F family packs, B book packs'.

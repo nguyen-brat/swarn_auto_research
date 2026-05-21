@@ -65,6 +65,30 @@ def _expected_verification_file(target: dict[str, str]) -> str:
     return f"15_verification/{target['type']}/{target['id']}_verification.json"
 
 
+def _chapter_output_current(run_dir: Path, target: dict[str, str]) -> bool:
+    chapter_path = run_dir / _expected_chapter_file(target)
+    if not chapter_path.exists():
+        return False
+    if target["type"] not in {"families", "methods"}:
+        return True
+
+    pack_path = run_dir / _expected_chapter_pack(target)
+    if not pack_path.exists():
+        return True
+    try:
+        pack = json.loads(pack_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return True
+    assets = pack.get("visual_assets") if isinstance(pack, dict) else None
+    if not isinstance(assets, list) or not assets:
+        return True
+    first_asset = assets[0] if isinstance(assets[0], dict) else {}
+    markdown_image = str(first_asset.get("markdown_image") or "").strip()
+    if not markdown_image:
+        return True
+    return markdown_image in chapter_path.read_text(encoding="utf-8", errors="ignore")
+
+
 def _chapter_writer_specs(
     run_dir: Path,
     targets: list[dict[str, str]],
@@ -87,9 +111,7 @@ def _chapter_writer_specs(
         typed_targets = [t for t in targets if t["type"] == target_type]
         shard_size = 1 if target_type == "methods" else 2
         for idx, chunk in enumerate(chunked(typed_targets, shard_size), start=1):
-            if not form_issues_by_id and all(
-                (run_dir / _expected_chapter_file(t)).exists() for t in chunk
-            ):
+            if not form_issues_by_id and all(_chapter_output_current(run_dir, t) for t in chunk):
                 continue
             agent = agent_by_type[target_type]
             shard_id = f"{shard_prefix}-{target_type}-{idx:03d}"

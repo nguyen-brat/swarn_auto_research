@@ -8,7 +8,11 @@ from types import SimpleNamespace
 import scripts.auto_research_runner.cli as cli_mod
 import scripts.auto_research_runner.shards as shards_mod
 from scripts.auto_research_runner.cli import main
-from scripts.auto_research_runner.config import BOOTSTRAP_TIMEOUT_SECONDS
+from scripts.auto_research_runner.config import (
+    BOOTSTRAP_TIMEOUT_SECONDS,
+    DEFAULT_SDK_NOTIFICATION_TIMEOUT_SECONDS,
+    DEFAULT_STAGE_SDK_NOTIFICATION_TIMEOUT_SECONDS,
+)
 from scripts.auto_research_runner.shards import (
     _run_sdk_prompt,
     _run_shard_attempt,
@@ -94,6 +98,15 @@ def test_primary_artifact_exists_for_stage_11(tmp_path):
     assert primary_artifact_exists(run, "11") is True
 
 
+def test_primary_artifact_exists_for_stage_19(tmp_path):
+    run = tmp_path / "research_runs" / "demo"
+    (run / "19_handbook" / ".validated").mkdir(parents=True)
+    assert primary_artifact_exists(run, "19") is False
+
+    (run / "19_handbook" / ".validated" / "build-ok.json").write_text("{}")
+    assert primary_artifact_exists(run, "19") is True
+
+
 def test_main_preserves_existing_resume_state(tmp_path, monkeypatch):
     runs_root = tmp_path / "research_runs"
     run = runs_root / "demo"
@@ -116,11 +129,11 @@ def test_main_preserves_existing_resume_state(tmp_path, monkeypatch):
 
     state = load_run_state(run)
     assert state["topic"] == "Old topic"
-    assert state["current_stage"] == "18"
-    assert state["last_completed_stage"] == "18"
+    assert state["current_stage"] == "19"
+    assert state["last_completed_stage"] == "19"
     assert state["status"] == "completed"
     assert state["resume"] is True
-    assert calls == ["11", "12", "12.5", "13", "14", "15", "16", "17", "18"]
+    assert calls == ["11", "12", "12.5", "13", "14", "15", "16", "17", "18", "19"]
 
 
 def test_main_resume_saved_later_stage_validates_stage_1_before_handlers(tmp_path, monkeypatch):
@@ -280,11 +293,11 @@ def test_sdk_cli_fallback_uses_cli_when_sdk_notifications_timeout(tmp_path, monk
     )
     calls = []
 
-    def fail_sdk(_run_dir, _spec, _timeout_seconds):
+    def fail_sdk(_run_dir, _spec, _timeout_seconds, **_kwargs):
         calls.append("sdk")
         raise TimeoutError("Timed out waiting for app-server message after 51.409s")
 
-    def pass_cli(_spec, _timeout_seconds):
+    def pass_cli(_run_dir, _spec, _timeout_seconds, **_kwargs):
         calls.append("cli")
         return ShardAttemptResult(
             returncode=0,
@@ -294,7 +307,7 @@ def test_sdk_cli_fallback_uses_cli_when_sdk_notifications_timeout(tmp_path, monk
         )
 
     monkeypatch.setattr(shards_mod, "_run_sdk_shard_attempt", fail_sdk)
-    monkeypatch.setattr(shards_mod, "_run_cli_shard_attempt", pass_cli)
+    monkeypatch.setattr(shards_mod, "_run_cli_shard_attempt_until_outputs", pass_cli)
 
     result = _run_shard_attempt(
         run,
@@ -323,16 +336,16 @@ def test_sdk_cli_fallback_accepts_existing_outputs_after_sdk_timeout(tmp_path, m
     )
     calls = []
 
-    def fail_sdk(_run_dir, _spec, _timeout_seconds):
+    def fail_sdk(_run_dir, _spec, _timeout_seconds, **_kwargs):
         calls.append("sdk")
         raise TimeoutError("Timed out waiting for app-server message after 51.409s")
 
-    def fail_cli(_spec, _timeout_seconds):
+    def fail_cli(_run_dir, _spec, _timeout_seconds, **_kwargs):
         calls.append("cli")
         raise AssertionError("CLI fallback should not run when outputs already exist")
 
     monkeypatch.setattr(shards_mod, "_run_sdk_shard_attempt", fail_sdk)
-    monkeypatch.setattr(shards_mod, "_run_cli_shard_attempt", fail_cli)
+    monkeypatch.setattr(shards_mod, "_run_cli_shard_attempt_until_outputs", fail_cli)
 
     result = _run_shard_attempt(
         run,
@@ -370,6 +383,103 @@ def test_run_sdk_prompt_uses_bounded_notification_timeout(monkeypatch):
     assert observed["notification_timeout"] == 123.0
 
 
+def test_run_sdk_prompt_defaults_to_fifteen_minute_notification_timeout(monkeypatch):
+    import sdk.codex as codex_module
+
+    observed = {}
+
+    def fake_run_one_shot_sync(**kwargs):
+        observed.update(kwargs)
+        return SimpleNamespace(thread_id="thread-1", turn_id="turn-1", final_response="ok")
+
+    monkeypatch.setattr(codex_module, "run_one_shot_sync", fake_run_one_shot_sync)
+    monkeypatch.delenv("SWARN_SDK_NOTIFICATION_TIMEOUT_SECONDS", raising=False)
+
+    result = _run_sdk_prompt(
+        "write search plan",
+        model="gpt-5.4-mini",
+        timeout_seconds=BOOTSTRAP_TIMEOUT_SECONDS,
+    )
+
+    assert result.final_response == "ok"
+    assert DEFAULT_SDK_NOTIFICATION_TIMEOUT_SECONDS == 900
+    assert observed["notification_timeout"] == 900.0
+
+
+def test_run_sdk_prompt_uses_stage_11_notification_timeout(monkeypatch):
+    import sdk.codex as codex_module
+
+    observed = {}
+
+    def fake_run_one_shot_sync(**kwargs):
+        observed.update(kwargs)
+        return SimpleNamespace(thread_id="thread-1", turn_id="turn-1", final_response="ok")
+
+    monkeypatch.setattr(codex_module, "run_one_shot_sync", fake_run_one_shot_sync)
+    monkeypatch.delenv("SWARN_SDK_NOTIFICATION_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("SWARN_STAGE_11_SDK_NOTIFICATION_TIMEOUT_SECONDS", raising=False)
+
+    result = _run_sdk_prompt(
+        "write verified graph fragment",
+        model="gpt-5.4-mini",
+        timeout_seconds=BOOTSTRAP_TIMEOUT_SECONDS,
+        stage="11",
+    )
+
+    assert result.final_response == "ok"
+    assert DEFAULT_STAGE_SDK_NOTIFICATION_TIMEOUT_SECONDS["11"] == 300
+    assert observed["notification_timeout"] == 300.0
+
+
+def test_run_sdk_prompt_uses_stage_19_notification_timeout(monkeypatch):
+    import sdk.codex as codex_module
+
+    observed = {}
+
+    def fake_run_one_shot_sync(**kwargs):
+        observed.update(kwargs)
+        return SimpleNamespace(thread_id="thread-1", turn_id="turn-1", final_response="ok")
+
+    monkeypatch.setattr(codex_module, "run_one_shot_sync", fake_run_one_shot_sync)
+    monkeypatch.delenv("SWARN_SDK_NOTIFICATION_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("SWARN_STAGE_19_SDK_NOTIFICATION_TIMEOUT_SECONDS", raising=False)
+
+    result = _run_sdk_prompt(
+        "write handbook scaffold",
+        model="gpt-5.4",
+        timeout_seconds=BOOTSTRAP_TIMEOUT_SECONDS,
+        stage="19",
+    )
+
+    assert result.final_response == "ok"
+    assert DEFAULT_STAGE_SDK_NOTIFICATION_TIMEOUT_SECONDS["19"] == 300
+    assert observed["notification_timeout"] == 300.0
+
+
+def test_run_sdk_prompt_uses_stage_specific_env_notification_timeout(monkeypatch):
+    import sdk.codex as codex_module
+
+    observed = {}
+
+    def fake_run_one_shot_sync(**kwargs):
+        observed.update(kwargs)
+        return SimpleNamespace(thread_id="thread-1", turn_id="turn-1", final_response="ok")
+
+    monkeypatch.setattr(codex_module, "run_one_shot_sync", fake_run_one_shot_sync)
+    monkeypatch.setenv("SWARN_SDK_NOTIFICATION_TIMEOUT_SECONDS", "900")
+    monkeypatch.setenv("SWARN_STAGE_11_SDK_NOTIFICATION_TIMEOUT_SECONDS", "222")
+
+    result = _run_sdk_prompt(
+        "write verified graph fragment",
+        model="gpt-5.4-mini",
+        timeout_seconds=BOOTSTRAP_TIMEOUT_SECONDS,
+        stage="11",
+    )
+
+    assert result.final_response == "ok"
+    assert observed["notification_timeout"] == 222.0
+
+
 def test_main_resets_progress_without_resume(tmp_path, monkeypatch):
     runs_root = tmp_path / "research_runs"
     run = runs_root / "demo"
@@ -392,11 +502,11 @@ def test_main_resets_progress_without_resume(tmp_path, monkeypatch):
 
     state = load_run_state(run)
     assert state["topic"] == "New topic"
-    assert state["current_stage"] == "18"
-    assert state["last_completed_stage"] == "18"
+    assert state["current_stage"] == "19"
+    assert state["last_completed_stage"] == "19"
     assert state["status"] == "completed"
     assert state["resume"] is False
-    assert calls == ["11", "12", "12.5", "13", "14", "15", "16", "17", "18"]
+    assert calls == ["11", "12", "12.5", "13", "14", "15", "16", "17", "18", "19"]
 
 
 def _patch_stage_handlers(monkeypatch, calls):
@@ -415,5 +525,6 @@ def _patch_stage_handlers(monkeypatch, calls):
         ("16", "run_stage_16"),
         ("17", "run_stage_17"),
         ("18", "run_stage_18"),
+        ("19", "run_stage_19"),
     ):
         monkeypatch.setattr(cli_mod, name, lambda run_dir, stage=stage: calls.append(stage))

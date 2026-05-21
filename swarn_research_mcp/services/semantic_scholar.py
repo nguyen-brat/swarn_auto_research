@@ -81,6 +81,8 @@ PAPER_ABSTRACT_FIELDS = "paperId,externalIds,abstract"
 RECOMMENDATION_FIELDS = "paperId,title,year,externalIds,abstract,citationCount,referenceCount"
 SEMANTIC_SCHOLAR_BATCH_LIMIT = 500
 SEMANTIC_SCHOLAR_LINKED_BATCH_LIMIT = int(os.getenv("S2_LINKED_BATCH_LIMIT", SEMANTIC_SCHOLAR_BATCH_LIMIT))
+SEMANTIC_SCHOLAR_SEARCH_LIMIT = 100
+SEMANTIC_SCHOLAR_RECOMMENDATIONS_LIMIT = 500
 SEMANTIC_SCHOLAR_TIMEOUT = 300
 SEMANTIC_SCHOLAR_REQUEST_DELAY_SECONDS = 1
 SEMANTIC_SCHOLAR_RATE_LIMIT_RETRIES = 5
@@ -96,6 +98,16 @@ def _parse_memory_cache_capacity(value, default=256):
         return max(0, int(value))
     except (TypeError, ValueError):
         return default
+
+
+def _cap_int_limit(value, maximum, *, field_name):
+    try:
+        value = int(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{field_name} must be an integer") from error
+    if value < 1:
+        raise ValueError(f"{field_name} must be >= 1")
+    return min(value, maximum)
 
 
 class _BoundedPaperDetailCache:
@@ -681,10 +693,15 @@ def _fetch_uncached_papers_batch_by_ids(paper_ids):
         f"  S2 detail cache: {cache_hits} hit, {len(missing_ids)} miss "
         f"from {len(unique_ids)} requested ids"
     )
-    for start in range(0, len(missing_ids), SEMANTIC_SCHOLAR_LINKED_BATCH_LIMIT):
-        chunk = missing_ids[start:start + SEMANTIC_SCHOLAR_LINKED_BATCH_LIMIT]
+    batch_limit = _cap_int_limit(
+        SEMANTIC_SCHOLAR_LINKED_BATCH_LIMIT,
+        SEMANTIC_SCHOLAR_BATCH_LIMIT,
+        field_name="SEMANTIC_SCHOLAR_LINKED_BATCH_LIMIT",
+    )
+    for start in range(0, len(missing_ids), batch_limit):
+        chunk = missing_ids[start:start + batch_limit]
         print(
-            f"  S2 detail chunk {start // SEMANTIC_SCHOLAR_LINKED_BATCH_LIMIT + 1}: "
+            f"  S2 detail chunk {start // batch_limit + 1}: "
             f"{len(chunk)} ids"
         )
         fetched_papers = _fetch_papers_batch_chunk_by_ids(chunk)
@@ -889,7 +906,11 @@ def _paper_search_params(query, limit, start_year=None, end_year=None, min_citat
         "query": query,
         "fields": PAPER_SEARCH_FIELDS,
         "year": f"{start_year}-{end_year}" if start_year else None,
-        "limit": limit,
+        "limit": _cap_int_limit(
+            limit,
+            SEMANTIC_SCHOLAR_SEARCH_LIMIT,
+            field_name="limit",
+        ),
         "minCitationCount": min_citation_count,
     }
 
@@ -947,8 +968,9 @@ def _paper_relevance_search_models_sync(
         end_year=end_year,
         min_citation_count=min_citation_count,
     )
+    capped_limit = params["limit"]
     print(
-        f"  S2 relevance search start: query={query!r}, limit={limit}, "
+        f"  S2 relevance search start: query={query!r}, limit={capped_limit}, "
         f"year={params['year']}, minCitationCount={min_citation_count}, depth={depth}"
     )
     # Search-result cache lookup. Key combines the parameters that
@@ -1360,6 +1382,15 @@ def _paper_metadata_simple_batch_sync(arxiv_ids: list[str]) -> list[dict]:
     """
     if not arxiv_ids:
         return []
+    if len(arxiv_ids) > SEMANTIC_SCHOLAR_BATCH_LIMIT:
+        results = []
+        for start in range(0, len(arxiv_ids), SEMANTIC_SCHOLAR_BATCH_LIMIT):
+            results.extend(
+                _paper_metadata_simple_batch_sync(
+                    arxiv_ids[start:start + SEMANTIC_SCHOLAR_BATCH_LIMIT]
+                )
+            )
+        return results
 
     try:
         rows = _paper_metadata_simple_post(arxiv_ids)
@@ -1424,6 +1455,12 @@ def _paper_batch_sync(paper_ids: list[str] = None):
     Accepts up to 500 IDs per request.
     """
     print("\n─── 1-D  Paper Batch ───")
+    paper_ids = list(paper_ids or [])
+    if len(paper_ids) > SEMANTIC_SCHOLAR_BATCH_LIMIT:
+        result = []
+        for start in range(0, len(paper_ids), SEMANTIC_SCHOLAR_BATCH_LIMIT):
+            result.extend(_paper_batch_sync(paper_ids[start:start + SEMANTIC_SCHOLAR_BATCH_LIMIT]))
+        return result
     ids = [f"ArXiv:{pid}" for pid in paper_ids]
     payload = {"ids": ids}
     params  = {
@@ -1456,7 +1493,11 @@ def _recommendations_single_sync(paper_id, limit=100):
     print(f"\n─── 3-A  Single-Paper Recommendations ───")
     params = {
         "fields": f"{PAPER_WITH_LINKED_FIELDS}",
-        "limit": limit,
+        "limit": _cap_int_limit(
+            limit,
+            SEMANTIC_SCHOLAR_RECOMMENDATIONS_LIMIT,
+            field_name="limit",
+        ),
     }
     data = _semantic_scholar_get(
         f"{RECOMM_BASE}/papers/forpaper/ARXIV:{paper_id}",
@@ -1496,7 +1537,11 @@ def _recommendations_multi_sync(postitive_ids: list[str] = None, negative_ids: l
         payload["negativePaperIds"] = negative_paper_ids
     params = {
         "fields": f"{RECOMMENDATION_FIELDS}",
-        "limit": limit,
+        "limit": _cap_int_limit(
+            limit,
+            SEMANTIC_SCHOLAR_RECOMMENDATIONS_LIMIT,
+            field_name="limit",
+        ),
     }
     data = _semantic_scholar_post(
         f"{RECOMM_BASE}/papers",

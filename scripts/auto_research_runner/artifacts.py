@@ -14,8 +14,16 @@ from scripts.auto_research_runner.shared_types import (
     ShardSpec,
     Stage8MarkdownUnavailable,
 )
+from scripts.auto_research_runner.contract_repair import (
+    RepairIssue,
+    append_repair_event,
+    preserve_raw_artifact,
+)
 from scripts.auto_research_runner.state import append_run_log
-from scripts.auto_research_runner.structured_json import load_structured_json_file
+from scripts.auto_research_runner.structured_json import (
+    loads_structured_json,
+    load_structured_json_file,
+)
 
 
 def verified_graph_fragment_filename(arxiv_id: str) -> str:
@@ -24,6 +32,10 @@ def verified_graph_fragment_filename(arxiv_id: str) -> str:
 
 def verified_graph_fragment_relpath(arxiv_id: str) -> str:
     return f"11_verified_graph/fragments/{verified_graph_fragment_filename(arxiv_id)}"
+
+
+def verified_graph_frame_relpath(arxiv_id: str) -> str:
+    return f"11_verified_graph/frames/{verified_graph_fragment_filename(arxiv_id)}"
 
 
 def _stable_stage_11_shard_id(arxiv_id: str) -> str:
@@ -263,7 +275,7 @@ def _verified_evidence_claims(run_dir: Path, arxiv_id: str) -> list[dict[str, An
     if not evidence_path.exists():
         return None
     try:
-        evidence = load_structured_json_file(evidence_path, canonicalize=True)
+        evidence = load_structured_json_file(evidence_path)
     except (OSError, json.JSONDecodeError):
         return None
     claims = evidence.get("claims") if isinstance(evidence, dict) else None
@@ -300,6 +312,17 @@ def _claim_grounding_matches_pageindex(
     return all(node_start <= line <= node_end for line in line_values)
 
 
+def _source_node_exists_in_pageindex(run_dir: Path, arxiv_id: str, item: dict[str, Any]) -> bool:
+    nodes_path = run_dir / "09_pageindex" / "nodes" / f"{arxiv_id}.nodes.json"
+    if not nodes_path.exists():
+        return False
+    try:
+        nodes = _flat_pageindex_nodes(json.loads(nodes_path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return str(item.get("source_node_id") or "") in nodes
+
+
 def _verified_evidence_is_valid(run_dir: Path, arxiv_id: str) -> bool:
     claims = _verified_evidence_claims(run_dir, arxiv_id)
     if not claims:
@@ -310,6 +333,126 @@ def _verified_evidence_is_valid(run_dir: Path, arxiv_id: str) -> bool:
         and _claim_grounding_matches_pageindex(run_dir, arxiv_id, claim)
         for claim in claims
     )
+
+
+STAGE_10_SOURCE_GROUNDED_LIST_FIELDS = (
+    "claims",
+    "methods",
+    "equations",
+    "algorithms",
+    "hyperparameters",
+    "complexity",
+    "neighbors",
+    "datasets",
+    "benchmarks",
+    "metrics",
+    "baselines",
+    "results",
+    "limitations",
+    "artifacts",
+)
+
+STAGE_10_LINE_GROUNDED_LIST_FIELDS = {
+    "claims",
+    "equations",
+    "algorithms",
+    "results",
+    "limitations",
+}
+
+
+def _stage_10_evidence_item_is_valid(
+    run_dir: Path,
+    arxiv_id: str,
+    item: dict[str, Any],
+    *,
+    require_lines: bool,
+) -> bool:
+    if not item.get("source_node_id"):
+        return False
+    source_lines = item.get("source_lines")
+    if require_lines or source_lines:
+        return _claim_grounding_matches_pageindex(run_dir, arxiv_id, item)
+    return _source_node_exists_in_pageindex(run_dir, arxiv_id, item)
+
+
+def sanitize_verified_evidence(run_dir: Path, arxiv_id: str) -> dict[str, int]:
+    evidence_path = run_dir / "10_verified_evidence" / f"{arxiv_id}.json"
+    if not evidence_path.exists():
+        return {}
+    try:
+        raw_text = evidence_path.read_text(encoding="utf-8")
+        try:
+            json.loads(raw_text)
+            repaired_json_syntax = False
+        except json.JSONDecodeError:
+            repaired_json_syntax = True
+        evidence = loads_structured_json(raw_text)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(evidence, dict):
+        return {}
+
+    dropped: dict[str, int] = {}
+    changed = False
+    for field in STAGE_10_SOURCE_GROUNDED_LIST_FIELDS:
+        values = evidence.get(field)
+        if values is None:
+            continue
+        if not isinstance(values, list):
+            evidence[field] = []
+            dropped[field] = 1
+            changed = True
+            continue
+
+        kept: list[dict[str, Any]] = []
+        dropped_count = 0
+        for item in values:
+            if not isinstance(item, dict):
+                dropped_count += 1
+                continue
+            if _stage_10_evidence_item_is_valid(
+                run_dir,
+                arxiv_id,
+                item,
+                require_lines=(field in STAGE_10_LINE_GROUNDED_LIST_FIELDS),
+            ):
+                kept.append(item)
+                continue
+            dropped_count += 1
+        if dropped_count:
+            evidence[field] = kept
+            dropped[field] = dropped_count
+            changed = True
+
+    if changed or repaired_json_syntax:
+        raw = preserve_raw_artifact(run_dir, evidence_path)
+        evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+        issues = []
+        if repaired_json_syntax:
+            issues.append(
+                RepairIssue(
+                    kind="repaired_json_syntax",
+                    detail="rewrote repairable malformed JSON into strict canonical JSON",
+                )
+            )
+        if dropped:
+            detail = ", ".join(f"{field}={count}" for field, count in sorted(dropped.items()))
+            issues.append(
+                RepairIssue(
+                    kind="dropped_invalid_verified_evidence",
+                    detail=f"dropped invalid grounded evidence items: {detail}",
+                )
+            )
+        append_repair_event(
+            run_dir,
+            stage="10",
+            artifact_path=evidence_path,
+            raw=raw,
+            outcome="accepted",
+            issues=issues,
+        )
+    return dropped
 
 
 PAGEINDEX_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
@@ -475,6 +618,309 @@ def _verified_evidence_source_keys(run_dir: Path, arxiv_id: str) -> set[tuple[st
     }
 
 
+def verified_graph_fragment_retry_feedback(run_dir: Path, arxiv_id: str) -> str:
+    fragment_path = run_dir / verified_graph_fragment_relpath(arxiv_id)
+    try:
+        fragment = json.loads(fragment_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        return "\n".join(
+            [
+                "Previous Stage 11 fragment failed validation.",
+                "The previous fragment could not be parsed as JSON; regenerate it from the Stage 11 frame.",
+                "Do not reuse malformed JSON or direct source_node_id/source_lines edges.",
+                f"fragment_json_error={type(error).__name__}: {error}",
+            ]
+        )
+    if not isinstance(fragment, dict):
+        return "\n".join(
+            [
+                "Previous Stage 11 fragment failed validation.",
+                "The previous fragment was not a JSON object; regenerate it from the Stage 11 frame.",
+                "Do not reuse malformed JSON or direct source_node_id/source_lines edges.",
+                f"fragment_json_error=fragment root type was {type(fragment).__name__}",
+            ]
+        )
+    fragment_arxiv_id = str(fragment.get("arxiv_id") or arxiv_id)
+    claims = _verified_evidence_claims(run_dir, fragment_arxiv_id) or []
+    source_keys = {
+        _source_grounding_key(claim)
+        for claim in claims
+        if claim.get("source_node_id") and claim.get("source_lines")
+    }
+    node_ids = {
+        node.get("id")
+        for node in fragment.get("nodes", [])
+        if isinstance(node, dict) and node.get("id")
+    }
+    invalid_edges: list[dict[str, Any]] = []
+    for edge in fragment.get("edges", []):
+        if not isinstance(edge, dict):
+            invalid_edges.append({"reason": "edge is not an object", "edge": edge})
+            continue
+        reasons = []
+        if not edge.get("claim_id"):
+            reasons.append("missing claim_id")
+        if edge.get("confidence") != "verified":
+            reasons.append("confidence is not verified")
+        if edge.get("src") not in node_ids or edge.get("dst") not in node_ids:
+            reasons.append("edge endpoint missing from fragment nodes")
+        if not edge.get("source_node_id"):
+            reasons.append("missing source_node_id")
+        if not edge.get("source_lines"):
+            reasons.append("missing source_lines")
+        if edge.get("source_node_id") and edge.get("source_lines") and _source_grounding_key(edge) not in source_keys:
+            reasons.append("source_node_id + source_lines pair is not an exact Stage 10 claim source")
+        if reasons:
+            invalid_edges.append({"reason": "; ".join(reasons), "edge": edge})
+
+    allowed_sources = [
+        {
+            "source_node_id": claim.get("source_node_id"),
+            "source_lines": claim.get("source_lines"),
+            "claim": str(claim.get("text") or "")[:240],
+        }
+        for claim in claims
+        if claim.get("source_node_id") and claim.get("source_lines")
+    ]
+    payload = {
+        "arxiv_id": fragment_arxiv_id,
+        "invalid_edges": invalid_edges[:20],
+        "allowed_stage10_claim_sources": allowed_sources[:60],
+    }
+    return "\n".join(
+        [
+            "Previous Stage 11 fragment failed validation.",
+            "Repair the fragment instead of repeating the same grounding mistake.",
+            "For every edge, copy one exact source_node_id + source_lines pair from allowed_stage10_claim_sources.",
+            "Do not merge adjacent line ranges, narrow line ranges, invent section ids, or use source pairs from PageIndex directly.",
+            f"validation_feedback={json.dumps(payload, sort_keys=True)}",
+        ]
+    )
+
+
+STAGE_11_EDGE_TYPES = [
+    "INTRODUCES",
+    "USES",
+    "SOLVES",
+    "EVALUATES_ON",
+    "MEASURES_WITH",
+    "HAS_RESULT",
+    "HAS_LIMITATION",
+    "COMPARES_TO",
+    "IMPROVES_ON",
+    "BELONGS_TO",
+]
+
+
+def _graph_node_id(value: Any) -> str:
+    normalized = re.sub(r"[^a-z0-9+#@._/-]+", " ", str(value or "").lower())
+    return " ".join(normalized.split())
+
+
+def _add_frame_node(nodes_by_id: dict[str, dict[str, str]], node_id: str, node_type: str, display: str) -> None:
+    node_id = _graph_node_id(node_id)
+    if not node_id:
+        return
+    nodes_by_id.setdefault(
+        node_id,
+        {"id": node_id, "type": node_type, "display": str(display or node_id)},
+    )
+
+
+def _stage_11_frame_claims(evidence: dict[str, Any]) -> list[dict[str, Any]]:
+    claims = evidence.get("claims") if isinstance(evidence.get("claims"), list) else []
+    framed_claims: list[dict[str, Any]] = []
+    for index, claim in enumerate(claims, start=1):
+        if not isinstance(claim, dict):
+            continue
+        if not claim.get("source_node_id") or not claim.get("source_lines"):
+            continue
+        framed_claims.append(
+            {
+                "claim_id": f"c{index:03d}",
+                "claim": str(claim.get("text") or ""),
+                "claim_type": str(claim.get("claim_type") or ""),
+                "source_node_id": claim.get("source_node_id"),
+                "source_lines": claim.get("source_lines"),
+            }
+        )
+    return framed_claims
+
+
+def build_verified_graph_frame(run_dir: Path, arxiv_id: str) -> Path:
+    evidence_path = run_dir / "10_verified_evidence" / f"{arxiv_id}.json"
+    evidence = load_structured_json_file(evidence_path)
+    if not isinstance(evidence, dict):
+        raise ValueError(f"verified evidence for {arxiv_id} must be an object")
+
+    nodes_by_id: dict[str, dict[str, str]] = {}
+    _add_frame_node(nodes_by_id, arxiv_id, "Paper", str(evidence.get("title") or arxiv_id))
+
+    weak_path = run_dir / "05_weak_graph" / "fragments" / f"{arxiv_id}.json"
+    if weak_path.exists():
+        weak = json.loads(weak_path.read_text())
+        for node in weak.get("nodes", []):
+            if isinstance(node, dict):
+                _add_frame_node(
+                    nodes_by_id,
+                    str(node.get("id") or ""),
+                    str(node.get("type") or "Concept"),
+                    str(node.get("display") or node.get("id") or ""),
+                )
+
+    field_types = {
+        "methods": "Method",
+        "datasets": "Dataset",
+        "benchmarks": "Benchmark",
+        "metrics": "Metric",
+        "baselines": "Method",
+        "results": "Result",
+        "limitations": "Limitation",
+        "algorithms": "Method",
+        "hyperparameters": "Concept",
+        "complexity": "Concept",
+        "neighbors": "Method",
+    }
+    for field, node_type in field_types.items():
+        values = evidence.get(field)
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            label = item.get("name") or item.get("text") or item.get("method") or item.get("title")
+            if label:
+                _add_frame_node(nodes_by_id, str(label), node_type, str(label))
+
+    edge_types = set(STAGE_11_EDGE_TYPES)
+    if weak_path.exists():
+        weak = json.loads(weak_path.read_text())
+        for edge in weak.get("edges", []):
+            if isinstance(edge, dict) and edge.get("type"):
+                edge_types.add(str(edge["type"]))
+
+    frame = {
+        "arxiv_id": arxiv_id,
+        "claims": _stage_11_frame_claims(evidence),
+        "allowed_nodes": sorted(nodes_by_id.values(), key=lambda node: node["id"]),
+        "allowed_edge_types": sorted(edge_types),
+        "output_contract": {
+            "edge_fields": ["claim_id", "src", "dst", "type", "confidence"],
+            "note": "Use claim_id for grounding. Python copies source_node_id and source_lines from claims.",
+        },
+    }
+    frame_path = run_dir / verified_graph_frame_relpath(arxiv_id)
+    frame_path.parent.mkdir(parents=True, exist_ok=True)
+    frame_path.write_text(json.dumps(frame, indent=2, sort_keys=True) + "\n")
+    return frame_path
+
+
+def compile_verified_graph_fragment_from_frame(run_dir: Path, arxiv_id: str) -> int:
+    frame_path = run_dir / verified_graph_frame_relpath(arxiv_id)
+    fragment_path = run_dir / verified_graph_fragment_relpath(arxiv_id)
+    if not frame_path.exists() or not fragment_path.exists():
+        return 0
+    frame = json.loads(frame_path.read_text())
+    fragment = json.loads(fragment_path.read_text())
+    claims_by_id = {
+        claim.get("claim_id"): claim
+        for claim in frame.get("claims", [])
+        if isinstance(claim, dict) and claim.get("claim_id")
+    }
+    allowed_nodes = {
+        node.get("id"): node
+        for node in frame.get("allowed_nodes", [])
+        if isinstance(node, dict) and node.get("id")
+    }
+    for node in fragment.get("proposed_nodes", []):
+        if isinstance(node, dict) and node.get("id"):
+            allowed_nodes.setdefault(
+                _graph_node_id(node["id"]),
+                {
+                    "id": _graph_node_id(node["id"]),
+                    "type": str(node.get("type") or "Concept"),
+                    "display": str(node.get("display") or node["id"]),
+                },
+            )
+    allowed_edge_types = set(frame.get("allowed_edge_types") or STAGE_11_EDGE_TYPES)
+
+    compiled_edges: list[dict[str, Any]] = []
+    passthrough_edges: list[dict[str, Any]] = []
+    dropped_claim_edges = 0
+    for edge in fragment.get("edges", []):
+        if not isinstance(edge, dict):
+            continue
+        claim_id = edge.get("claim_id")
+        if not claim_id:
+            passthrough_edges.append(edge)
+            continue
+        claim = claims_by_id.get(claim_id)
+        src = _graph_node_id(edge.get("src"))
+        dst = _graph_node_id(edge.get("dst"))
+        edge_type = str(edge.get("type") or "")
+        if not claim or src not in allowed_nodes or dst not in allowed_nodes or edge_type not in allowed_edge_types:
+            dropped_claim_edges += 1
+            continue
+        compiled = dict(edge)
+        compiled.update(
+            {
+                "src": src,
+                "dst": dst,
+                "type": edge_type,
+                "confidence": "verified",
+                "source_node_id": claim["source_node_id"],
+                "source_lines": claim["source_lines"],
+            }
+        )
+        compiled_edges.append(compiled)
+
+    if not compiled_edges and not dropped_claim_edges:
+        return 0
+
+    raw = preserve_raw_artifact(run_dir, fragment_path)
+    referenced = {arxiv_id}
+    for edge in compiled_edges + passthrough_edges:
+        referenced.add(edge.get("src"))
+        referenced.add(edge.get("dst"))
+    nodes_by_id = {
+        node_id: node
+        for node_id, node in allowed_nodes.items()
+        if node_id in referenced
+    }
+    for node in fragment.get("nodes", []):
+        if isinstance(node, dict) and node.get("id") in referenced:
+            nodes_by_id.setdefault(node["id"], node)
+
+    fragment["nodes"] = sorted(nodes_by_id.values(), key=lambda node: node["id"])
+    fragment["edges"] = passthrough_edges + compiled_edges
+    fragment.pop("proposed_nodes", None)
+    fragment_path.write_text(json.dumps(fragment, indent=2, sort_keys=True) + "\n")
+    issues: list[RepairIssue] = []
+    if dropped_claim_edges:
+        issues.append(
+            RepairIssue(
+                kind="claim_id_compile_dropped_edge",
+                detail=f"dropped {dropped_claim_edges} edge(s) with claim_id, endpoints, or type not allowed by the Stage 11 frame",
+            )
+        )
+    if compiled_edges:
+        issues.append(
+            RepairIssue(
+                kind="claim_id_compile_canonicalized",
+                detail=f"compiled {len(compiled_edges)} claim_id edge(s) with exact Stage 10 source grounding",
+            )
+        )
+    append_repair_event(
+        run_dir,
+        stage="11",
+        artifact_path=fragment_path,
+        raw=raw,
+        outcome="accepted",
+        issues=issues,
+    )
+    return len(compiled_edges)
+
+
 def merge_verified_graph_fragments(run_dir: Path, arxiv_ids: list[str] | None = None) -> dict[str, Any]:
     fragments_dir = run_dir / "11_verified_graph" / "fragments"
     if not fragments_dir.exists():
@@ -514,6 +960,8 @@ def merge_verified_graph_fragments(run_dir: Path, arxiv_ids: list[str] | None = 
         for edge in fragment.get("edges", []):
             if edge.get("confidence") != "verified":
                 raise ValueError(f"unverified edge in {fragment_path}")
+            if not edge.get("claim_id"):
+                raise ValueError(f"edge missing claim_id in {fragment_path}")
             if edge.get("src") not in fragment_node_ids or edge.get("dst") not in fragment_node_ids:
                 raise ValueError(f"edge endpoint missing in {fragment_path}")
             if not edge.get("source_node_id"):
@@ -530,6 +978,81 @@ def merge_verified_graph_fragments(run_dir: Path, arxiv_ids: list[str] | None = 
         "nodes": sorted(nodes_by_id.values(), key=lambda node: node["id"]),
         "edges": [edges_by_key[key] for key in sorted(edges_by_key)],
     }
+
+
+def sanitize_verified_graph_fragment(run_dir: Path, arxiv_id: str) -> int:
+    fragment_path = run_dir / verified_graph_fragment_relpath(arxiv_id)
+    fragment = json.loads(fragment_path.read_text())
+    fragment_arxiv_id = str(fragment.get("arxiv_id") or arxiv_id)
+    source_keys = _verified_evidence_source_keys(run_dir, fragment_arxiv_id)
+    if not source_keys:
+        return 0
+
+    nodes = fragment.get("nodes", [])
+    if not isinstance(nodes, list):
+        return 0
+    node_ids = {node.get("id") for node in nodes if isinstance(node, dict) and node.get("id")}
+
+    valid_edges: list[dict[str, Any]] = []
+    for edge in fragment.get("edges", []):
+        if not isinstance(edge, dict):
+            continue
+        if not edge.get("claim_id"):
+            continue
+        if edge.get("confidence") != "verified":
+            continue
+        if edge.get("src") not in node_ids or edge.get("dst") not in node_ids:
+            continue
+        if not edge.get("source_node_id") or not edge.get("source_lines"):
+            continue
+        if _source_grounding_key(edge) not in source_keys:
+            continue
+        valid_edges.append(edge)
+
+    original_edges = fragment.get("edges", [])
+    if not isinstance(original_edges, list):
+        original_edges = []
+    dropped = len(original_edges) - len(valid_edges)
+    if dropped <= 0:
+        return 0
+
+    raw = preserve_raw_artifact(run_dir, fragment_path)
+    referenced = {fragment_arxiv_id}
+    for edge in valid_edges:
+        referenced.add(edge["src"])
+        referenced.add(edge["dst"])
+    valid_nodes = [
+        node
+        for node in nodes
+        if isinstance(node, dict)
+        and node.get("id")
+        and (node.get("id") in referenced or node.get("type") == "Paper")
+    ]
+    fragment["nodes"] = valid_nodes
+    fragment["edges"] = valid_edges
+    fragment_path.write_text(json.dumps(fragment, indent=2, sort_keys=True) + "\n")
+    append_repair_event(
+        run_dir,
+        stage="11",
+        artifact_path=fragment_path,
+        raw=raw,
+        outcome="attempted",
+        issues=[
+            RepairIssue(
+                kind="dropped_invalid_verified_edge",
+                detail=f"dropped {dropped} edge(s) with invalid endpoint, confidence, or Stage 10 source grounding",
+            )
+        ],
+    )
+    return dropped
+
+
+def verified_graph_fragment_is_valid(run_dir: Path, arxiv_id: str) -> bool:
+    try:
+        merge_verified_graph_fragments(run_dir, arxiv_ids=[arxiv_id])
+    except (json.JSONDecodeError, OSError, ValueError):
+        return False
+    return True
 
 
 def _load_weak_edge_count(run_dir: Path) -> int:

@@ -1,0 +1,26 @@
+---
+// TLDR callout — green left border, used at top of method pages.
+---
+<aside class="tldr">
+  <span class="tldr-label">TLDR</span>
+  <span class="tldr-body"><slot /></span>
+</aside>
+
+<style>
+  .tldr {
+    display: block;
+    border-left: 3px solid #4ade80;
+    background: rgba(74, 222, 128, 0.08);
+    padding: 0.75rem 1rem;
+    margin: 1rem 0;
+    border-radius: 0 6px 6px 0;
+  }
+  .tldr-label {
+    display: inline-block;
+    color: #4ade80;
+    font-weight: 700;
+    font-size: 0.75rem;
+    letter-spacing: 0.05em;
+    margin-right: 0.5rem;
+  }
+</style>

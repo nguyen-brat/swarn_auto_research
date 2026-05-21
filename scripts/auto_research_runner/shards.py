@@ -1,20 +1,26 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
+import signal
 import subprocess
+import tempfile
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
+from sdk.codex_app_server.errors import AppServerError
 from scripts.auto_research_runner.config import (
     DEFAULT_EXECUTOR,
     DEFAULT_MAX_EFFECTIVE_WORKERS,
     DEFAULT_SDK_NOTIFICATION_TIMEOUT_SECONDS,
     DEFAULT_SHARD_TIMEOUT_SECONDS,
     DEFAULT_STAGE_MAX_EFFECTIVE_WORKERS,
+    DEFAULT_STAGE_SDK_NOTIFICATION_TIMEOUT_SECONDS,
     REPO_ROOT,
 )
 from scripts.auto_research_runner.io_utils import _safe_relative_path, _safe_component
@@ -27,6 +33,10 @@ from scripts.auto_research_runner.state import (
     load_run_state,
 )
 from scripts.auto_research_runner.structured_json import load_structured_json_file
+
+
+OutputSignature = tuple[int, int, str] | None
+ArtifactSignature = tuple[tuple[str, OutputSignature], ...]
 
 
 def _validate_shard_spec(spec: ShardSpec) -> None:
@@ -42,7 +52,7 @@ def _expected_output_exists(run_dir: Path, spec: ShardSpec, rel_path: str) -> bo
         return False
     if spec.stage == "10" and rel_path.startswith("10_verified_evidence/") and rel_path.endswith(".json"):
         try:
-            evidence = load_structured_json_file(path, canonicalize=True)
+            evidence = load_structured_json_file(path)
         except (OSError, json.JSONDecodeError):
             return False
         claims = evidence.get("claims") if isinstance(evidence, dict) else None
@@ -53,6 +63,60 @@ def _expected_output_exists(run_dir: Path, spec: ShardSpec, rel_path: str) -> bo
 def expected_outputs_exist(run_dir: Path, spec: ShardSpec) -> bool:
     _validate_shard_spec(spec)
     return all(_expected_output_exists(run_dir, spec, rel) for rel in spec.expected_outputs)
+
+
+def _output_signature(path: Path) -> OutputSignature:
+    try:
+        stat = path.stat()
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+    return (stat.st_size, stat.st_ino, digest)
+
+
+def _expected_output_snapshot(run_dir: Path, spec: ShardSpec) -> dict[str, OutputSignature]:
+    _validate_shard_spec(spec)
+    return {
+        rel: _output_signature(run_dir / _safe_relative_path(rel, field="expected output"))
+        for rel in spec.expected_outputs
+    }
+
+
+def _expected_output_stable_signature(
+    run_dir: Path,
+    spec: ShardSpec,
+    *,
+    force: bool,
+    before_snapshot: dict[str, OutputSignature] | None,
+) -> ArtifactSignature | None:
+    if not _expected_outputs_satisfied_for_attempt(
+        run_dir,
+        spec,
+        force=force,
+        before_snapshot=before_snapshot,
+    ):
+        return None
+    return tuple(sorted(_expected_output_snapshot(run_dir, spec).items()))
+
+
+def _expected_outputs_satisfied_for_attempt(
+    run_dir: Path,
+    spec: ShardSpec,
+    *,
+    force: bool,
+    before_snapshot: dict[str, OutputSignature] | None,
+) -> bool:
+    if not expected_outputs_exist(run_dir, spec):
+        return False
+    if not force:
+        return True
+    if before_snapshot is None:
+        return False
+    for rel in spec.expected_outputs:
+        path = run_dir / _safe_relative_path(rel, field="expected output")
+        if _output_signature(path) != before_snapshot.get(rel):
+            return True
+    return False
 
 
 def _shard_dir(run_dir: Path, spec: ShardSpec) -> Path:
@@ -166,11 +230,208 @@ def _run_cli_shard_attempt(
     )
 
 
-def _sdk_notification_timeout_seconds(timeout_seconds: int) -> float:
-    configured = os.environ.get("SWARN_SDK_NOTIFICATION_TIMEOUT_SECONDS")
+def _cli_output_settle_seconds() -> float:
+    configured = os.environ.get("SWARN_CLI_OUTPUT_SETTLE_SECONDS")
     if configured is None:
-        return min(float(DEFAULT_SDK_NOTIFICATION_TIMEOUT_SECONDS), float(timeout_seconds))
+        return 2.0
+    value = float(configured)
+    if value < 0:
+        raise ValueError("SWARN_CLI_OUTPUT_SETTLE_SECONDS must be >= 0")
+    return value
+
+
+def _cli_output_timeout_seconds(timeout_seconds: int, *, stage: str | None = None) -> float:
+    configured = None
+    if stage is not None:
+        safe_stage = re.sub(r"[^A-Za-z0-9]+", "_", str(stage)).strip("_")
+        configured = os.environ.get(f"SWARN_STAGE_{safe_stage}_CLI_OUTPUT_TIMEOUT_SECONDS")
+    if configured is None:
+        configured = os.environ.get("SWARN_CLI_OUTPUT_TIMEOUT_SECONDS")
+    if configured is None:
+        return float(timeout_seconds)
+    value = float(configured)
+    if value <= 0:
+        raise ValueError("CLI output timeout must be > 0")
+    return min(value, float(timeout_seconds))
+
+
+def _read_process_output(stdout_file: TextIO, stderr_file: TextIO) -> tuple[str, str]:
+    stdout_file.seek(0)
+    stderr_file.seek(0)
+    return stdout_file.read(), stderr_file.read()
+
+
+def _stop_process_group(
+    process: subprocess.Popen[str],
+    stdout_file: TextIO,
+    stderr_file: TextIO,
+    *,
+    kill: bool = False,
+) -> tuple[str, str]:
+    if process.poll() is None:
+        sig = signal.SIGKILL if kill else signal.SIGTERM
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            if kill:
+                process.kill()
+            else:
+                process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            process.kill()
+        process.wait()
+    return _read_process_output(stdout_file, stderr_file)
+
+
+def _run_cli_shard_attempt_until_outputs(
+    run_dir: Path,
+    spec: ShardSpec,
+    timeout_seconds: int,
+    *,
+    force: bool,
+    before_snapshot: dict[str, OutputSignature] | None,
+) -> ShardAttemptResult:
+    command = _codex_exec_command(spec)
+    with (
+        tempfile.TemporaryFile("w+", encoding="utf-8") as stdout_file,
+        tempfile.TemporaryFile("w+", encoding="utf-8") as stderr_file,
+    ):
+        process = subprocess.Popen(
+            command,
+            cwd=REPO_ROOT,
+            text=True,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            start_new_session=True,
+        )
+        output_timeout = _cli_output_timeout_seconds(timeout_seconds, stage=spec.stage)
+        output_deadline = time.monotonic() + output_timeout
+        settle_seconds = _cli_output_settle_seconds()
+        satisfied_since: float | None = None
+        last_snapshot: dict[str, OutputSignature] | None = None
+
+        while True:
+            if process.poll() is not None:
+                stdout, stderr = _read_process_output(stdout_file, stderr_file)
+                return ShardAttemptResult(
+                    returncode=process.returncode,
+                    stdout=stdout or "",
+                    stderr=stderr or "",
+                    executor="cli",
+                )
+
+            if _expected_outputs_satisfied_for_attempt(
+                run_dir,
+                spec,
+                force=force,
+                before_snapshot=before_snapshot,
+            ):
+                current_snapshot = _expected_output_snapshot(run_dir, spec)
+                now = time.monotonic()
+                if current_snapshot == last_snapshot:
+                    if satisfied_since is None:
+                        satisfied_since = now
+                    if now - satisfied_since >= settle_seconds:
+                        stdout, stderr = _stop_process_group(
+                            process,
+                            stdout_file,
+                            stderr_file,
+                        )
+                        note = (
+                            "CLI executor produced expected outputs but did not exit; "
+                            "stopped process after output stability check."
+                        )
+                        return ShardAttemptResult(
+                            returncode=0,
+                            stdout=stdout,
+                            stderr="\n".join(part for part in (note, stderr) if part),
+                            executor="cli",
+                        )
+                else:
+                    last_snapshot = current_snapshot
+                    satisfied_since = now
+            else:
+                satisfied_since = None
+                last_snapshot = None
+
+            now = time.monotonic()
+            if now >= output_deadline:
+                stdout, stderr = _stop_process_group(
+                    process,
+                    stdout_file,
+                    stderr_file,
+                    kill=True,
+                )
+                raise subprocess.TimeoutExpired(
+                    command,
+                    output_timeout,
+                    output=stdout,
+                    stderr=stderr,
+                )
+            time.sleep(min(1.0, max(0.0, output_deadline - now)))
+
+
+def _stage_sdk_notification_timeout_env_name(stage: str) -> str:
+    safe_stage = re.sub(r"[^A-Za-z0-9]+", "_", str(stage)).strip("_")
+    return f"SWARN_STAGE_{safe_stage}_SDK_NOTIFICATION_TIMEOUT_SECONDS"
+
+
+def _sdk_notification_timeout_seconds(timeout_seconds: int, *, stage: str | None = None) -> float:
+    configured = None
+    if stage is not None:
+        configured = os.environ.get(_stage_sdk_notification_timeout_env_name(stage))
+    if configured is None:
+        configured = os.environ.get("SWARN_SDK_NOTIFICATION_TIMEOUT_SECONDS")
+    if configured is None and stage is not None:
+        configured = DEFAULT_STAGE_SDK_NOTIFICATION_TIMEOUT_SECONDS.get(str(stage))
+    if configured is None:
+        configured = DEFAULT_SDK_NOTIFICATION_TIMEOUT_SECONDS
     return min(float(configured), float(timeout_seconds))
+
+
+def _stage_sdk_artifact_settle_seconds(stage: str) -> float:
+    safe_stage = re.sub(r"[^A-Za-z0-9]+", "_", str(stage)).strip("_")
+    configured = os.environ.get(f"SWARN_STAGE_{safe_stage}_SDK_ARTIFACT_SETTLE_SECONDS")
+    if configured is None:
+        return 10.0
+    value = float(configured)
+    if value < 0:
+        raise ValueError(f"SWARN_STAGE_{safe_stage}_SDK_ARTIFACT_SETTLE_SECONDS must be >= 0")
+    return value
+
+
+def _sdk_meta_from_error(error: BaseException) -> tuple[str | None, str | None]:
+    sdk_meta = getattr(error, "sdk_meta", None)
+    if not isinstance(sdk_meta, dict):
+        return None, None
+    thread_id = sdk_meta.get("thread_id")
+    turn_id = sdk_meta.get("turn_id")
+    return (
+        thread_id if isinstance(thread_id, str) else None,
+        turn_id if isinstance(turn_id, str) else None,
+    )
+
+
+def _is_sdk_fallback_error(error: BaseException) -> bool:
+    if isinstance(error, (TimeoutError, AppServerError)):
+        return True
+    if not isinstance(error, RuntimeError):
+        return False
+    message = str(error).lower()
+    return (
+        "stream disconnected before completion" in message
+        or "failed to connect to websocket" in message
+        or "transport channel closed" in message
+    )
 
 
 def _run_sdk_prompt(
@@ -178,6 +439,9 @@ def _run_sdk_prompt(
     *,
     model: str,
     timeout_seconds: int,
+    stage: str | None = None,
+    artifact_signature: Any | None = None,
+    artifact_settle_seconds: float = 10.0,
 ):
     from sdk.codex import run_one_shot_sync
 
@@ -186,7 +450,9 @@ def _run_sdk_prompt(
         model=model,
         cwd=REPO_ROOT,
         timeout=float(timeout_seconds),
-        notification_timeout=_sdk_notification_timeout_seconds(timeout_seconds),
+        notification_timeout=_sdk_notification_timeout_seconds(timeout_seconds, stage=stage),
+        artifact_signature=artifact_signature,
+        artifact_settle_seconds=artifact_settle_seconds,
     )
 
 
@@ -194,11 +460,27 @@ def _run_sdk_shard_attempt(
     run_dir: Path,
     spec: ShardSpec,
     timeout_seconds: int,
+    *,
+    force: bool = False,
+    before_snapshot: dict[str, OutputSignature] | None = None,
 ) -> ShardAttemptResult:
+    artifact_signature = None
+    artifact_settle_seconds = 10.0
+    if spec.expected_outputs:
+        artifact_signature = lambda: _expected_output_stable_signature(
+            run_dir,
+            spec,
+            force=force,
+            before_snapshot=before_snapshot,
+        )
+        artifact_settle_seconds = _stage_sdk_artifact_settle_seconds(spec.stage)
     result = _run_sdk_prompt(
         spec.prompt,
         model=spec.model,
         timeout_seconds=timeout_seconds,
+        stage=spec.stage,
+        artifact_signature=artifact_signature,
+        artifact_settle_seconds=artifact_settle_seconds,
     )
     return ShardAttemptResult(
         returncode=0,
@@ -216,16 +498,38 @@ def _run_shard_attempt(
     *,
     timeout_seconds: int,
     executor: str,
+    force: bool = False,
+    before_snapshot: dict[str, OutputSignature] | None = None,
 ) -> ShardAttemptResult:
     if executor == "cli":
         return _run_cli_shard_attempt(spec, timeout_seconds)
     if executor == "sdk":
-        return _run_sdk_shard_attempt(run_dir, spec, timeout_seconds)
+        return _run_sdk_shard_attempt(
+            run_dir,
+            spec,
+            timeout_seconds,
+            force=force,
+            before_snapshot=before_snapshot,
+        )
     if executor == "sdk-cli-fallback":
         try:
-            return _run_sdk_shard_attempt(run_dir, spec, timeout_seconds)
-        except TimeoutError as error:
-            if expected_outputs_exist(run_dir, spec):
+            return _run_sdk_shard_attempt(
+                run_dir,
+                spec,
+                timeout_seconds,
+                force=force,
+                before_snapshot=before_snapshot,
+            )
+        except (TimeoutError, AppServerError, RuntimeError) as error:
+            if not _is_sdk_fallback_error(error):
+                raise
+            thread_id, turn_id = _sdk_meta_from_error(error)
+            if _expected_outputs_satisfied_for_attempt(
+                run_dir,
+                spec,
+                force=force,
+                before_snapshot=before_snapshot,
+            ):
                 return ShardAttemptResult(
                     returncode=0,
                     stdout="",
@@ -234,8 +538,16 @@ def _run_shard_attempt(
                         f"accepting artifacts. SDK error: {error}"
                     ),
                     executor="sdk",
+                    thread_id=thread_id,
+                    turn_id=turn_id,
                 )
-            result = _run_cli_shard_attempt(spec, timeout_seconds)
+            result = _run_cli_shard_attempt_until_outputs(
+                run_dir,
+                spec,
+                timeout_seconds,
+                force=force,
+                before_snapshot=before_snapshot,
+            )
             fallback_note = (
                 "SDK executor timed out waiting for app-server notifications; "
                 f"retried with CLI executor. SDK error: {error}"
@@ -264,19 +576,20 @@ def _run_single_shard(
         shard_dir = _shard_dir(run_dir, spec)
         stdout_path = shard_dir / f"{spec.shard_id}.attempt-{attempt}.stdout.txt"
         stderr_path = shard_dir / f"{spec.shard_id}.attempt-{attempt}.stderr.txt"
+        before_snapshot = _expected_output_snapshot(run_dir, spec)
         try:
             result = _run_shard_attempt(
                 run_dir,
                 spec,
                 timeout_seconds=timeout_seconds,
                 executor=executor,
+                force=force,
+                before_snapshot=before_snapshot,
             )
         except (OSError, subprocess.TimeoutExpired, Exception) as error:
-            sdk_meta = getattr(error, "sdk_meta", None)
-            sdk_thread = sdk_meta.get("thread_id") if isinstance(sdk_meta, dict) else "n/a"
-            sdk_turn = sdk_meta.get("turn_id") if isinstance(sdk_meta, dict) else "n/a"
+            sdk_thread, sdk_turn = _sdk_meta_from_error(error)
             stderr = (
-                f"sdk_thread={sdk_thread} sdk_turn={sdk_turn}\n"
+                f"sdk_thread={sdk_thread or 'n/a'} sdk_turn={sdk_turn or 'n/a'}\n"
                 + "".join(
                     traceback.format_exception(type(error), error, error.__traceback__)
                 )
@@ -285,14 +598,22 @@ def _run_single_shard(
                 returncode=None,
                 stdout="",
                 stderr=stderr,
-                executor=executor,
+                executor="sdk" if sdk_thread and executor in {"sdk", "sdk-cli-fallback"} else executor,
+                thread_id=sdk_thread,
+                turn_id=sdk_turn,
             )
         stdout_path.write_text(result.stdout or "", encoding="utf-8")
         stderr_path.write_text(result.stderr or "", encoding="utf-8")
 
         status = (
             "completed"
-            if result.returncode == 0 and expected_outputs_exist(run_dir, spec)
+            if result.returncode == 0
+            and _expected_outputs_satisfied_for_attempt(
+                run_dir,
+                spec,
+                force=force,
+                before_snapshot=before_snapshot,
+            )
             else "failed"
         )
         _write_shard_manifest(
@@ -359,7 +680,7 @@ def run_shards(
             )
         return
 
-    failures: list[BaseException] = []
+    failures: list[tuple[ShardSpec, BaseException]] = []
     worker_count = min(max_workers, len(pending))
     with ThreadPoolExecutor(max_workers=worker_count) as pool:
         futures = {
@@ -378,10 +699,13 @@ def run_shards(
             try:
                 future.result()
             except BaseException as error:
-                failures.append(error)
+                failures.append((futures[future], error))
     if failures:
         recovery_failures: list[BaseException] = []
-        recovery_specs = [spec for spec in pending if not expected_outputs_exist(run_dir, spec)]
+        if force:
+            recovery_specs = [spec for spec, _error in failures]
+        else:
+            recovery_specs = [spec for spec in pending if not expected_outputs_exist(run_dir, spec)]
         for spec in recovery_specs:
             append_run_log(
                 run_dir,

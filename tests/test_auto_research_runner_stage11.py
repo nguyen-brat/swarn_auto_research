@@ -6,8 +6,11 @@ from unittest.mock import patch
 import pytest
 
 from scripts.auto_research_runner.artifacts import (
+    build_verified_graph_frame,
+    compile_verified_graph_fragment_from_frame,
     merge_verified_graph_fragments,
     run_stage_11_merge,
+    sanitize_verified_graph_fragment,
 )
 from scripts.auto_research_runner.stages import run_stage_11
 
@@ -15,7 +18,16 @@ from scripts.auto_research_runner.stages import run_stage_11
 def _write_fragment(run, arxiv_id, nodes, edges):
     path = run / "11_verified_graph" / "fragments" / f"{arxiv_id}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
+    for index, edge in enumerate(edges, start=1):
+        if isinstance(edge, dict) and "claim_id" not in edge:
+            edge["claim_id"] = f"c{index:03d}"
     path.write_text(json.dumps({"arxiv_id": arxiv_id, "nodes": nodes, "edges": edges}))
+
+
+def _write_weak_fragment(run, arxiv_id, nodes, edges=None):
+    path = run / "05_weak_graph" / "fragments" / f"{arxiv_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"arxiv_id": arxiv_id, "nodes": nodes, "edges": edges or []}))
 
 
 def _write_evidence_sources(run, arxiv_id, sources):
@@ -211,6 +223,263 @@ def test_merge_verified_graph_fragments_rejects_source_not_in_verified_evidence(
 
     with pytest.raises(ValueError, match="edge source not found in verified evidence"):
         merge_verified_graph_fragments(run)
+
+
+def test_sanitize_verified_graph_fragment_drops_only_invalid_edges(tmp_path):
+    run = tmp_path / "run"
+    _write_evidence_sources(run, "1.1", [("s.01", [1, 2])])
+    _write_fragment(
+        run,
+        "1.1",
+        [
+            {"id": "1.1", "type": "Paper"},
+            {"id": "good", "type": "Method"},
+            {"id": "bad", "type": "Method"},
+        ],
+        [
+            {
+                "src": "1.1",
+                "dst": "good",
+                "type": "INTRODUCES",
+                "confidence": "verified",
+                "source_node_id": "s.01",
+                "source_lines": [1, 2],
+            },
+            {
+                "src": "1.1",
+                "dst": "bad",
+                "type": "INTRODUCES",
+                "confidence": "verified",
+                "source_node_id": "s.99",
+                "source_lines": [9],
+            },
+        ],
+    )
+
+    assert sanitize_verified_graph_fragment(run, "1.1") == 1
+
+    graph = merge_verified_graph_fragments(run)
+    assert {node["id"] for node in graph["nodes"]} == {"1.1", "good"}
+    assert [(edge["src"], edge["dst"]) for edge in graph["edges"]] == [("1.1", "good")]
+
+
+def test_sanitize_verified_graph_fragment_writes_repair_event(tmp_path):
+    run = tmp_path / "run"
+    _write_evidence_sources(run, "1.1", [("s.01", [1, 2])])
+    _write_fragment(
+        run,
+        "1.1",
+        [
+            {"id": "1.1", "type": "Paper"},
+            {"id": "good", "type": "Method"},
+            {"id": "bad", "type": "Method"},
+        ],
+        [
+            {
+                "src": "1.1",
+                "dst": "good",
+                "type": "INTRODUCES",
+                "confidence": "verified",
+                "source_node_id": "s.01",
+                "source_lines": [1, 2],
+            },
+            {
+                "src": "1.1",
+                "dst": "bad",
+                "type": "INTRODUCES",
+                "confidence": "verified",
+                "source_node_id": "s.99",
+                "source_lines": [9],
+            },
+        ],
+    )
+
+    sanitize_verified_graph_fragment(run, "1.1")
+
+    event_path = run / "run_control" / "repairs" / "stage_11" / "repair_events.jsonl"
+    events = [json.loads(line) for line in event_path.read_text().splitlines()]
+    assert events[-1]["outcome"] == "attempted"
+    assert events[-1]["artifact"] == "11_verified_graph/fragments/1.1.json"
+    assert events[-1]["issues"][0]["kind"] == "dropped_invalid_verified_edge"
+    raw = json.loads((run / events[-1]["raw_artifact"]).read_text())
+    assert len(raw["edges"]) == 2
+
+
+def test_sanitize_verified_graph_fragment_removes_dangling_invalid_nodes(tmp_path):
+    run = tmp_path / "run"
+    _write_evidence_sources(run, "1.1", [("s.01", [1, 2])])
+    _write_fragment(
+        run,
+        "1.1",
+        [
+            {"id": "1.1", "type": "Paper"},
+            {"id": "bad", "type": "Method"},
+        ],
+        [{
+            "src": "1.1",
+            "dst": "bad",
+            "type": "INTRODUCES",
+            "confidence": "verified",
+            "source_node_id": "s.99",
+            "source_lines": [9],
+        }],
+    )
+
+    assert sanitize_verified_graph_fragment(run, "1.1") == 1
+
+    graph = merge_verified_graph_fragments(run)
+    assert graph["nodes"] == [{"id": "1.1", "type": "Paper"}]
+    assert graph["edges"] == []
+
+
+def test_build_verified_graph_frame_writes_claim_ids_and_allowed_nodes(tmp_path):
+    run = tmp_path / "run"
+    _write_evidence_sources(run, "1.1", [("s.01", [1, 1])])
+    _write_weak_fragment(
+        run,
+        "1.1",
+        [{"id": "1.1", "type": "Paper"}, {"id": "method", "type": "Method"}],
+        [],
+    )
+
+    frame_path = build_verified_graph_frame(run, "1.1")
+
+    frame = json.loads(frame_path.read_text())
+    assert frame["arxiv_id"] == "1.1"
+    assert frame["claims"] == [{
+        "claim": "",
+        "claim_id": "c001",
+        "claim_type": "",
+        "source_lines": [1, 1],
+        "source_node_id": "s.01",
+    }]
+    assert {node["id"] for node in frame["allowed_nodes"]} == {"1.1", "method"}
+    assert "USES" in frame["allowed_edge_types"]
+
+
+def test_compile_verified_graph_fragment_from_frame_copies_claim_source(tmp_path):
+    run = tmp_path / "run"
+    _write_evidence_sources(run, "1.1", [("s.01", [1, 1])])
+    frame_path = build_verified_graph_frame(run, "1.1")
+    frame = json.loads(frame_path.read_text())
+    frame["allowed_nodes"].append({"id": "method", "type": "Method", "display": "method"})
+    frame_path.write_text(json.dumps(frame))
+    _write_fragment(
+        run,
+        "1.1",
+        [{"id": "1.1", "type": "Paper"}, {"id": "method", "type": "Method"}],
+        [{
+            "claim_id": "c001",
+            "src": "1.1",
+            "dst": "method",
+            "type": "USES",
+            "confidence": "verified",
+            "source_node_id": "wrong",
+            "source_lines": [9, 9],
+        }],
+    )
+
+    assert compile_verified_graph_fragment_from_frame(run, "1.1") == 1
+
+    graph = merge_verified_graph_fragments(run)
+    assert graph["edges"] == [{
+        "claim_id": "c001",
+        "confidence": "verified",
+        "dst": "method",
+        "source_lines": [1, 1],
+        "source_node_id": "s.01",
+        "src": "1.1",
+        "type": "USES",
+    }]
+
+
+def test_compile_verified_graph_fragment_reports_dropped_claim_id_edges(tmp_path):
+    run = tmp_path / "run"
+    _write_stage11_eligible(run, "1.1")
+    _write_weak_fragment(
+        run,
+        "1.1",
+        [{"id": "1.1", "type": "Paper"}, {"id": "method", "type": "Method"}],
+    )
+    build_verified_graph_frame(run, "1.1")
+    _write_fragment(
+        run,
+        "1.1",
+        [{"id": "1.1", "type": "Paper"}],
+        [
+            {
+                "claim_id": "c001",
+                "src": "1.1",
+                "dst": "method",
+                "type": "USES",
+                "confidence": "verified",
+            },
+            {
+                "claim_id": "missing",
+                "src": "1.1",
+                "dst": "method",
+                "type": "USES",
+                "confidence": "verified",
+            },
+        ],
+    )
+
+    compile_verified_graph_fragment_from_frame(run, "1.1")
+
+    event_path = run / "run_control" / "repairs" / "stage_11" / "repair_events.jsonl"
+    events = [json.loads(line) for line in event_path.read_text().splitlines()]
+    assert events[-1]["outcome"] == "accepted"
+    assert events[-1]["issues"][0]["kind"] == "claim_id_compile_dropped_edge"
+    raw = json.loads((run / events[-1]["raw_artifact"]).read_text())
+    assert len(raw["edges"]) == 2
+
+
+def test_compile_verified_graph_fragment_drops_direct_grounded_edges_without_claim_id(tmp_path):
+    run = tmp_path / "run"
+    _write_stage11_eligible(run, "1.1")
+    _write_weak_fragment(
+        run,
+        "1.1",
+        [{"id": "1.1", "type": "Paper"}, {"id": "method", "type": "Method"}],
+    )
+    build_verified_graph_frame(run, "1.1")
+    _write_fragment(
+        run,
+        "1.1",
+        [{"id": "1.1", "type": "Paper"}, {"id": "method", "type": "Method"}],
+        [
+            {
+                "claim_id": None,
+                "src": "1.1",
+                "dst": "method",
+                "type": "USES",
+                "confidence": "verified",
+                "source_node_id": "s.01",
+                "source_lines": [1, 1],
+            }
+        ],
+    )
+
+    assert compile_verified_graph_fragment_from_frame(run, "1.1") == 0
+
+    fragment = json.loads((run / "11_verified_graph" / "fragments" / "1.1.json").read_text())
+    assert fragment["edges"][0]["claim_id"] is None
+    with pytest.raises(ValueError, match="edge missing claim_id"):
+        merge_verified_graph_fragments(run, arxiv_ids=["1.1"])
+
+
+def test_verified_graph_fragment_retry_feedback_handles_malformed_fragment(tmp_path):
+    from scripts.auto_research_runner.artifacts import verified_graph_fragment_retry_feedback
+
+    run = tmp_path / "run"
+    fragment_path = run / "11_verified_graph" / "fragments" / "1.1.json"
+    fragment_path.parent.mkdir(parents=True)
+    fragment_path.write_text('{"edges": [')
+
+    feedback = verified_graph_fragment_retry_feedback(run, "1.1")
+
+    assert "Previous Stage 11 fragment failed validation" in feedback
+    assert "fragment_json_error" in feedback
 
 
 def test_merge_verified_graph_fragments_rejects_missing_verified_evidence(tmp_path):
@@ -420,6 +689,11 @@ def test_run_stage_11_rebuilds_stale_global_graph_when_eligibility_changes(tmp_p
 def test_run_stage_11_rebuilds_fragment_when_verified_evidence_changes(tmp_path):
     run = tmp_path / "run"
     _write_stage11_eligible(run, "1.1")
+    _write_weak_fragment(
+        run,
+        "1.1",
+        [{"id": "1.1", "type": "Paper"}, {"id": "new-node", "type": "Method"}],
+    )
     _write_fragment(
         run,
         "1.1",
@@ -617,6 +891,157 @@ def test_run_stage_11_refreshes_all_eligible_fragments(tmp_path):
     assert (run / "11_verified_graph" / "global_graph.json").exists()
 
 
+def test_run_stage_11_retries_fragment_with_unverified_edge_source(tmp_path):
+    run = tmp_path / "run"
+    _write_stage11_eligible(run, "1.1")
+    _write_weak_fragment(
+        run,
+        "1.1",
+        [
+            {"id": "1.1", "type": "Paper"},
+            {"id": "bad", "type": "Method"},
+            {"id": "good", "type": "Method"},
+        ],
+    )
+    calls = []
+
+    def fake_run_shards(run_dir, specs, max_retries=1, **kwargs):
+        calls.append([spec.shard_id for spec in specs])
+        assert len(specs) == 1
+        assert kwargs.get("force") is True
+        if len(calls) == 1:
+            _write_fragment(
+                run_dir,
+                "1.1",
+                [{"id": "1.1", "type": "Paper"}, {"id": "bad", "type": "Method"}],
+                [{
+                    "claim_id": None,
+                    "src": "1.1",
+                    "dst": "bad",
+                    "type": "USES",
+                    "confidence": "verified",
+                    "source_node_id": "s.01",
+                    "source_lines": [9, 9],
+                }],
+            )
+            return
+        _write_fragment(
+            run_dir,
+            "1.1",
+            [{"id": "1.1", "type": "Paper"}, {"id": "good", "type": "Method"}],
+            [{
+                "src": "1.1",
+                "dst": "good",
+                "type": "USES",
+                "confidence": "verified",
+                "source_node_id": "s.01",
+                "source_lines": [1, 1],
+            }],
+        )
+
+    with patch("scripts.auto_research_runner.stages.run_shards", side_effect=fake_run_shards):
+        run_stage_11(run)
+
+    assert calls == [["vgraph-resume-1.1"], ["vgraph-resume-1.1"]]
+    graph = json.loads((run / "11_verified_graph" / "global_graph.json").read_text())
+    assert {node["id"] for node in graph["nodes"]} == {"1.1", "good"}
+    assert "11,recovery,1 invalid verified graph fragment(s) retried" in (
+        run / "run_log.csv"
+    ).read_text()
+
+
+def test_run_stage_11_retry_prompt_includes_invalid_edges_and_allowed_sources(tmp_path):
+    run = tmp_path / "run"
+    _write_stage11_eligible(run, "1.1")
+    _write_weak_fragment(
+        run,
+        "1.1",
+        [
+            {"id": "1.1", "type": "Paper"},
+            {"id": "bad", "type": "Method"},
+            {"id": "good", "type": "Method"},
+        ],
+    )
+    calls = []
+
+    def fake_run_shards(run_dir, specs, max_retries=1, **kwargs):
+        calls.append(specs[0].prompt)
+        if len(calls) == 1:
+            _write_fragment(
+                run_dir,
+                "1.1",
+                [{"id": "1.1", "type": "Paper"}, {"id": "bad", "type": "Method"}],
+                [{
+                    "claim_id": None,
+                    "src": "1.1",
+                    "dst": "bad",
+                    "type": "USES",
+                    "confidence": "verified",
+                    "source_node_id": "s.01",
+                    "source_lines": [9, 9],
+                }],
+            )
+            return
+        assert "Previous Stage 11 fragment failed validation" in specs[0].prompt
+        assert '"source_node_id": "s.01"' in specs[0].prompt
+        assert '"source_lines": [9, 9]' in specs[0].prompt
+        assert '"source_lines": [1, 1]' in specs[0].prompt
+        assert "copy one exact source_node_id + source_lines pair" in specs[0].prompt
+        _write_fragment(
+            run_dir,
+            "1.1",
+            [{"id": "1.1", "type": "Paper"}, {"id": "good", "type": "Method"}],
+            [{
+                "src": "1.1",
+                "dst": "good",
+                "type": "USES",
+                "confidence": "verified",
+                "source_node_id": "s.01",
+                "source_lines": [1, 1],
+            }],
+        )
+
+    with patch("scripts.auto_research_runner.stages.run_shards", side_effect=fake_run_shards):
+        run_stage_11(run)
+
+    assert len(calls) == 2
+
+
+def test_run_stage_11_compiles_claim_id_fragment_before_validation(tmp_path):
+    run = tmp_path / "run"
+    _write_stage11_eligible(run, "1.1")
+    _write_weak_fragment(
+        run,
+        "1.1",
+        [{"id": "1.1", "type": "Paper"}, {"id": "method", "type": "Method"}],
+    )
+    prompts = []
+
+    def fake_run_shards(run_dir, specs, max_retries=1, **kwargs):
+        prompts.append(specs[0].prompt)
+        assert "11_verified_graph/frames/1.1.json" in specs[0].prompt
+        _write_fragment(
+            run_dir,
+            "1.1",
+            [{"id": "1.1", "type": "Paper"}, {"id": "method", "type": "Method"}],
+            [{
+                "claim_id": "c001",
+                "src": "1.1",
+                "dst": "method",
+                "type": "USES",
+                "confidence": "verified",
+            }],
+        )
+
+    with patch("scripts.auto_research_runner.stages.run_shards", side_effect=fake_run_shards):
+        run_stage_11(run)
+
+    assert len(prompts) == 1
+    graph = json.loads((run / "11_verified_graph" / "global_graph.json").read_text())
+    assert graph["edges"][0]["source_node_id"] == "s.01"
+    assert graph["edges"][0]["source_lines"] == [1, 1]
+
+
 def test_run_stage_11_uses_facade_merge_function(tmp_path):
     run = tmp_path / "run"
     _write_stage11_eligible(run, "1.1")
@@ -721,10 +1146,11 @@ def test_run_stage_11_uses_flat_fragment_paths_for_old_arxiv_ids(tmp_path):
         path.write_text(
             json.dumps(
                 {
-                    "arxiv_id": "hep-th/9901001",
-                    "nodes": [{"id": "hep-th/9901001", "type": "Paper"}],
-                    "edges": [{
-                        "src": "hep-th/9901001",
+                        "arxiv_id": "hep-th/9901001",
+                        "nodes": [{"id": "hep-th/9901001", "type": "Paper"}],
+                        "edges": [{
+                            "claim_id": "c001",
+                            "src": "hep-th/9901001",
                         "dst": "hep-th/9901001",
                         "type": "USES",
                         "confidence": "verified",

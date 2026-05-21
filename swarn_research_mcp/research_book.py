@@ -8,6 +8,13 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from scripts.auto_research_runner.paper_roles import (
+    is_context_only_paper,
+    is_context_only_survey_review_title,
+    is_placeholder_method_id,
+    resolve_paper_metadata,
+)
+
 
 BOOK_FILE_BY_ID = {
     "preface": "00_preface.md",
@@ -72,6 +79,7 @@ PLACEHOLDER_PATTERNS = re.compile(
     r"this file is regenerated deterministically|too thin|^none\.$)\b",
     re.IGNORECASE,
 )
+LEADING_ARTICLE_PATTERN = re.compile(r"^(?:a|an|the)-", re.IGNORECASE)
 
 
 def _load_json(path: Path) -> Any:
@@ -82,6 +90,66 @@ def _load_json(path: Path) -> Any:
 def _write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _slugify_method_id(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    slug = LEADING_ARTICLE_PATTERN.sub("", slug)
+    return slug[:80].strip("-") or "method"
+
+
+def _safe_method_id_base(value: str) -> str:
+    base = _slugify_method_id(value)
+    if re.match(r"^\d", base):
+        base = f"method-{base}"
+    if SECTION_HEADING_METHOD_ID_PATTERNS.search(base):
+        base = "method"
+    return base
+
+
+def _normalize_method_ids(outline: dict[str, Any]) -> dict[str, Any]:
+    methods = outline.get("methods")
+    if not isinstance(methods, list):
+        return outline
+    existing_ids = {
+        str(method.get("id") or "")
+        for method in methods
+        if isinstance(method, dict) and not SECTION_HEADING_METHOD_ID_PATTERNS.search(str(method.get("id") or ""))
+    }
+    rename: dict[str, str] = {}
+    used_ids = set(existing_ids)
+    for method in methods:
+        if not isinstance(method, dict):
+            continue
+        old_id = str(method.get("id") or "").strip()
+        if not old_id or not SECTION_HEADING_METHOD_ID_PATTERNS.search(old_id):
+            continue
+        base = _safe_method_id_base(str(method.get("title") or method.get("arxiv_id") or "method"))
+        new_id = base
+        suffix = 2
+        while new_id in used_ids or SECTION_HEADING_METHOD_ID_PATTERNS.search(new_id):
+            new_id = f"{base}-{suffix}"
+            suffix += 1
+        rename[old_id] = new_id
+        used_ids.add(new_id)
+        method["id"] = new_id
+
+    if not rename:
+        return outline
+
+    for family in outline.get("families") or []:
+        if not isinstance(family, dict):
+            continue
+        method_ids = family.get("method_ids")
+        if isinstance(method_ids, list):
+            family["method_ids"] = [rename.get(str(method_id), method_id) for method_id in method_ids]
+    for method in methods:
+        if not isinstance(method, dict):
+            continue
+        neighbor_ids = method.get("neighbor_method_ids")
+        if isinstance(neighbor_ids, list):
+            method["neighbor_method_ids"] = [rename.get(str(method_id), method_id) for method_id in neighbor_ids]
+    return outline
 
 
 def _promoted_entries(run_dir: Path) -> list[dict[str, Any]]:
@@ -434,6 +502,57 @@ def collect_excluded(run_dir: Path | str) -> list[dict[str, str]]:
     return offenders
 
 
+def collect_context_only_methods(run_dir: Path | str, outline: dict[str, Any] | None = None) -> list[dict[str, str]]:
+    run_path = Path(run_dir)
+    outline = outline or _outline(run_path)
+    rows: list[dict[str, str]] = []
+    for method in outline.get("methods", []) or []:
+        if not isinstance(method, dict):
+            continue
+        method_id = str(method.get("id") or "").strip()
+        arxiv_id = str(method.get("arxiv_id") or "").strip()
+        title = str(method.get("title") or "").strip()
+        context_only = False
+        if arxiv_id:
+            context_only = is_context_only_paper(run_path, arxiv_id)
+            if not context_only:
+                metadata_title = str(resolve_paper_metadata(run_path, arxiv_id).get("title") or "").strip()
+                context_only = is_context_only_survey_review_title(metadata_title)
+        if not context_only:
+            context_only = is_context_only_survey_review_title(title)
+        if context_only and method_id:
+            rows.append(
+                {
+                    "type": "methods",
+                    "id": method_id,
+                    "status": "excluded_context_only_survey_review",
+                    "reason": "survey/review paper is retained as context but excluded from final method pages",
+                }
+            )
+    return rows
+
+
+def _assert_no_placeholder_method_ids_for_publication(
+    outline: dict[str, Any],
+    *,
+    excluded_method_ids: set[str],
+) -> None:
+    blockers = [
+        str(method.get("id") or "")
+        for method in outline.get("methods", []) or []
+        if isinstance(method, dict)
+        and str(method.get("id") or "")
+        and str(method.get("id") or "") not in excluded_method_ids
+        and is_placeholder_method_id(str(method.get("id") or ""))
+    ]
+    if blockers:
+        raise RuntimeError(
+            "Stage 18 cannot publish placeholder method id(s): "
+            f"{blockers[:10]}. Rerun from Stage 12 or Stage 13 so the outline and "
+            "chapter artifacts use canonical method IDs."
+        )
+
+
 def write_needs_review(run_dir: Path | str, offenders: list[dict[str, str]]) -> None:
     """Emit a review file for quarantined chapters and citation issues."""
     out = Path(run_dir) / "16_book" / "NEEDS_REVIEW.md"
@@ -477,7 +596,17 @@ def _validate_parts(outline: dict[str, Any], families: list[dict[str, Any]]) -> 
         if isinstance(parts, list)
         else []
     )
-    if not isinstance(parts, list) or not (2 <= len(normal_parts) <= 5):
+    family_ids = {f.get("id") for f in families if f.get("id")}
+    normal_family_ids = {fid for fid in family_ids if fid != STANDALONE_GROUP_ID}
+    standalone_only_book = (
+        isinstance(parts, list)
+        and len(normal_parts) == 0
+        and len(parts) == 1
+        and isinstance(parts[0], dict)
+        and parts[0].get("id") == STANDALONE_PART_ID
+        and not normal_family_ids
+    )
+    if not isinstance(parts, list) or not (standalone_only_book or 2 <= len(normal_parts) <= 5):
         n = len(normal_parts) if isinstance(parts, list) else "non-list"
         issues.append(
             {
@@ -487,7 +616,6 @@ def _validate_parts(outline: dict[str, Any], families: list[dict[str, Any]]) -> 
             }
         )
         return issues
-    family_ids = {f.get("id") for f in families if f.get("id")}
     seen_in: dict[str, str] = {}
     for part in parts:
         pid = part.get("id", "")
@@ -963,6 +1091,7 @@ def _prune_invalid_outline_links(outline: dict[str, Any]) -> dict[str, Any]:
 def merge_singletons(outline: dict[str, Any]) -> dict[str, Any]:
     """Stage 12.5 post-processor for singleton families."""
     out = _copy.deepcopy(outline)
+    out = _normalize_method_ids(out)
     families: list[dict[str, Any]] = out["families"]
     methods: list[dict[str, Any]] = out["methods"]
     method_by_id = {m["id"]: m for m in methods}
@@ -1317,8 +1446,14 @@ def generate_book_artifacts(run_dir: Path | str) -> dict[str, int]:
     outline = _outline(run_path)
     assert_no_singletons(outline)
     offenders = collect_excluded(run_path)
+    context_only = collect_context_only_methods(run_path, outline)
+    offenders = offenders + context_only
     excluded_family_method_ids = {o["id"] for o in offenders if o["type"] in ("families", "methods")}
     excluded_book_ids = {o["id"] for o in offenders if o["type"] == "book"}
+    _assert_no_placeholder_method_ids_for_publication(
+        outline,
+        excluded_method_ids={o["id"] for o in offenders if o["type"] == "methods"},
+    )
 
     taxonomy_path = run_path / "14_chapters" / "book" / BOOK_FILE_BY_ID["method_taxonomy"]
     _write_markdown_preserving_front_matter(

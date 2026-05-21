@@ -210,6 +210,17 @@ class SemanticScholarServiceTest(unittest.IsolatedAsyncioTestCase):
         )
         mock_http_post.assert_not_called()
 
+    @patch("swarn_research_mcp.services.semantic_scholar.http_get")
+    async def test_paper_relevance_search_caps_limit_at_api_max(self, mock_http_get):
+        mock_http_get.return_value = {"data": []}
+
+        await semantic_scholar.paper_relevance_search(
+            query="retrieval augmented generation",
+            limit=250,
+        )
+
+        self.assertEqual(mock_http_get.call_args.kwargs["params"]["limit"], 100)
+
     @patch("swarn_research_mcp.services.semantic_scholar.http_post")
     @patch("swarn_research_mcp.services.semantic_scholar.http_get")
     async def test_paper_relevance_search_returns_arxiv_abstract_mapping(self, mock_http_get, mock_http_post):
@@ -921,6 +932,49 @@ class SemanticScholarServiceTest(unittest.IsolatedAsyncioTestCase):
         )
 
     @patch("swarn_research_mcp.services.semantic_scholar.http_post")
+    def test_fetch_papers_batch_by_ids_caps_configured_chunk_size(self, mock_http_post):
+        paper_ids = [f"paper-{index}" for index in range(501)]
+        mock_http_post.side_effect = [
+            [{"paperId": paper_id} for paper_id in paper_ids[:500]],
+            [{"paperId": paper_ids[500]}],
+        ]
+
+        with patch.object(semantic_scholar, "SEMANTIC_SCHOLAR_LINKED_BATCH_LIMIT", 999):
+            semantic_scholar._fetch_papers_batch_by_ids(paper_ids)
+
+        self.assertEqual(mock_http_post.call_count, 2)
+        self.assertEqual(len(mock_http_post.call_args_list[0].args[1]["ids"]), 500)
+        self.assertEqual(len(mock_http_post.call_args_list[1].args[1]["ids"]), 1)
+
+    @patch("swarn_research_mcp.services.semantic_scholar.http_post")
+    def test_paper_metadata_simple_batch_chunks_at_api_max(self, mock_http_post):
+        arxiv_ids = [f"2501.{index:05d}" for index in range(501)]
+        mock_http_post.side_effect = [
+            [
+                {
+                    "paperId": f"paper-{index}",
+                    "externalIds": {"ArXiv": arxiv_id},
+                    "title": f"Paper {index}",
+                }
+                for index, arxiv_id in enumerate(arxiv_ids[:500])
+            ],
+            [
+                {
+                    "paperId": "paper-500",
+                    "externalIds": {"ArXiv": arxiv_ids[500]},
+                    "title": "Paper 500",
+                }
+            ],
+        ]
+
+        result = semantic_scholar._paper_metadata_simple_batch_sync(arxiv_ids)
+
+        self.assertEqual(len(result), 501)
+        self.assertEqual(mock_http_post.call_count, 2)
+        self.assertEqual(len(mock_http_post.call_args_list[0].args[1]["ids"]), 500)
+        self.assertEqual(len(mock_http_post.call_args_list[1].args[1]["ids"]), 1)
+
+    @patch("swarn_research_mcp.services.semantic_scholar.http_post")
     def test_fetch_papers_batch_by_ids_splits_bad_request_chunks(self, mock_http_post):
         response = type("Response", (), {"status_code": 400})()
         mock_http_post.side_effect = [
@@ -1078,6 +1132,17 @@ class SemanticScholarServiceTest(unittest.IsolatedAsyncioTestCase):
             headers=semantic_scholar.HEADERS,
             timeout=semantic_scholar.SEMANTIC_SCHOLAR_TIMEOUT,
         )
+
+    @patch("swarn_research_mcp.services.semantic_scholar.http_post")
+    async def test_recommendations_multi_caps_limit_at_api_max(self, mock_http_post):
+        mock_http_post.return_value = {"recommendedPapers": []}
+
+        await semantic_scholar.recommendations_multi(
+            postitive_ids=["649def34f8be52c8b66281af98ae884c09aef38b"],
+            limit=800,
+        )
+
+        self.assertEqual(mock_http_post.call_args.kwargs["params"]["limit"], 500)
 
     @patch("swarn_research_mcp.services.semantic_scholar.paper_relevance_search", new_callable=AsyncMock)
     async def test_transformer_language_models_example_uses_expected_defaults(self, mock_search):

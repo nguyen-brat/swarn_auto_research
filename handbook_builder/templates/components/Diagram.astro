@@ -1,0 +1,38 @@
+---
+interface Props { src: string }
+const { src } = Astro.props as Props;
+
+// Eagerly load every .mmd file under src/assets/diagrams/ as raw strings at build time.
+const allDiagrams = import.meta.glob('/src/assets/diagrams/**/*.mmd', { as: 'raw', eager: true }) as Record<string, string>;
+
+// Normalize `src` (e.g. `../../assets/diagrams/methods/maskgct.mmd`) to the absolute
+// key form used by Vite (`/src/assets/diagrams/methods/maskgct.mmd`).
+function resolveKey(s: string): string {
+  const stripped = s.replace(/^\.\.\//g, '').replace(/^\.\//, '');
+  if (stripped.startsWith('src/')) return '/' + stripped;
+  // Take everything after `assets/diagrams/`.
+  const idx = stripped.indexOf('assets/diagrams/');
+  if (idx >= 0) return '/src/' + stripped.slice(idx);
+  return '/src/' + stripped;
+}
+
+const key = resolveKey(src);
+const mermaidSource = allDiagrams[key] ?? `graph TD; missing["diagram not found: ${src}"]`;
+---
+<figure class="diagram">
+  <pre class="mermaid">{mermaidSource}</pre>
+</figure>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+</script>
+
+<style>
+  .diagram {
+    margin: 1.5rem 0;
+    padding: 1rem;
+    background: rgba(255,255,255,0.02);
+    border-radius: 6px;
+  }
+</style>
